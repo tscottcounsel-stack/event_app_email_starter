@@ -32,10 +32,13 @@ configure_mappers()  # finalize mappings before including routers
 import app.routers.vendors as vendors
 import app.routers.events as events
 import app.routers.applications as applications
+import app.routers.seed as seed
 
 app.include_router(vendors.router)
 app.include_router(events.router)
 app.include_router(applications.router)
+app.include_router(seed.router)
+
 
 # ── Global error handling (dev-friendly JSON) ─────────────────────────────────
 @app.exception_handler(SQLAlchemyError)

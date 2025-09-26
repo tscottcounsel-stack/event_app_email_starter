@@ -1,74 +1,54 @@
 from __future__ import annotations
-
+from typing import Optional, List
 from datetime import datetime
-from enum import Enum
-from typing import Optional
+from pydantic import BaseModel, ConfigDict
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-# -----------------------
-# Shared / Enums
-# -----------------------
-
-class ApplicationStatus(str, Enum):
-    submitted = "submitted"   # DB default
-    pending   = "pending"
-    approved  = "approved"
-    rejected  = "rejected"
-
-
-# -----------------------
-# Vendor
-# -----------------------
+# ── Vendor ─────────────────────────────────────────────────────────────────────
+class VendorBrief(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    category: Optional[str] = None
 
 class VendorBase(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     name: str
     category: Optional[str] = None
     phone: Optional[str] = None
     description: Optional[str] = None
 
-
 class VendorCreate(VendorBase):
     pass
 
-
 class VendorUpdate(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     name: Optional[str] = None
     category: Optional[str] = None
     phone: Optional[str] = None
     description: Optional[str] = None
 
-
 class VendorRead(VendorBase):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
-    # Include these only if your table has them mapped on the model;
-    # keep Optional to tolerate NULLs.
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-
-# -----------------------
-# Event
-# -----------------------
-
+# ── Event ──────────────────────────────────────────────────────────────────────
 class EventBase(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     title: str
-    organizer_id: int                # FK to users.id
-    date: datetime                   # timestamp without time zone
+    organizer_id: int
+    date: datetime
     location: str
     description: Optional[str] = None
     diagram_url: Optional[str] = None
     layout_json: Optional[str] = None
 
-
 class EventCreate(EventBase):
     pass
 
-
 class EventUpdate(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    # all optional for PATCH
     title: Optional[str] = None
     organizer_id: Optional[int] = None
     date: Optional[datetime] = None
@@ -77,58 +57,31 @@ class EventUpdate(BaseModel):
     diagram_url: Optional[str] = None
     layout_json: Optional[str] = None
 
-
 class EventRead(EventBase):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-
-# -----------------------
-# Application
-# -----------------------
-
+# ── Application ────────────────────────────────────────────────────────────────
 class ApplicationBase(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     event_id: int
     vendor_id: int
-    # Non-negative cents (e.g., 25000 == $250.00)
-    price_cents: int = Field(ge=0)
-    status: ApplicationStatus = ApplicationStatus.submitted
+    price_cents: Optional[int] = None
+    status: Optional[str] = "submitted"
     notes: Optional[str] = None
-
 
 class ApplicationCreate(ApplicationBase):
     pass
 
-
 class ApplicationUpdate(BaseModel):
-    price_cents: Optional[int] = Field(default=None, ge=0)
-    status: Optional[ApplicationStatus] = None
+    model_config = ConfigDict(from_attributes=True)
+    price_cents: Optional[int] = None
+    status: Optional[str] = None
     notes: Optional[str] = None
 
-
 class ApplicationRead(ApplicationBase):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-
-
-__all__ = [
-    # Vendors
-    "VendorCreate",
-    "VendorUpdate",
-    "VendorRead",
-    # Events
-    "EventCreate",
-    "EventUpdate",
-    "EventRead",
-    # Applications
-    "ApplicationCreate",
-    "ApplicationUpdate",
-    "ApplicationRead",
-    "ApplicationStatus",
-]
+    vendor: Optional[VendorBrief] = None  # included in list/detail responses
