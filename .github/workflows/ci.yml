@@ -6,6 +6,25 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: eventdb
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/eventdb
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,7 +36,28 @@ jobs:
         run: |
           python -m pip install -U pip wheel setuptools
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install fastapi uvicorn "SQLAlchemy>=2" alembic psycopg2-binary python-dotenv pydantic
+          pip install fastapi uvicorn "SQLAlchemy>=2" alembic psycopg2-binary python-dotenv pydantic ruff
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U postgres && break
+            sleep 1
+          done
+
+      - name: Alembic upgrade
+        run: |
+          alembic upgrade head
+
+      - name: DB smoke
+        run: |
+          python - <<'PY'
+          from app.db import engine
+          from sqlalchemy import text
+          with engine.connect() as c:
+              c.execute(text("select 1"))
+          print("DB OK")
+          PY
 
       - name: Import smoke
         run: |
@@ -26,7 +66,6 @@ jobs:
           print("Imports OK")
           PY
 
-      - name: Lint (quick)
+      - name: Lint quick
         run: |
-          python -m pip install ruff
           ruff check --select F,E --ignore E501 .
