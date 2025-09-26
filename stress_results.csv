@@ -1,0 +1,3 @@
+"FlowId","UserId","OrganizerId","VendorId","EventId","ApplicationId","Errors","DurationSeconds","Mode","Timestamp","BaseUrl"
+"1","46","43","46","47","38","0","1.33","Loop","9/3/2025 9:28:26 AM","http://127.0.0.1:8000"
+"2","47","44","47","48","39","0","0.15","Loop","9/3/2025 9:28:26 AM","http://127.0.0.1:8000"

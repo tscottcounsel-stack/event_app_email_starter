@@ -1,0 +1,39 @@
+﻿# OS
+Thumbs.db
+.DS_Store
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+venv/
+ea1/
+C:/ea1/
+C:/venvs/
+C:/dev/venvs/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.*
+*.sqlite
+
+# Alembic
+alembic/versions/__pycache__/
+# (keep migration files themselves!)
+# If you generated junk, uncomment the next line to ignore everything in versions:
+# alembic/versions/*
+
+# Node (if any frontend later)
+node_modules/
+
+# IDE
+.vscode/
+.idea/

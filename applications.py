@@ -1,0 +1,83 @@
+﻿from backend.deps import get_current_user
+
+from backend.deps import current_user
+from backend.deps import get_current_user
+# backend/routes/applications.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime
+from typing import List
+
+from backend.config.database import get_db
+from backend.models import models, schemas
+from backend.security.auth import get_current_user
+
+router = APIRouter(prefix="/applications", tags=["applications"])
+
+
+# ----------------------
+# Create application
+# ----------------------
+@router.post("/", response_model=schemas.ApplicationOut)
+def create_application(app: schemas.ApplicationCreate, db: Session = Depends(get_db)):
+    db_app = models.Application(
+        event_id=app.event_id,
+        vendor_id=app.vendor_id,
+        message=app.message,
+        status="pending",
+        created_at=datetime.utcnow(),
+    )
+    db.add(db_app)
+    db.commit()
+    db.refresh(db_app)
+    return db_app
+
+
+# ----------------------
+# List applications for an event (organizer only)
+# ----------------------
+@router.get("/event/{event_id}", response_model=List[schemas.ApplicationOut])
+def list_event_applications(event_id: int, db: Session = Depends(get_db)):
+    return db.query(models.Application).filter(models.Application.event_id == event_id).all()
+
+
+# ----------------------
+# Update application status (organizer only)
+# ----------------------
+@router.put("/{application_id}", response_model=schemas.ApplicationOut)
+def update_application_status(application_id: int, status: str, db: Session = Depends(get_db)):
+    app = db.query(models.Application).filter(models.Application.id == application_id).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    if status not in ["approved", "declined"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    app.status = status
+    db.commit()
+    db.refresh(app)
+    return app
+
+
+# ----------------------
+# Vendor: list their own applications
+# ----------------------
+@router.get("/mine", response_model=List[schemas.ApplicationOut])
+def list_my_applications(db: Session = Depends(get_db), current=Depends(current_user)):
+    return db.query(models.Application).filter(models.Application.vendor_id == current.id).all()
+
+
+# ----------------------
+# Delete application (new ✅)
+# ----------------------
+@router.delete("/{application_id}")
+def delete_application(application_id: int, db: Session = Depends(get_db)):
+    app = db.query(models.Application).filter(models.Application.id == application_id).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    db.delete(app)
+    db.commit()
+    return {"message": f"Application {application_id} deleted successfully"}
+
+

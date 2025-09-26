@@ -1,0 +1,116 @@
+from backend.deps import get_current_user
+# backend/routes/applications.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List
+from datetime import datetime
+
+from backend.models import models, schemas
+from backend.config.database import get_db
+from backend.security.auth import get_current_user
+
+router = APIRouter(prefix="/applications", tags=["applications"])
+
+# ----------------------------
+# Vendor applies to an event
+# ----------------------------
+@router.post("/", response_model=schemas.ApplicationOut)
+def create_application(
+    app: schemas.ApplicationCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.role != models.UserRole.vendor:
+        raise HTTPException(status_code=403, detail="Only vendors can apply to events")
+
+    # check if event exists
+    event = db.query(models.Event).filter(models.Event.id == app.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    db_app = models.Application(
+        event_id=app.event_id,
+        vendor_id=current_user.id,
+        message=app.message,
+        status="pending",
+        created_at=datetime.utcnow()
+    )
+    db.add(db_app)
+    db.commit()
+    db.refresh(db_app)
+    return db_app
+
+
+# ----------------------------
+# Organizer views applications for an event
+# ----------------------------
+@router.get("/event/{event_id}", response_model=List[schemas.ApplicationOut])
+def list_event_applications(
+    event_id: int,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    # Only allow organizers to view apps for their events
+    event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not event or event.organizer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to view applications")
+
+    query = db.query(models.Application).filter(models.Application.event_id == event_id)
+
+    if status:
+        if status not in ["pending", "approved", "declined"]:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        query = query.filter(models.Application.status == status)
+
+    return query.all()
+
+
+# ----------------------------
+# Organizer updates application status
+# ----------------------------
+@router.put("/{application_id}", response_model=schemas.ApplicationOut)
+def update_application_status(
+    application_id: int,
+    status: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    app = db.query(models.Application).filter(models.Application.id == application_id).first()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    event = db.query(models.Event).filter(models.Event.id == app.event_id).first()
+    if not event or event.organizer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this application")
+
+    if status not in ["approved", "declined"]:
+        raise HTTPException(status_code=400, detail="Status must be 'approved' or 'declined'")
+
+    app.status = status
+    db.commit()
+    db.refresh(app)
+    return app
+
+
+# ----------------------------
+# Vendor views their applications
+# ----------------------------
+@router.get("/mine", response_model=List[schemas.ApplicationOut])
+def list_my_applications(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if current_user.role != models.UserRole.vendor:
+        raise HTTPException(status_code=403, detail="Only vendors can view their applications")
+
+    query = db.query(models.Application).filter(models.Application.vendor_id == current_user.id)
+
+    if status:
+        if status not in ["pending", "approved", "declined"]:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        query = query.filter(models.Application.status == status)
+
+    return query.all()
+

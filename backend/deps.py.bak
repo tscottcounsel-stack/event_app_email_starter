@@ -1,0 +1,61 @@
+# backend/deps.py
+from __future__ import annotations
+
+import os
+from typing import Generator, Any
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
+# Adjust if your Session factory lives elsewhere
+from backend.database import SessionLocal
+
+try:
+    from sqlalchemy.orm import Session  # type: ignore
+except Exception:
+    Session = Any  # type: ignore
+
+# Must match your /auth/login route
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def get_db() -> Generator["Session", None, None]:
+    # Yield a DB session and always close it (prevents Windows file locks)
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+class SimpleUser:
+    # Minimal user object; tests can override get_current_user to return any compatible dict/object
+    def __init__(self, id: int, email: str, role: str = "vendor", is_active: bool = True):
+        self.id = id
+        self.email = email
+        self.role = role
+        self.is_active = is_active
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> SimpleUser:
+    # In dev, bypass with DISABLE_AUTH=1. In tests, this function is overridden.
+    if os.getenv("DISABLE_AUTH") == "1":
+        return SimpleUser(id=1, email="dev@example.com", role="vendor", is_active=True)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_vendor(user: SimpleUser = Depends(get_current_user)) -> SimpleUser:
+    return user
+
+
+def require_organizer(user: SimpleUser = Depends(get_current_user)) -> SimpleUser:
+    return user
+
+
+def require_admin(user: SimpleUser = Depends(get_current_user)) -> SimpleUser:
+    return user

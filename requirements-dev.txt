@@ -1,0 +1,12 @@
+# ✅ Testing
+pytest==8.3.3
+httpx==0.27.2  # async HTTP client (great for FastAPI tests)
+
+# ✅ Linting & Code Style
+black==24.8.0  # opinionated auto-formatter
+isort==5.13.2  # sort imports
+flake8==7.1.1  # linting
+
+# ✅ Developer utilities
+ipython==8.27.0  # better interactive shell
+python-dotenv==1.0.1  # already in prod, but keep in dev for env mgmt

@@ -1,0 +1,6 @@
+timestamp,test,status,details
+2025-09-07T22:38:16.800901+00:00,Cleanup,SKIP,No test users found
+2025-09-07T22:38:16.866643+00:00,Cascade Users->Vendors,PASS,"user=65, vendor=59"
+2025-09-07T22:38:16.893293+00:00,Cascade Users->Events,PASS,"user=66, event=57"
+2025-09-07T22:38:16.929187+00:00,Cascade Events->Applications,PASS,"event=58, app=46"
+2025-09-07T22:38:16.935861+00:00,Cleanup,PASS,Deleted 2 test users

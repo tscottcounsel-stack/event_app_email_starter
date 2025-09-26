@@ -1,0 +1,5 @@
+timestamp_utc,test,status,details
+2025-09-09T01:15:16.916044+00:00,Cascade Users->Vendors,PASS,"user=86, vendor=70"
+2025-09-09T01:15:16.940040+00:00,Cascade Users->Events,PASS,"user=87, event=68"
+2025-09-09T01:15:16.969346+00:00,Cascade Events->Applications,PASS,"event=69, app=52"
+2025-09-09T01:15:16.980923+00:00,Cleanup,PASS,Deleted 2 test users

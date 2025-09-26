@@ -1,0 +1,38 @@
+﻿[alembic]
+script_location = alembic
+prepend_sys_path = .
+# Option A: hardcode your DB URL (simplest)
+sqlalchemy.url = postgresql+psycopg2://postgres:YOUR_PASSWORD@localhost:5432/eventdb
+# Option B: comment the line above and pull from env inside env.py if you prefer
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s

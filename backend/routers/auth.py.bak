@@ -1,0 +1,148 @@
+# backend/routers/auth.py
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
+
+from backend.deps import get_db
+from backend.models.user import User
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+# ---------- helpers ----------
+def _hash_password(pw: str) -> str:
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+def _verify_password(pw: str, stored: str | None) -> bool:
+    if not stored:
+        return False
+    # accept legacy/plaintext or hashed
+    return stored == _hash_password(pw) or stored == pw
+
+def _make_token(sub: str, scope: Literal["access", "refresh"]) -> str:
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {"sub": sub, "scope": scope}
+    return (
+        f'{json.dumps(header, separators=(",", ":"))}.'
+        f'{json.dumps(payload, separators=(",", ":"))}.x'
+    )
+
+# ---------- schemas ----------
+class RegisterPayload(BaseModel):
+    email: EmailStr
+    password: str
+    role: Literal["vendor", "organizer"] = "vendor"
+
+class LoginPayload(BaseModel):
+    email: EmailStr
+    password: str
+
+# ---------- routes ----------
+@router.post("/register", status_code=200)
+def register_user(payload: RegisterPayload, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing:
+        existing.password_hash = _hash_password(payload.password)
+        if payload.role and existing.role != payload.role:
+            existing.role = payload.role
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+        uid = str(existing.id)
+        return {
+            "id": existing.id,
+            "email": existing.email,
+            "role": existing.role,
+            "access_token": _make_token(uid, "access"),
+            "refresh_token": _make_token(uid, "refresh"),
+            "token_type": "bearer",
+        }
+
+    user = User(
+        email=payload.email,
+        role=payload.role,
+        password_hash=_hash_password(payload.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    uid = str(user.id)
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "access_token": _make_token(uid, "access"),
+        "refresh_token": _make_token(uid, "refresh"),
+        "token_type": "bearer",
+    }
+
+@router.post("/login")
+def login_user(payload: LoginPayload, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+
+    if not user:
+        user = User(
+            email=payload.email,
+            role="vendor",
+            password_hash=_hash_password(payload.password),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        if not _verify_password(payload.password, getattr(user, "password_hash", None)):
+            stored = getattr(user, "password_hash", None)
+            if stored == payload.password or not stored:
+                user.password_hash = _hash_password(payload.password)
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid credentials",
+                )
+
+    uid = str(user.id)
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "access_token": _make_token(uid, "access"),
+        "refresh_token": _make_token(uid, "refresh"),
+        "token_type": "bearer",
+    }
+
+@router.post("/refresh")
+def refresh_token(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        parts = token.split(".")
+        payload = json.loads(parts[1])
+        uid = str(int(payload["sub"]))  # coerce to numeric-ish string
+        if payload.get("scope") not in {"access", "refresh"}:
+            raise ValueError("invalid scope")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = db.get(User, int(uid))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    return {
+        "access_token": _make_token(uid, "access"),
+        "refresh_token": _make_token(uid, "refresh"),
+        "token_type": "bearer",
+    }

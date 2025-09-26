@@ -1,0 +1,52 @@
+from backend.deps import get_current_user
+from fastapi import APIRouter, Depends
+from core.deps import get_current_user  # <<< add this import
+
+from __future__ import annotations
+
+from typing import Dict
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from backend.deps import require_vendor
+from backend.routers.events import _get_event_or_none
+
+router = APIRouter(prefix="/applications", tags=["applications"])
+
+class ApplicationCreate(BaseModel):
+    event_id: int
+
+class ApplicationRead(BaseModel):
+    id: int
+    event_id: int
+    vendor_id: int
+    status: str = "pending"
+
+_APPLICATIONS: Dict[int, ApplicationRead] = {}
+_NEXT_APP_ID = 1
+
+def _apply_impl(event_id: int, vendor_id: int) -> ApplicationRead:
+    global _NEXT_APP_ID
+    if not _get_event_or_none(event_id):
+        raise HTTPException(status_code=404, detail="Event not found")
+    app = ApplicationRead(
+        id=_NEXT_APP_ID,
+        event_id=event_id,
+        vendor_id=vendor_id,
+        status="pending",
+    )
+    _APPLICATIONS[_NEXT_APP_ID] = app
+    _NEXT_APP_ID += 1
+    return app
+
+@router.post("/", response_model=ApplicationRead)
+def apply_to_event(payload: ApplicationCreate, user=Depends(require_vendor)):
+    app = _apply_impl(payload.event_id, user.id)
+    return JSONResponse(content=app.model_dump(), status_code=200)
+
+@router.post("", response_model=ApplicationRead)
+def apply_to_event_no_slash(payload: ApplicationCreate, user=Depends(require_vendor)):
+    app = _apply_impl(payload.event_id, user.id)
+    return JSONResponse(content=app.model_dump(), status_code=200)
+

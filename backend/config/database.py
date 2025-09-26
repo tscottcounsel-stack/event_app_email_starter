@@ -1,0 +1,42 @@
+﻿from __future__ import annotations
+from __future__ import annotations
+from app.db import Base
+
+import os
+import atexit
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+
+engine_kwargs = {}
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+    engine_kwargs["poolclass"] = NullPool
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args, **engine_kwargs)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        # On Windows, proactively release file handles so pytest can delete the tmp DB
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+
+def dispose_engine():
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+
+atexit.register(dispose_engine)
+

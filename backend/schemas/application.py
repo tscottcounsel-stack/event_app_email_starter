@@ -1,0 +1,17 @@
+﻿from __future__ import annotations
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict
+
+class ApplicationCreate(BaseModel):
+    event_id: int
+    note: str | None = None
+
+class ApplicationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    vendor_id: int
+    event_id: int
+    status: str
+    note: str | None = None
+

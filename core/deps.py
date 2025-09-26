@@ -1,0 +1,28 @@
+﻿from __future__ import annotations
+from backend.deps import get_current_user
+# core/deps.py
+
+import os
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
+# Keep this in sync with your real login route
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    """
+    Minimal placeholder that plays nicely with tests:
+    - In tests, they will override this.
+    - In local/dev, export DISABLE_AUTH=1 to bypass.
+    - Otherwise, raise 401 to force proper auth in prod.
+    """
+    if os.getenv("DISABLE_AUTH") == "1":
+        return {"id": 1, "email": "dev@example.com", "is_active": True}
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+

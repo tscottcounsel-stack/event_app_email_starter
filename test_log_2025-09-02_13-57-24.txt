@@ -1,0 +1,218 @@
+﻿=== API Test Log Started at 09/02/2025 13:57:24 ===
+
+
+[Request] POST http://127.0.0.1:8000/users/
+[Body] {
+    "email":  "loop_user_1_638924326443631038@example.com",
+    "password":  "secret",
+    "role":  "organizer"
+}
+[Response] {
+    "id":  27,
+    "email":  "loop_user_1_638924326443631038@example.com",
+    "role":  "organizer",
+    "created_at":  "2025-09-02T17:57:25.027049"
+}
+
+[Request] POST http://127.0.0.1:8000/organizers/
+[Body] {
+    "organization_name":  "OrgLoop1",
+    "display_name":  "Organizer Loop 1"
+}
+[Response] {
+    "display_name":  "Organizer Loop 1",
+    "organization_name":  "OrgLoop1",
+    "phone":  null,
+    "website":  null,
+    "location":  null,
+    "preferred_categories":  null,
+    "bio":  null,
+    "id":  24,
+    "user_id":  1
+}
+
+[Request] POST http://127.0.0.1:8000/vendors/
+[Body] {
+    "company_name":  "VendorCo1",
+    "display_name":  "Vendor Loop 1"
+}
+[Response] {
+    "display_name":  "Vendor Loop 1",
+    "company_name":  "VendorCo1",
+    "phone":  null,
+    "location":  null,
+    "services":  null,
+    "categories":  null,
+    "rate_min":  null,
+    "rate_max":  null,
+    "bio":  null,
+    "availability_notes":  null,
+    "id":  27,
+    "user_id":  1
+}
+
+[Request] POST http://127.0.0.1:8000/events/
+[Body] {
+    "date":  "2025-09-09T13:57:25",
+    "title":  "Event Loop 1",
+    "description":  "Loop test event",
+    "location":  "Atlanta"
+}
+[Response] {
+    "title":  "Event Loop 1",
+    "description":  "Loop test event",
+    "date":  "2025-09-09T13:57:25",
+    "location":  "Atlanta",
+    "diagram_url":  null,
+    "layout_json":  null,
+    "id":  28,
+    "organizer_id":  1,
+    "created_at":  "2025-09-02T17:57:25.380435"
+}
+
+[Request] POST http://127.0.0.1:8000/applications/
+[Body] {
+    "message":  "Vendor 27 applying to event 28",
+    "event_id":  28
+}
+[Response] {
+    "id":  19,
+    "event_id":  28,
+    "vendor_id":  1,
+    "status":  "pending",
+    "message":  "Vendor 27 applying to event 28",
+    "created_at":  "2025-09-02T17:57:25.413261"
+}
+
+[Request] DELETE http://127.0.0.1:8000/applications/19
+[Response] {
+    "message":  "Application 19 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/events/28
+[Response] {
+    "message":  "Event 28 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/vendors/27
+[Response] {
+    "message":  "Vendor 27 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/organizers/24
+[Response] {
+    "message":  "Organizer 24 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/users/27
+[Response] {
+    "message":  "User 27 deleted successfully"
+}
+
+[Request] POST http://127.0.0.1:8000/users/
+[Body] {
+    "email":  "loop_user_2_638924326456134479@example.com",
+    "password":  "secret",
+    "role":  "organizer"
+}
+[Response] {
+    "id":  28,
+    "email":  "loop_user_2_638924326456134479@example.com",
+    "role":  "organizer",
+    "created_at":  "2025-09-02T17:57:25.629263"
+}
+
+[Request] POST http://127.0.0.1:8000/organizers/
+[Body] {
+    "organization_name":  "OrgLoop2",
+    "display_name":  "Organizer Loop 2"
+}
+[Response] {
+    "display_name":  "Organizer Loop 2",
+    "organization_name":  "OrgLoop2",
+    "phone":  null,
+    "website":  null,
+    "location":  null,
+    "preferred_categories":  null,
+    "bio":  null,
+    "id":  25,
+    "user_id":  1
+}
+
+[Request] POST http://127.0.0.1:8000/vendors/
+[Body] {
+    "company_name":  "VendorCo2",
+    "display_name":  "Vendor Loop 2"
+}
+[Response] {
+    "display_name":  "Vendor Loop 2",
+    "company_name":  "VendorCo2",
+    "phone":  null,
+    "location":  null,
+    "services":  null,
+    "categories":  null,
+    "rate_min":  null,
+    "rate_max":  null,
+    "bio":  null,
+    "availability_notes":  null,
+    "id":  28,
+    "user_id":  1
+}
+
+[Request] POST http://127.0.0.1:8000/events/
+[Body] {
+    "date":  "2025-09-09T13:57:26",
+    "title":  "Event Loop 2",
+    "description":  "Loop test event",
+    "location":  "Atlanta"
+}
+[Response] {
+    "title":  "Event Loop 2",
+    "description":  "Loop test event",
+    "date":  "2025-09-09T13:57:26",
+    "location":  "Atlanta",
+    "diagram_url":  null,
+    "layout_json":  null,
+    "id":  29,
+    "organizer_id":  1,
+    "created_at":  "2025-09-02T17:57:26.651506"
+}
+
+[Request] POST http://127.0.0.1:8000/applications/
+[Body] {
+    "message":  "Vendor 28 applying to event 29",
+    "event_id":  29
+}
+[Response] {
+    "id":  20,
+    "event_id":  29,
+    "vendor_id":  1,
+    "status":  "pending",
+    "message":  "Vendor 28 applying to event 29",
+    "created_at":  "2025-09-02T17:57:26.675075"
+}
+
+[Request] DELETE http://127.0.0.1:8000/applications/20
+[Response] {
+    "message":  "Application 20 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/events/29
+[Response] {
+    "message":  "Event 29 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/vendors/28
+[Response] {
+    "message":  "Vendor 28 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/organizers/25
+[Response] {
+    "message":  "Organizer 25 deleted successfully"
+}
+
+[Request] DELETE http://127.0.0.1:8000/users/28
+[Response] {
+    "message":  "User 28 deleted successfully"
+}

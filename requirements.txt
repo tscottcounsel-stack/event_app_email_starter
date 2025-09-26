@@ -1,0 +1,20 @@
+# Core framework
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+starlette==0.36.3
+
+# Database
+SQLAlchemy==2.0.34
+
+# Password hashing (stable pinned combo)
+bcrypt==4.0.1
+passlib[bcrypt]==1.7.4
+
+# JWT handling
+python-jose==3.3.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# HTTP requests (used in test scripts)
+requests==2.31.0
