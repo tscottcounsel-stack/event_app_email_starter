@@ -1,71 +1,75 @@
-from __future__ import annotations
+# ---- Event Slots CRUD ----
+from pydantic import BaseModel, conint
+from fastapi import HTTPException
 
-# ── Env (.env beside this file) ────────────────────────────────────────────────
-from pathlib import Path
-from dotenv import load_dotenv
+class SlotCreate(BaseModel):
+    label: str
+    price_cents: conint(ge=0) = 0
+    coord_x: int | None = None
+    coord_y: int | None = None
+    width:   int | None = None
+    height:  int | None = None
+    notes:   str | None = None
 
-ROOT = Path(__file__).resolve().parent
-load_dotenv(dotenv_path=ROOT / ".env")  # explicit path avoids stdin/stack quirks
+class SlotPatch(BaseModel):
+    label: str | None = None
+    price_cents: conint(ge=0) | None = None
+    coord_x: int | None = None
+    coord_y: int | None = None
+    width:   int | None = None
+    height:  int | None = None
+    notes:   str | None = None
+    status:  str | None = None   # 'available' | 'held' | 'reserved' | 'blocked'...
 
-# ── FastAPI / SQLAlchemy setup ─────────────────────────────────────────────────
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import configure_mappers
+@app.get("/events/{event_id}/slots")
+def list_event_slots(event_id: int, db: Session = Depends(get_db)):
+    rows = db.execute(sa.text("""
+        SELECT id, event_id, label, coord_x, coord_y, width, height,
+               price_cents, status, notes
+        FROM public.event_slots
+        WHERE event_id = :eid
+        ORDER BY label
+    """), {"eid": event_id}).mappings().all()
+    return [dict(r) for r in rows]
 
-from app.db import engine  # DB engine (and get_db used by routers)
+@app.post("/events/{event_id}/slots", dependencies=[Depends(role_required("organizer","admin"))], status_code=201)
+def create_event_slot(event_id: int, p: SlotCreate, db: Session = Depends(get_db)):
+    row = db.execute(sa.text("""
+        INSERT INTO public.event_slots
+          (event_id, label, coord_x, coord_y, width, height, price_cents, status, notes)
+        VALUES
+          (:event_id, :label, :coord_x, :coord_y, :width, :height, :price_cents, 'available', :notes)
+        RETURNING id
+    """), {"event_id": event_id, **p.model_dump()}).fetchone()
+    db.commit()
+    return {"id": row.id}
 
-# App instance
-app = FastAPI(title="Event App API")
+@app.patch("/events/{event_id}/slots/{slot_id}", dependencies=[Depends(role_required("organizer","admin"))])
+def patch_event_slot(event_id: int, slot_id: int, p: SlotPatch, db: Session = Depends(get_db)):
+    data = {k: v for k, v in p.model_dump().items() if v is not None}
+    if not data:
+        return {"updated": False}
+    sets = ", ".join(f"{k} = :{k}" for k in data.keys())
+    params = {"event_id": event_id, "slot_id": slot_id, **data}
+    row = db.execute(sa.text(f"""
+        UPDATE public.event_slots
+        SET {sets}
+        WHERE id = :slot_id AND event_id = :event_id
+        RETURNING id, event_id, label, price_cents, status, coord_x, coord_y, width, height, notes
+    """), params).mappings().first()
+    if not row:
+        raise HTTPException(404, "slot not found")
+    db.commit()
+    return dict(row)
 
-# ── Models FIRST (so relationships exist), then configure mappers ─────────────
-# Importing registers tables/relationships on the shared Base.metadata
-from app.models import event as _event  # noqa: F401
-from app.models import vendor as _vendor  # noqa: F401
-from app.models import application as _application  # noqa: F401
-
-configure_mappers()  # finalize mappings before including routers
-
-# ── Routers (after mappers are configured) ────────────────────────────────────
-import app.routers.vendors as vendors
-import app.routers.events as events
-import app.routers.applications as applications
-import app.routers.seed as seed
-
-app.include_router(vendors.router)
-app.include_router(events.router)
-app.include_router(applications.router)
-app.include_router(seed.router)
-
-
-# ── Global error handling (dev-friendly JSON) ─────────────────────────────────
-@app.exception_handler(SQLAlchemyError)
-async def sqlalchemy_error_handler(request, exc: SQLAlchemyError):
-    return JSONResponse(
-        status_code=400,
-        content={"error": exc.__class__.__name__, "detail": str(exc)},
-    )
-
-# ── CORS (tighten allow_origins for prod) ─────────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Health checks ─────────────────────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.get("/health/db")
-def health_db():
-    try:
-        with engine.connect() as c:
-            c.execute(text("select 1"))
-        return {"db": "ok"}
-    except Exception as e:
-        return {"db": "error", "detail": str(e)}
+@app.delete("/events/{event_id}/slots/{slot_id}", dependencies=[Depends(role_required("organizer","admin"))], status_code=204)
+def delete_event_slot(event_id: int, slot_id: int, db: Session = Depends(get_db)):
+    # Will fail if referenced by applications.slot_id unless it's NULL / ON DELETE rules allow
+    res = db.execute(sa.text("""
+        DELETE FROM public.event_slots
+        WHERE id = :slot_id AND event_id = :event_id
+    """), {"slot_id": slot_id, "event_id": event_id})
+    if res.rowcount == 0:
+        raise HTTPException(404, "slot not found")
+    db.commit()
+    return

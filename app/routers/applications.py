@@ -1,146 +1,55 @@
-from __future__ import annotations
-from typing import List, Optional
+# ADD THIS near the other imports at the top if not already present
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from sqlalchemy.orm import Session, joinedload
+# ...
 
-from app.db import get_db
-from app.models.application import Application
-from app.schemas import (
-    ApplicationCreate,
-    ApplicationRead,
-    ApplicationUpdate,
-)
-
-router = APIRouter(prefix="/applications", tags=["applications"])
-
-# ── Upsert: POST will insert or update on (event_id, vendor_id) uniqueness ─────
-@router.post("", response_model=ApplicationRead, status_code=status.HTTP_201_CREATED)
-def upsert_application(payload: ApplicationCreate, db: Session = Depends(get_db)):
-    data = payload.model_dump(exclude_unset=True)
-    valid_cols = {c.name for c in Application.__table__.columns}
-    data = {k: v for k, v in data.items() if k in valid_cols}
-
-    try:
-        obj = Application(**data)
-        db.add(obj)
-        db.commit()
-        db.refresh(obj)
-        # eager load vendor for response
-        db.refresh(obj)  # ensure PK, then load relation
-        return db.query(Application).options(joinedload(Application.vendor)).get(obj.id)
-    except IntegrityError as ie:
-        db.rollback()
-        # detect unique pair violation (constraint name may differ; use message)
-        msg = str(ie.orig)
-        if "uq_applications_event_vendor" not in msg and "unique" not in msg.lower():
-            raise HTTPException(status_code=400, detail=str(ie)) from ie
-
-        existing = (
-            db.query(Application)
-            .filter(
-                Application.event_id == data["event_id"],
-                Application.vendor_id == data["vendor_id"],
-            )
-            .first()
-        )
-        if not existing:
-            raise HTTPException(status_code=409, detail="Conflict on (event_id, vendor_id) but row not found")
-
-        # don't change keys during upsert-update
-        for k, v in data.items():
-            if k not in ("event_id", "vendor_id"):
-                setattr(existing, k, v)
-        try:
-            db.commit()
-            # return with vendor joined
-            return (
-                db.query(Application)
-                .options(joinedload(Application.vendor))
-                .get(existing.id)
-            )
-        except SQLAlchemyError as ex:
-            db.rollback()
-            raise HTTPException(status_code=400, detail=str(ex)) from ex
-    except SQLAlchemyError as ex:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ex)) from ex
-
-# ── List with filters: ?event_id=&vendor_id=&limit= ────────────────────────────
-@router.get("", response_model=List[ApplicationRead])
-def list_applications(
-    event_id: Optional[int] = Query(default=None),
-    vendor_id: Optional[int] = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+# ── list applications for an event (with vendor & slot details) ───────────────
+@router.get("/event/{event_id}")
+def list_applications_for_event(
+    event_id: int,
+    status: Literal["submitted", "approved", "declined"] | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Application).options(joinedload(Application.vendor))
-    if event_id is not None:
-        q = q.filter(Application.event_id == event_id)
-    if vendor_id is not None:
-        q = q.filter(Application.vendor_id == vendor_id)
-    return q.order_by(Application.id.desc()).limit(limit).all()
+    """
+    Returns all applications for an event with vendor & slot details.
+    Optional ?status=submitted|approved|declined filter.
+    """
+    base_sql = """
+        SELECT
+          a.id,
+          a.event_id,
+          a.vendor_id,
+          a.slot_id,
+          a.status,
+          a.price_cents,
+          a.desired_location,
+          a.notes,
+          a.payment_ref,
+          a.paid_at,
+          a.created_at,
+          a.updated_at,
 
-# ── Get by id (joined vendor) ─────────────────────────────────────────────────
-@router.get("/{app_id}", response_model=ApplicationRead)
-def get_application(app_id: int, db: Session = Depends(get_db)):
-    obj = (
-        db.query(Application)
-        .options(joinedload(Application.vendor))
-        .get(app_id)
-    )
-    if not obj:
-        raise HTTPException(status_code=404, detail="Application not found")
-    return obj
+          -- vendor bits
+          v.name          AS vendor_name,
+          v.category      AS vendor_category,
+          v.phone         AS vendor_phone,
+          v.description   AS vendor_description,
 
-# ── PATCH ─────────────────────────────────────────────────────────────────────
-@router.patch("/{app_id}", response_model=ApplicationRead)
-def update_application(app_id: int, payload: ApplicationUpdate, db: Session = Depends(get_db)):
-    obj = db.get(Application, app_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Application not found")
-    data = payload.model_dump(exclude_unset=True)
-    valid = {c.name for c in Application.__table__.columns}
-    for k, v in data.items():
-        if k in valid:
-            setattr(obj, k, v)
-    try:
-        db.commit()
-        return (
-            db.query(Application)
-            .options(joinedload(Application.vendor))
-            .get(app_id)
-        )
-    except SQLAlchemyError as ex:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ex))
+          -- slot bits (nullable)
+          s.label         AS slot_label,
+          s.price_cents   AS slot_price_cents,
+          s.status        AS slot_status
+        FROM public.applications a
+        LEFT JOIN public.vendors      v ON v.id  = a.vendor_id
+        LEFT JOIN public.event_slots  s ON s.id  = a.slot_id
+        WHERE a.event_id = :eid
+    """
+    params = {"eid": event_id}
+    if status:
+        base_sql += "  AND a.status = :status"
+        params["status"] = status
 
-# ── PUT ───────────────────────────────────────────────────────────────────────
-@router.put("/{app_id}", response_model=ApplicationRead)
-def replace_application(app_id: int, payload: ApplicationCreate, db: Session = Depends(get_db)):
-    obj = db.get(Application, app_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Application not found")
-    for k, v in payload.model_dump().items():
-        setattr(obj, k, v)
-    try:
-        db.commit()
-        return (
-            db.query(Application)
-            .options(joinedload(Application.vendor))
-            .get(app_id)
-        )
-    except SQLAlchemyError as ex:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ex))
+    base_sql += " ORDER BY a.created_at DESC, a.id DESC"
 
-# ── DELETE ────────────────────────────────────────────────────────────────────
-@router.delete("/{app_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_application(app_id: int, db: Session = Depends(get_db)):
-    obj = db.get(Application, app_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Application not found")
-    db.delete(obj)
-    db.commit()
-    return None
+    rows = db.execute(sa.text(base_sql), params).mappings().all()
+    return [dict(r) for r in rows]
