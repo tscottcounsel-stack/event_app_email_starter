@@ -1,3 +1,4 @@
+# alembic/env.py
 from __future__ import annotations
 
 import os
@@ -6,64 +7,105 @@ from pathlib import Path
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
-# ── Load .env explicitly (project root = parent of this file's folder) ─────────
+# ── Ensure project root on sys.path & load .env ────────────────────────────────
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))  # ensure 'app' is importable when running alembic
+sys.path.insert(0, str(ROOT))
+
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # optional
     load_dotenv(dotenv_path=ROOT / ".env")
 except Exception:
     pass
 
-# ── Alembic Config & Logging ──────────────────────────────────────────────────
+# ── Alembic config & logging ───────────────────────────────────────────────────
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
-# Prefer DATABASE_URL env var if present
-db_url = os.environ.get("DATABASE_URL")
-if db_url:
-    config.set_main_option("sqlalchemy.url", db_url)
+# Prefer DATABASE_URL; fallback to alembic.ini sqlalchemy.url
+db_url = os.environ.get("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+if not db_url:
+    raise RuntimeError("Set DATABASE_URL or sqlalchemy.url in alembic.ini")
 
-# ── Import SQLAlchemy Base & models so metadata is populated ───────────────────
-from app.db import Base  # your declarative Base
-# import models to register tables on metadata
-from app.models import event as _event  # noqa: F401
-from app.models import vendor as _vendor  # noqa: F401
-from app.models import application as _application  # noqa: F401
+config.set_main_option("sqlalchemy.url", db_url)
+is_sqlite = db_url.startswith("sqlite:")
+
+# --- Import Base and models (tolerant) ----------------------------------------
+from app.db import Base
+
+def _try_import(mod: str) -> bool:
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
+
+# Import only modules that actually exist
+_try_import("app.models.event")
+_try_import("app.models.vendor")
+_try_import("app.models.application")
+_try_import("app.models.slot")      # <= our Slot model
+# _try_import("app.models.user")    # add if/when available
 
 target_metadata = Base.metadata
 
+# Whitelist the tables to manage now
+MANAGED_TABLES = {
+    "events",
+    "event_slots",
+    "applications",
+    "vendors",
+    # "users",
+    # "vendor_profiles",
+}
+
+def _include_object(object, name, type_, reflected, compare_to):
+    """
+    Only manage whitelisted tables, and avoid dropping tables that exist
+    in DB but aren't in metadata.
+    """
+    if type_ == "table":
+        if name not in MANAGED_TABLES:
+            return False
+        if reflected and compare_to is None:  # would become a DROP — block it
+            return False
+        return True
+
+    parent = getattr(object, "table", None)
+    if parent is not None:
+        if parent.name not in MANAGED_TABLES:
+            return False
+        if reflected and compare_to is None:
+            return False
+    return True
+
 # ── Migration runners ─────────────────────────────────────────────────────────
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
-    if not url:
-        raise RuntimeError("sqlalchemy.url is not configured")
     context.configure(
-        url=url,
+        url=db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        render_as_batch=is_sqlite,
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_engine(db_url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
             compare_server_default=True,
+            render_as_batch=is_sqlite,
+            include_object=_include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

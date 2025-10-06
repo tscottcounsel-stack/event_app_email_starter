@@ -1,57 +1,159 @@
 # app/routers/slots.py
-from fastapi import APIRouter, Depends, HTTPException
+from __future__ import annotations
+
+import os
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, conint
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.deps import role_required
 
-router = APIRouter(prefix="/events/{event_id}/slots", tags=["slots"])
+# ── Auth + roles (dev toggle via REQUIRE_AUTH) ─────────────────────────────────
+def _noop_user():
+    return None
 
-class SlotIn(BaseModel):
+require_auth = os.environ.get("REQUIRE_AUTH", "1") == "1"
+if require_auth:
+    try:
+        from app.auth import get_current_user  # your real dependency
+        auth_dep = Depends(get_current_user)
+    except Exception:
+        # if auth isn’t wired yet, fall back to no-op so local dev isn't blocked
+        auth_dep = Depends(_noop_user)
+else:
+    auth_dep = Depends(_noop_user)
+
+def _role_required_noop(*roles: str):
+    def _dep():
+        return None
+    return _dep
+
+if require_auth:
+    try:
+        from app.deps import role_required as _role_required_real
+        role_required = _role_required_real
+    except Exception:
+        role_required = _role_required_noop
+else:
+    role_required = _role_required_noop
+
+# ── Router (single instance) ──────────────────────────────────────────────────
+router = APIRouter(
+    prefix="/events/{event_id}/slots",
+    tags=["event-slots"],
+    dependencies=[auth_dep],  # apply auth to all endpoints (no-op when REQUIRE_AUTH=0)
+)
+
+# ── Schemas ──────────────────────────────────────────────────────────────────
+class SlotCreate(BaseModel):
     label: str
     price_cents: conint(ge=0) = 0
     coord_x: int | None = None
     coord_y: int | None = None
-    width: int | None = None
-    height: int | None = None
-    notes: str | None = None
+    width:   int | None = None
+    height:  int | None = None
+    notes:   str | None = None
 
-@router.get("", dependencies=[Depends(role_required("organizer","admin"))])
-def list_slots(event_id: int, db: Session = Depends(get_db)):
+class SlotPatch(BaseModel):
+    label: str | None = None
+    price_cents: conint(ge=0) | None = None
+    coord_x: int | None = None
+    coord_y: int | None = None
+    width:   int | None = None
+    height:  int | None = None
+    notes:   str | None = None
+    status:  str | None = None   # 'available' | 'held' | 'booked' | 'blocked' ...
+
+# ── Routes ───────────────────────────────────────────────────────────────────
+@router.get("")
+def list_event_slots(event_id: int, db: Session = Depends(get_db)):
     rows = db.execute(sa.text("""
-      SELECT id, label, price_cents, status, coord_x, coord_y, width, height, notes
-      FROM public.event_slots
-      WHERE event_id = :eid
-      ORDER BY id
+        SELECT id, event_id, label, coord_x, coord_y, width, height,
+               price_cents, status, notes
+        FROM public.event_slots
+        WHERE event_id = :eid
+        ORDER BY label
     """), {"eid": event_id}).mappings().all()
     return [dict(r) for r in rows]
 
-@router.post("", dependencies=[Depends(role_required("organizer","admin"))], status_code=201)
-def create_slot(event_id: int, p: SlotIn, db: Session = Depends(get_db)):
+@router.get("/{slot_id}")
+def get_event_slot(event_id: int, slot_id: int, db: Session = Depends(get_db)):
     row = db.execute(sa.text("""
-      INSERT INTO public.event_slots (event_id, label, price_cents, coord_x, coord_y, width, height, notes)
-      VALUES (:eid, :label, :price, :x, :y, :w, :h, :notes)
-      RETURNING id, label, price_cents, status
-    """), {"eid": event_id, "label": p.label, "price": p.price_cents,
-           "x": p.coord_x, "y": p.coord_y, "w": p.width, "h": p.height, "notes": p.notes}).mappings().first()
+        SELECT id, event_id, label, coord_x, coord_y, width, height,
+               price_cents, status, notes
+        FROM public.event_slots
+        WHERE id = :sid AND event_id = :eid
+    """), {"sid": slot_id, "eid": event_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="slot not found")
+    return dict(row)
+
+@router.post("", status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(role_required("organizer", "admin"))])
+def create_event_slot(event_id: int, p: SlotCreate, db: Session = Depends(get_db)):
+    # app-layer uniqueness guard (DB unique recommended too)
+    dup = db.execute(sa.text("""
+        SELECT 1 FROM public.event_slots
+        WHERE event_id = :eid AND label = :lbl
+        LIMIT 1
+    """), {"eid": event_id, "lbl": p.label}).first()
+    if dup:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="slot label already exists for this event")
+
+    row = db.execute(sa.text("""
+        INSERT INTO public.event_slots
+          (event_id, label, coord_x, coord_y, width, height, price_cents, status, notes)
+        VALUES
+          (:event_id, :label, :coord_x, :coord_y, :width, :height, :price_cents, 'available', :notes)
+        RETURNING id
+    """), {"event_id": event_id, **p.model_dump()}).fetchone()
+    db.commit()
+    return {"id": row.id}
+
+@router.patch("/{slot_id}",
+              dependencies=[Depends(role_required("organizer", "admin"))])
+def patch_event_slot(event_id: int, slot_id: int, p: SlotPatch, db: Session = Depends(get_db)):
+    if p.label is not None:
+        dup = db.execute(sa.text("""
+            SELECT 1 FROM public.event_slots
+            WHERE event_id = :eid AND label = :lbl AND id <> :sid
+            LIMIT 1
+        """), {"eid": event_id, "lbl": p.label, "sid": slot_id}).first()
+        if dup:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail="slot label already exists for this event")
+
+    data = {k: v for k, v in p.model_dump().items() if v is not None}
+    if not data:
+        return {"updated": False}
+
+    sets = ", ".join(f"{k} = :{k}" for k in data.keys())
+    params = {"event_id": event_id, "slot_id": slot_id, **data}
+    row = db.execute(sa.text(f"""
+        UPDATE public.event_slots
+        SET {sets}
+        WHERE id = :slot_id AND event_id = :event_id
+        RETURNING id, event_id, label, price_cents, status, coord_x, coord_y, width, height, notes
+    """), params).mappings().first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="slot not found")
     db.commit()
     return dict(row)
 
-@router.patch("/{slot_id}", dependencies=[Depends(role_required("organizer","admin"))])
-def update_slot(event_id: int, slot_id: int, p: SlotIn, db: Session = Depends(get_db)):
-    data = {k:v for k,v in p.model_dump().items() if v is not None}
-    if not data:
-        return {"updated": False}
-    sets = ", ".join(f"{k} = :{k}" for k in data.keys())
-    params = {"eid": event_id, "sid": slot_id, **data}
-    row = db.execute(sa.text(f"""
-      UPDATE public.event_slots
-      SET {sets}
-      WHERE id = :sid AND event_id = :eid
-      RETURNING id, label, price_cents, status
-    """), params).mappings().first()
-    if not row:
-        raise HTTPException(404, "slot not found")
-    db.commit()
-    return dict(row)
+@router.delete("/{slot_id}", status_code=status.HTTP_204_NO_CONTENT,
+               dependencies=[Depends(role_required("organizer", "admin"))])
+def delete_event_slot(event_id: int, slot_id: int, db: Session = Depends(get_db)):
+    try:
+        res = db.execute(sa.text("""
+            DELETE FROM public.event_slots
+            WHERE id = :slot_id AND event_id = :event_id
+        """), {"slot_id": slot_id, "event_id": event_id})
+        if res.rowcount == 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="slot not found")
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"cannot delete slot: {e}")
+    return
