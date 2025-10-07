@@ -8,27 +8,37 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from app.db import get_db
 
-# ── Auth + roles (dev toggle via REQUIRE_AUTH) ─────────────────────────────────
+# ---- Auth + role gates (prod/DEV toggle) -------------------------------------
+import os
+from fastapi import Depends
+
 def _noop_user():
     return None
 
 require_auth = os.environ.get("REQUIRE_AUTH", "1") == "1"
+use_dev_auth = os.environ.get("DEV_AUTH", "0") == "1"
+
 if require_auth:
-    try:
-        from app.auth import get_current_user  # your real dependency
-        auth_dep = Depends(get_current_user)
-    except Exception:
-        # if auth isn’t wired yet, fall back to no-op so local dev isn't blocked
-        auth_dep = Depends(_noop_user)
+    if use_dev_auth:
+        # Fixed Bearer token flow for local dev
+        from app.auth_dev import get_current_user_dev
+        auth_dep = Depends(get_current_user_dev)
+    else:
+        # Real auth (if available); otherwise no-op to avoid startup failures
+        try:
+            from app.auth import get_current_user  # your real dependency
+            auth_dep = Depends(get_current_user)
+        except Exception:
+            auth_dep = Depends(_noop_user)
 else:
+    # Full bypass (legacy dev mode)
     auth_dep = Depends(_noop_user)
 
 def _role_required_noop(*roles: str):
-    def _dep():
-        return None
+    def _dep(): return None
     return _dep
 
-if require_auth:
+if require_auth and not use_dev_auth:
     try:
         from app.deps import role_required as _role_required_real
         role_required = _role_required_real
