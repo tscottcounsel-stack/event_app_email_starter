@@ -1,7 +1,8 @@
 # alembic/env.py
 from __future__ import annotations
 
-import os, sys
+import os
+import sys
 from pathlib import Path
 from logging.config import fileConfig
 
@@ -14,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from dotenv import load_dotenv  # optional
+    from dotenv import load_dotenv  # optional for local dev
     load_dotenv(dotenv_path=ROOT / ".env")
 except Exception:
     pass
@@ -27,39 +28,42 @@ if config.config_file_name:
 # Prefer DATABASE_URL; fallback to alembic.ini sqlalchemy.url
 db_url = os.environ.get("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
 if not db_url:
-    raise RuntimeError("Set DATABASE_URL or sqlalchemy.url in alembic.ini")
+    raise RuntimeError("Set DATABASE_URL or sqlalchemy.url in alembic.ini/.env")
+
+# In CI, forbid localhost/127.0.0.1 — must use the postgres service hostname.
+if os.environ.get("GITHUB_ACTIONS") and ("127.0.0.1" in db_url or "@localhost" in db_url):
+    raise RuntimeError(f"CI must not use localhost in DATABASE_URL; got: {db_url}")
+
+# Mirror back to Alembic config so CLI output is consistent
 config.set_main_option("sqlalchemy.url", db_url)
+print(f"[db] Effective DATABASE_URL = {db_url}")
 is_sqlite = db_url.startswith("sqlite:")
 
-# ── Import Base & models exactly once (so metadata is populated) ──────────────
-# ── Import Base & models exactly once (so metadata is populated) ──────────────
-from app.db import Base  # single source of truth for Base
+# ── Import Base & models so metadata is populated ────────────────────────────
+# Use a single Base source for the whole project
+from app.db import Base  # noqa: E402
 
-def _try_import(mod: str):
-    try:
-        __import__(mod)
-        return True
-    except Exception as e:
-        print(f"[alembic] optional import failed: {mod}: {e}")
-        return False
-
-# Import model modules so tables register on Base.metadata
+# Import model modules so their tables register on Base.metadata
 for mod in (
     "app.models.event",
     "app.models.vendor",
     "app.models.application",
     "app.models.slot",
-    # "app.models.user",  # uncomment only if this module actually exists
+    # add more models as created, e.g.: "app.models.user",
 ):
-    _try_import(mod)
+    try:
+        __import__(mod)
+    except Exception as e:
+        # Keep tolerant in case some models aren’t present in all envs
+        print(f"[alembic] optional import failed: {mod}: {e}")
 
 target_metadata = Base.metadata
 
-# If you want to restrict tables later, re-enable include_object after baseline.
+# If you want to filter managed tables in future, customize this
 def _include_object(object, name, type_, reflected, compare_to):
     return True  # baseline: include everything
 
-# ── Migration runners ─────────────────────────────────────────────────────────
+# ── Migration runners ────────────────────────────────────────────────────────
 def run_migrations_offline() -> None:
     context.configure(
         url=db_url,
