@@ -1,4 +1,4 @@
-﻿from backend.deps import get_current_user
+from backend.deps import get_current_user
 
 from backend.deps import current_user
 from backend.deps import get_current_user

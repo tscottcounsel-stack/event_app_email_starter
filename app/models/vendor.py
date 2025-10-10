@@ -25,3 +25,4 @@ class Vendor(TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+applications = relationship("Application", back_populates="vendor", cascade="all, delete-orphan")

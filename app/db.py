@@ -1,47 +1,38 @@
 # app/db.py
 from __future__ import annotations
-
 import os
-from typing import Generator
+from pathlib import Path
+import sqlalchemy as sa
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from datetime import datetime
+from sqlalchemy import DateTime, func
+from typing import Generator
 
-from sqlalchemy import create_engine, func, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base, Session, Mapped, mapped_column
-# ^ Mapped/mapped_column are needed for TimestampMixin
+# Load .env from project root if present
+ROOT = Path(__file__).resolve().parents[1]
+dotenv_path = ROOT / ".env"
+if dotenv_path.exists():
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv(dotenv_path=dotenv_path)
+    except Exception:
+        pass
 
-# --- Config ---
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/eventdb",  # fallback for local dev
-)
+# *** FORCE the working DSN for now ***
+# If you want env to win, comment the next line and rely on os.environ
+DATABASE_URL = "postgresql+psycopg2://postgres:Tazvendor@127.0.0.1:5432/eventdb"
 
-# --- Engine / Session / Base ---
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+print("[db] Effective DATABASE_URL =", DATABASE_URL)
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False,
-    expire_on_commit=False,
-    future=True,
-)
-
+engine = sa.create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-# --- Common mixins ---
 class TimestampMixin:
-    """UTC timestamps with automatic update on write."""
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-    # Help avoid duplicate-table crashes if modules get imported twice during dev reload
+    created_at = sa.orm.mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = sa.orm.mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = {"extend_existing": True}
 
-# --- FastAPI dependency ---
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:

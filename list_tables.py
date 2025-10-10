@@ -1,4 +1,4 @@
-﻿import os, sqlalchemy as sa
+import os, sqlalchemy as sa
 e = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
 with e.connect() as c:
     rows = c.exec_driver_sql("""

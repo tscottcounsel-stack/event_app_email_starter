@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from backend.deps import get_current_user
 # core/deps.py
 

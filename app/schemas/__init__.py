@@ -1,87 +1,57 @@
 from __future__ import annotations
-from typing import Optional, List
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
 
-# ── Vendor ─────────────────────────────────────────────────────────────────────
-class VendorBrief(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    name: str
-    category: Optional[str] = None
-
-class VendorBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+# ── Vendors ───────────────────────────────────────────────────────────
+class VendorCreate(BaseModel):
     name: str
     category: Optional[str] = None
     phone: Optional[str] = None
     description: Optional[str] = None
 
-class VendorCreate(VendorBase):
-    pass
-
-class VendorUpdate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    name: Optional[str] = None
+class VendorRead(BaseModel):
+    id: int
+    name: str
     category: Optional[str] = None
     phone: Optional[str] = None
     description: Optional[str] = None
-
-class VendorRead(VendorBase):
-    id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-# ── Event ──────────────────────────────────────────────────────────────────────
-class EventBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    title: str
-    organizer_id: int
-    date: datetime
-    location: str
-    description: Optional[str] = None
-    diagram_url: Optional[str] = None
-    layout_json: Optional[str] = None
+# ── Applications ──────────────────────────────────────────────────────
+_ALLOWED_STATUSES = {"pending", "submitted", "approved", "declined"}
 
-class EventCreate(EventBase):
-    pass
+class ApplicationCreate(BaseModel):
+    event_id: int
+    vendor_id: int
+    desired_location: Optional[str] = None
+    notes: Optional[str] = None
 
-class EventUpdate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    # all optional for PATCH
-    title: Optional[str] = None
-    organizer_id: Optional[int] = None
-    date: Optional[datetime] = None
-    location: Optional[str] = None
-    description: Optional[str] = None
-    diagram_url: Optional[str] = None
-    layout_json: Optional[str] = None
+class ApplicationPatch(BaseModel):
+    status: Optional[str] = None
+    price_cents: Optional[int] = Field(default=None, ge=0)
+    desired_location: Optional[str] = None
+    notes: Optional[str] = None
 
-class EventRead(EventBase):
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, v: Optional[str]):
+        if v is None:
+            return v
+        if v not in _ALLOWED_STATUSES:
+            raise ValueError(f"status must be one of {sorted(_ALLOWED_STATUSES)}")
+        return v
+
+class ApplicationRead(BaseModel):
     id: int
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-# ── Application ────────────────────────────────────────────────────────────────
-class ApplicationBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
     event_id: int
     vendor_id: int
     price_cents: Optional[int] = None
-    status: Optional[str] = "submitted"
+    status: str
+    desired_location: Optional[str] = None
     notes: Optional[str] = None
-
-class ApplicationCreate(ApplicationBase):
-    pass
-
-class ApplicationUpdate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    price_cents: Optional[int] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
-
-class ApplicationRead(ApplicationBase):
-    id: int
+    payment_ref: Optional[str] = None
+    paid_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    vendor: Optional[VendorBrief] = None  # included in list/detail responses

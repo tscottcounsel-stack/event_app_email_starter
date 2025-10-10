@@ -28,3 +28,8 @@ class Event(Base):  # <- removed TimestampMixin
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+applications = relationship("Application", back_populates="event", cascade="all, delete-orphan")
+
+
+slots = relationship("Slot", cascade="all, delete-orphan", back_populates="event")
+

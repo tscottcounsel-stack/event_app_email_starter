@@ -1,0 +1,472 @@
+﻿{
+    "openapi":  "3.1.0",
+    "info":  {
+                 "title":  "Event Organizer API",
+                 "version":  "1.0.0"
+             },
+    "paths":  {
+                  "/events/{event_id}/slots":  {
+                                                   "get":  {
+                                                               "tags":  [
+                                                                            "event-slots"
+                                                                        ],
+                                                               "summary":  "List Event Slots",
+                                                               "operationId":  "list_event_slots_events__event_id__slots_get",
+                                                               "parameters":  [
+                                                                                  {
+                                                                                      "name":  "event_id",
+                                                                                      "in":  "path",
+                                                                                      "required":  true,
+                                                                                      "schema":  {
+                                                                                                     "type":  "integer",
+                                                                                                     "title":  "Event Id"
+                                                                                                 }
+                                                                                  }
+                                                                              ],
+                                                               "responses":  {
+                                                                                 "200":  {
+                                                                                             "description":  "Successful Response",
+                                                                                             "content":  {
+                                                                                                             "application/json":  {
+                                                                                                                                      "schema":  {
+
+                                                                                                                                                 }
+                                                                                                                                  }
+                                                                                                         }
+                                                                                         },
+                                                                                 "422":  {
+                                                                                             "description":  "Validation Error",
+                                                                                             "content":  {
+                                                                                                             "application/json":  {
+                                                                                                                                      "schema":  {
+                                                                                                                                                     "$ref":  "#/components/schemas/HTTPValidationError"
+                                                                                                                                                 }
+                                                                                                                                  }
+                                                                                                         }
+                                                                                         }
+                                                                             }
+                                                           },
+                                                   "post":  {
+                                                                "tags":  [
+                                                                             "event-slots"
+                                                                         ],
+                                                                "summary":  "Create Event Slot",
+                                                                "operationId":  "create_event_slot_events__event_id__slots_post",
+                                                                "security":  [
+                                                                                 {
+                                                                                     "HTTPBearer":  [
+
+                                                                                                    ]
+                                                                                 }
+                                                                             ],
+                                                                "parameters":  [
+                                                                                   {
+                                                                                       "name":  "event_id",
+                                                                                       "in":  "path",
+                                                                                       "required":  true,
+                                                                                       "schema":  {
+                                                                                                      "type":  "integer",
+                                                                                                      "title":  "Event Id"
+                                                                                                  }
+                                                                                   }
+                                                                               ],
+                                                                "requestBody":  {
+                                                                                    "required":  true,
+                                                                                    "content":  {
+                                                                                                    "application/json":  {
+                                                                                                                             "schema":  {
+                                                                                                                                            "$ref":  "#/components/schemas/SlotCreate"
+                                                                                                                                        }
+                                                                                                                         }
+                                                                                                }
+                                                                                },
+                                                                "responses":  {
+                                                                                  "201":  {
+                                                                                              "description":  "Successful Response",
+                                                                                              "content":  {
+                                                                                                              "application/json":  {
+                                                                                                                                       "schema":  {
+
+                                                                                                                                                  }
+                                                                                                                                   }
+                                                                                                          }
+                                                                                          },
+                                                                                  "422":  {
+                                                                                              "description":  "Validation Error",
+                                                                                              "content":  {
+                                                                                                              "application/json":  {
+                                                                                                                                       "schema":  {
+                                                                                                                                                      "$ref":  "#/components/schemas/HTTPValidationError"
+                                                                                                                                                  }
+                                                                                                                                   }
+                                                                                                          }
+                                                                                          }
+                                                                              }
+                                                            }
+                                               },
+                  "/events/{event_id}/slots/{slot_id}":  {
+                                                             "patch":  {
+                                                                           "tags":  [
+                                                                                        "event-slots"
+                                                                                    ],
+                                                                           "summary":  "Patch Event Slot",
+                                                                           "operationId":  "patch_event_slot_events__event_id__slots__slot_id__patch",
+                                                                           "security":  [
+                                                                                            {
+                                                                                                "HTTPBearer":  [
+
+                                                                                                               ]
+                                                                                            }
+                                                                                        ],
+                                                                           "parameters":  [
+                                                                                              {
+                                                                                                  "name":  "event_id",
+                                                                                                  "in":  "path",
+                                                                                                  "required":  true,
+                                                                                                  "schema":  {
+                                                                                                                 "type":  "integer",
+                                                                                                                 "title":  "Event Id"
+                                                                                                             }
+                                                                                              },
+                                                                                              {
+                                                                                                  "name":  "slot_id",
+                                                                                                  "in":  "path",
+                                                                                                  "required":  true,
+                                                                                                  "schema":  {
+                                                                                                                 "type":  "integer",
+                                                                                                                 "title":  "Slot Id"
+                                                                                                             }
+                                                                                              }
+                                                                                          ],
+                                                                           "requestBody":  {
+                                                                                               "required":  true,
+                                                                                               "content":  {
+                                                                                                               "application/json":  {
+                                                                                                                                        "schema":  {
+                                                                                                                                                       "$ref":  "#/components/schemas/SlotPatch"
+                                                                                                                                                   }
+                                                                                                                                    }
+                                                                                                           }
+                                                                                           },
+                                                                           "responses":  {
+                                                                                             "200":  {
+                                                                                                         "description":  "Successful Response",
+                                                                                                         "content":  {
+                                                                                                                         "application/json":  {
+                                                                                                                                                  "schema":  {
+
+                                                                                                                                                             }
+                                                                                                                                              }
+                                                                                                                     }
+                                                                                                     },
+                                                                                             "422":  {
+                                                                                                         "description":  "Validation Error",
+                                                                                                         "content":  {
+                                                                                                                         "application/json":  {
+                                                                                                                                                  "schema":  {
+                                                                                                                                                                 "$ref":  "#/components/schemas/HTTPValidationError"
+                                                                                                                                                             }
+                                                                                                                                              }
+                                                                                                                     }
+                                                                                                     }
+                                                                                         }
+                                                                       },
+                                                             "delete":  {
+                                                                            "tags":  [
+                                                                                         "event-slots"
+                                                                                     ],
+                                                                            "summary":  "Delete Event Slot",
+                                                                            "description":  "If your FK `applications.slot_id -\u003e event_slots.id` was created with\n`ON DELETE SET NULL` (recommended), this will succeed and null out references.\nIf itâs `RESTRICT/NO ACTION`, a referenced slot will raise an error.",
+                                                                            "operationId":  "delete_event_slot_events__event_id__slots__slot_id__delete",
+                                                                            "security":  [
+                                                                                             {
+                                                                                                 "HTTPBearer":  [
+
+                                                                                                                ]
+                                                                                             }
+                                                                                         ],
+                                                                            "parameters":  [
+                                                                                               {
+                                                                                                   "name":  "event_id",
+                                                                                                   "in":  "path",
+                                                                                                   "required":  true,
+                                                                                                   "schema":  {
+                                                                                                                  "type":  "integer",
+                                                                                                                  "title":  "Event Id"
+                                                                                                              }
+                                                                                               },
+                                                                                               {
+                                                                                                   "name":  "slot_id",
+                                                                                                   "in":  "path",
+                                                                                                   "required":  true,
+                                                                                                   "schema":  {
+                                                                                                                  "type":  "integer",
+                                                                                                                  "title":  "Slot Id"
+                                                                                                              }
+                                                                                               }
+                                                                                           ],
+                                                                            "responses":  {
+                                                                                              "204":  {
+                                                                                                          "description":  "Successful Response"
+                                                                                                      },
+                                                                                              "422":  {
+                                                                                                          "description":  "Validation Error",
+                                                                                                          "content":  {
+                                                                                                                          "application/json":  {
+                                                                                                                                                   "schema":  {
+                                                                                                                                                                  "$ref":  "#/components/schemas/HTTPValidationError"
+                                                                                                                                                              }
+                                                                                                                                               }
+                                                                                                                      }
+                                                                                                      }
+                                                                                          }
+                                                                        }
+                                                         },
+                  "/":  {
+                            "get":  {
+                                        "tags":  [
+                                                     "health"
+                                                 ],
+                                        "summary":  "Root",
+                                        "operationId":  "root__get",
+                                        "responses":  {
+                                                          "200":  {
+                                                                      "description":  "Successful Response",
+                                                                      "content":  {
+                                                                                      "application/json":  {
+                                                                                                               "schema":  {
+
+                                                                                                                          }
+                                                                                                           }
+                                                                                  }
+                                                                  }
+                                                      }
+                                    }
+                        }
+              },
+    "components":  {
+                       "schemas":  {
+                                       "HTTPValidationError":  {
+                                                                   "properties":  {
+                                                                                      "detail":  {
+                                                                                                     "items":  {
+                                                                                                                   "$ref":  "#/components/schemas/ValidationError"
+                                                                                                               },
+                                                                                                     "type":  "array",
+                                                                                                     "title":  "Detail"
+                                                                                                 }
+                                                                                  },
+                                                                   "type":  "object",
+                                                                   "title":  "HTTPValidationError"
+                                                               },
+                                       "SlotCreate":  {
+                                                          "properties":  {
+                                                                             "label":  {
+                                                                                           "type":  "string",
+                                                                                           "title":  "Label"
+                                                                                       },
+                                                                             "price_cents":  {
+                                                                                                 "type":  "integer",
+                                                                                                 "minimum":  0.0,
+                                                                                                 "title":  "Price Cents",
+                                                                                                 "default":  0
+                                                                                             },
+                                                                             "coord_x":  {
+                                                                                             "anyOf":  [
+                                                                                                           {
+                                                                                                               "type":  "integer"
+                                                                                                           },
+                                                                                                           {
+                                                                                                               "type":  "null"
+                                                                                                           }
+                                                                                                       ],
+                                                                                             "title":  "Coord X"
+                                                                                         },
+                                                                             "coord_y":  {
+                                                                                             "anyOf":  [
+                                                                                                           {
+                                                                                                               "type":  "integer"
+                                                                                                           },
+                                                                                                           {
+                                                                                                               "type":  "null"
+                                                                                                           }
+                                                                                                       ],
+                                                                                             "title":  "Coord Y"
+                                                                                         },
+                                                                             "width":  {
+                                                                                           "anyOf":  [
+                                                                                                         {
+                                                                                                             "type":  "integer"
+                                                                                                         },
+                                                                                                         {
+                                                                                                             "type":  "null"
+                                                                                                         }
+                                                                                                     ],
+                                                                                           "title":  "Width"
+                                                                                       },
+                                                                             "height":  {
+                                                                                            "anyOf":  [
+                                                                                                          {
+                                                                                                              "type":  "integer"
+                                                                                                          },
+                                                                                                          {
+                                                                                                              "type":  "null"
+                                                                                                          }
+                                                                                                      ],
+                                                                                            "title":  "Height"
+                                                                                        },
+                                                                             "notes":  {
+                                                                                           "anyOf":  [
+                                                                                                         {
+                                                                                                             "type":  "string"
+                                                                                                         },
+                                                                                                         {
+                                                                                                             "type":  "null"
+                                                                                                         }
+                                                                                                     ],
+                                                                                           "title":  "Notes"
+                                                                                       }
+                                                                         },
+                                                          "type":  "object",
+                                                          "required":  [
+                                                                           "label"
+                                                                       ],
+                                                          "title":  "SlotCreate"
+                                                      },
+                                       "SlotPatch":  {
+                                                         "properties":  {
+                                                                            "label":  {
+                                                                                          "anyOf":  [
+                                                                                                        {
+                                                                                                            "type":  "string"
+                                                                                                        },
+                                                                                                        {
+                                                                                                            "type":  "null"
+                                                                                                        }
+                                                                                                    ],
+                                                                                          "title":  "Label"
+                                                                                      },
+                                                                            "price_cents":  {
+                                                                                                "anyOf":  [
+                                                                                                              {
+                                                                                                                  "type":  "integer",
+                                                                                                                  "minimum":  0.0
+                                                                                                              },
+                                                                                                              {
+                                                                                                                  "type":  "null"
+                                                                                                              }
+                                                                                                          ],
+                                                                                                "title":  "Price Cents"
+                                                                                            },
+                                                                            "coord_x":  {
+                                                                                            "anyOf":  [
+                                                                                                          {
+                                                                                                              "type":  "integer"
+                                                                                                          },
+                                                                                                          {
+                                                                                                              "type":  "null"
+                                                                                                          }
+                                                                                                      ],
+                                                                                            "title":  "Coord X"
+                                                                                        },
+                                                                            "coord_y":  {
+                                                                                            "anyOf":  [
+                                                                                                          {
+                                                                                                              "type":  "integer"
+                                                                                                          },
+                                                                                                          {
+                                                                                                              "type":  "null"
+                                                                                                          }
+                                                                                                      ],
+                                                                                            "title":  "Coord Y"
+                                                                                        },
+                                                                            "width":  {
+                                                                                          "anyOf":  [
+                                                                                                        {
+                                                                                                            "type":  "integer"
+                                                                                                        },
+                                                                                                        {
+                                                                                                            "type":  "null"
+                                                                                                        }
+                                                                                                    ],
+                                                                                          "title":  "Width"
+                                                                                      },
+                                                                            "height":  {
+                                                                                           "anyOf":  [
+                                                                                                         {
+                                                                                                             "type":  "integer"
+                                                                                                         },
+                                                                                                         {
+                                                                                                             "type":  "null"
+                                                                                                         }
+                                                                                                     ],
+                                                                                           "title":  "Height"
+                                                                                       },
+                                                                            "notes":  {
+                                                                                          "anyOf":  [
+                                                                                                        {
+                                                                                                            "type":  "string"
+                                                                                                        },
+                                                                                                        {
+                                                                                                            "type":  "null"
+                                                                                                        }
+                                                                                                    ],
+                                                                                          "title":  "Notes"
+                                                                                      },
+                                                                            "status":  {
+                                                                                           "anyOf":  [
+                                                                                                         {
+                                                                                                             "type":  "string"
+                                                                                                         },
+                                                                                                         {
+                                                                                                             "type":  "null"
+                                                                                                         }
+                                                                                                     ],
+                                                                                           "title":  "Status"
+                                                                                       }
+                                                                        },
+                                                         "type":  "object",
+                                                         "title":  "SlotPatch"
+                                                     },
+                                       "ValidationError":  {
+                                                               "properties":  {
+                                                                                  "loc":  {
+                                                                                              "items":  {
+                                                                                                            "anyOf":  [
+                                                                                                                          {
+                                                                                                                              "type":  "string"
+                                                                                                                          },
+                                                                                                                          {
+                                                                                                                              "type":  "integer"
+                                                                                                                          }
+                                                                                                                      ]
+                                                                                                        },
+                                                                                              "type":  "array",
+                                                                                              "title":  "Location"
+                                                                                          },
+                                                                                  "msg":  {
+                                                                                              "type":  "string",
+                                                                                              "title":  "Message"
+                                                                                          },
+                                                                                  "type":  {
+                                                                                               "type":  "string",
+                                                                                               "title":  "Error Type"
+                                                                                           }
+                                                                              },
+                                                               "type":  "object",
+                                                               "required":  [
+                                                                                "loc",
+                                                                                "msg",
+                                                                                "type"
+                                                                            ],
+                                                               "title":  "ValidationError"
+                                                           }
+                                   },
+                       "securitySchemes":  {
+                                               "HTTPBearer":  {
+                                                                  "type":  "http",
+                                                                  "scheme":  "bearer"
+                                                              }
+                                           }
+                   }
+}

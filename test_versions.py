@@ -1,4 +1,4 @@
-﻿import sys, os, traceback
+import sys, os, traceback
 print("PY:", sys.version)
 print("EXE:", sys.executable)
 try:

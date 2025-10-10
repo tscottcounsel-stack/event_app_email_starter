@@ -1,33 +1,63 @@
+# app/models/application.py
 from __future__ import annotations
-from typing import Optional
 
-from sqlalchemy import Integer, String, Text, ForeignKey
+from datetime import datetime
+
+from sqlalchemy import (
+    String,
+    Text,
+    DateTime,
+    Integer,
+    ForeignKey,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db import Base, TimestampMixin  # your table has created_at/updated_at, so mixin is OK
+# Use the project's shared Base (do NOT redefine it locally)
+from app.db import Base
 
 
-class Application(TimestampMixin, Base):
+class Application(Base):
     __tablename__ = "applications"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        UniqueConstraint("event_id", "vendor_id", name="uq_applications_event_vendor"),
+    )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
 
     event_id: Mapped[int] = mapped_column(
-        ForeignKey("events.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("events.id", ondelete="CASCADE"),
+        nullable=False,
     )
     vendor_id: Mapped[int] = mapped_column(
-        ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("vendors.id", ondelete="CASCADE"),
+        nullable=False,
     )
 
-    # REQUIRED by DB (NOT NULL)
-    price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    # pricing / status
+    price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)  # <-- matches migration
+    status: Mapped[str] = mapped_column(String(50), nullable=False, server_default="submitted")
 
-    # DB default is 'submitted'; API may send "pending"/etc.
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="submitted")
+    # flow fields
+    desired_location: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Use the TEXT 'notes' column; we ignore the stray varchar 'note' column
-    notes: Mapped[Optional[str]] = mapped_column(Text)
+    # timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
 
+    # relationships (Event/Vendor must define back_populates="applications")
     event = relationship("Event", back_populates="applications")
     vendor = relationship("Vendor", back_populates="applications")

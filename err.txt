@@ -1,0 +1,7 @@
+ERROR: DataError in DB eventdb
+(psycopg2.errors.InvalidTextRepresentation) invalid input value for enum userrole: "admin"
+LINE 1: ...T id FROM public.users WHERE role IN ('organizer','admin') O...
+                                                             ^
+
+[SQL: SELECT id FROM public.users WHERE role IN ('organizer','admin') ORDER BY id LIMIT 1]
+(Background on this error at: https://sqlalche.me/e/20/9h9h)
