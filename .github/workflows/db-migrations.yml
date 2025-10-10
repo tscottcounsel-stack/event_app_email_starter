@@ -1,69 +1,125 @@
-import os, sys
-import psycopg2
+name: DB Migrations
 
-def main():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb")
-    # psycopg2 expects a plain URL without sqlalchemy+driver prefix
-    pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-    conn = psycopg2.connect(pgurl)
-    cur = conn.cursor()
+on:
+  push:
+  pull_request:
 
-    checks = []
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
 
-    cur.execute("""
-      SELECT EXISTS (
-        SELECT 1
-        FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
-        WHERE t.typname='userrole' AND e.enumlabel='admin'
-      );
-    """)
-    checks.append(("enum userrole has 'admin'", cur.fetchone()[0]))
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: eventdb
+        # no port mapping needed; use hostname "postgres"
+        options: >-
+          --health-cmd="pg_isready -U postgres -d eventdb"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
-    cur.execute("""
-      SELECT EXISTS (
-        SELECT 1
-        FROM pg_constraint c
-        JOIN pg_class t ON t.oid = c.conrelid
-        WHERE t.relname='event_slots'
-          AND c.conname='event_slots_event_id_label_key'
-      );
-    """)
-    checks.append(("unique on event_slots(event_id,label)", cur.fetchone()[0]))
+    env:
+      # IMPORTANT: use the service hostname "postgres" (not 127.0.0.1)
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONPATH: .  # so alembic env.py can import app.*
 
-    cur.execute("""
-      SELECT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
-      );
-    """)
-    checks.append(("index ix_event_slots_event_id present", cur.fetchone()[0]))
+    steps:
+      - uses: actions/checkout@v4
 
-    cur.execute("""
-      SELECT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema='public' AND table_name='applications' AND column_name='slot_id'
-      );
-    """)
-    checks.append(("applications.slot_id column exists", cur.fetchone()[0]))
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    cur.execute("""
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.table_constraints
-        WHERE table_schema='public' AND table_name='applications'
-          AND constraint_type='FOREIGN KEY'
-          AND constraint_name='applications_slot_id_fkey'
-      );
-    """)
-    checks.append(("applications_slot_id_fkey present", cur.fetchone()[0]))
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Fallbacks if not pinned in requirements
+          pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
-    bad = [name for name, ok in checks if not ok]
-    for name, ok in checks:
-      print(f"{'OK  ' if ok else 'FAIL'} {name}")
-    if bad:
-      print("Smoke test FAILED:", bad)
-      sys.exit(1)
-    print("Smoke test PASSED")
+      - name: Show Alembic info (pre)
+        run: |
+          alembic --version || true
+          alembic heads || true
+          alembic history || true
 
-if __name__ == "__main__":
-    main()
+      - name: Wait for Postgres (extra guard)
+        run: |
+          for i in {1..30}; do
+            pg_isready -h postgres -U postgres -d eventdb && exit 0
+            sleep 1
+          done
+          echo "Postgres not ready" >&2
+          exit 1
+
+      - name: Run migrations (base -> baseline -> head)
+        run: |
+          set -eux
+          alembic stamp base
+          alembic upgrade 0678be8d8c2b
+          alembic --raiseerr upgrade head
+
+      - name: Verify schema (enum, constraints, FK)
+        run: |
+          python - << 'PY'
+          import os, sys, psycopg2
+          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
+          pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
+          conn = psycopg2.connect(pgurl)
+          cur = conn.cursor()
+
+          def one(sql):
+            cur.execute(sql); return cur.fetchone()[0]
+
+          checks = [
+            ("enum userrole has 'admin'", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM pg_enum e
+                JOIN pg_type t ON t.oid=e.enumtypid
+                WHERE t.typname='userrole' AND e.enumlabel='admin'
+              )""")),
+            ("unique on event_slots(event_id,label)", one("""
+              SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid=c.conrelid
+                WHERE t.relname='event_slots'
+                  AND c.conname='event_slots_event_id_label_key'
+              )""")),
+            ("index ix_event_slots_event_id present", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
+              )""")),
+            ("applications.slot_id column exists", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='applications' AND column_name='slot_id'
+              )""")),
+            ("applications_slot_id_fkey present", one("""
+              SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE table_schema='public' AND table_name='applications'
+                  AND constraint_type='FOREIGN KEY'
+                  AND constraint_name='applications_slot_id_fkey'
+              )""")),
+          ]
+
+          bad = [name for name, ok in checks if not ok]
+          for name, ok in checks: print(("OK   " if ok else "FAIL "), name)
+          if bad:
+            print("Schema checks FAILED:", bad); sys.exit(1)
+          print("Schema checks OK")
+          PY
+
+      - name: Show Alembic info (post)
+        if: always()
+        run: |
+          alembic current -v || true
