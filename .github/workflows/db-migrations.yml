@@ -15,7 +15,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
-        # rely on service hostname "postgres" (no host port mapping needed)
+        ports:
+          - "5432:5432"  # expose to host so we can use 127.0.0.1
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s
@@ -23,10 +24,10 @@ jobs:
           --health-retries=20
 
     env:
-      # IMPORTANT: use the service hostname, not 127.0.0.1
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb
+      # Connect via localhost (since we published the port)
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PYTHONPATH: .  # allow alembic/env.py to import app.*
+      PYTHONPATH: .
 
     steps:
       - name: Checkout
@@ -41,7 +42,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Fallbacks if not pinned
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
       - name: Show Alembic info (pre)
@@ -50,9 +50,9 @@ jobs:
           alembic heads || true
           alembic history || true
 
-      - name: Force alembic.ini URL for CI
+      - name: Force alembic.ini URL for CI (use 127.0.0.1)
         run: |
-          sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb#' alembic.ini
+          sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb#' alembic.ini
           echo "Using alembic.ini:"
           grep -E '^sqlalchemy\.url' alembic.ini || true
 
@@ -60,16 +60,16 @@ jobs:
         run: |
           python - << 'PY'
           import os, time, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
+          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-          for i in range(60):
+          for i in range(90):
               try:
                   conn = psycopg2.connect(pgurl)
                   conn.close()
                   print("Postgres is ready")
                   break
               except Exception as e:
-                  print(f"waiting for Postgres... ({i+1}/60): {e}")
+                  print(f"waiting for Postgres... ({i+1}/90): {e}")
                   time.sleep(1)
           else:
               raise SystemExit("Postgres not ready in time")
@@ -89,7 +89,7 @@ jobs:
         run: |
           python - << 'PY'
           import os, sys, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
+          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           conn = psycopg2.connect(pgurl)
           cur = conn.cursor()
