@@ -6,6 +6,9 @@ on:
 
 jobs:
   migrate:
+    # Run this job IN a container, so service hostnames (e.g., "postgres") resolve.
+    container:
+      image: python:3.11-slim
     runs-on: ubuntu-latest
 
     services:
@@ -15,33 +18,35 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
-        ports:
-          - "5432:5432"  # expose to host so we can use 127.0.0.1
+        # No port mapping needed; the job container can reach "postgres:5432"
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s
           --health-timeout=5s
-          --health-retries=20
+          --health-retries=30
 
     env:
-      # Connect via localhost (since we published the port)
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
+      # IMPORTANT: use the service hostname from inside the container
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONPATH: .
 
     steps:
+      - name: Install system deps (build tools & libpq)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential gcc libpq-dev curl git ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Fallbacks if not pinned
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
       - name: Show Alembic info (pre)
@@ -50,29 +55,28 @@ jobs:
           alembic heads || true
           alembic history || true
 
-      - name: Force alembic.ini URL for CI (use 127.0.0.1)
+      - name: Show effective URL sources
         run: |
-          sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb#' alembic.ini
-          echo "Using alembic.ini:"
+          echo "ENV DATABASE_URL: $DATABASE_URL"
           grep -E '^sqlalchemy\.url' alembic.ini || true
 
       - name: Wait for Postgres (python loop)
         run: |
           python - << 'PY'
           import os, time, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb")
+          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           for i in range(90):
-              try:
-                  conn = psycopg2.connect(pgurl)
-                  conn.close()
-                  print("Postgres is ready")
-                  break
-              except Exception as e:
-                  print(f"waiting for Postgres... ({i+1}/90): {e}")
-                  time.sleep(1)
+            try:
+              conn = psycopg2.connect(pgurl)
+              conn.close()
+              print("Postgres is ready")
+              break
+            except Exception as e:
+              print(f"waiting for Postgres... ({i+1}/90): {e}")
+              time.sleep(1)
           else:
-              raise SystemExit("Postgres not ready in time")
+            raise SystemExit("Postgres not ready in time")
           PY
 
       - name: Run migrations (base -> baseline -> head)
@@ -81,6 +85,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -eux
+          # ensure alembic picks env var (env.py prefers DATABASE_URL; alembic.ini is a fallback)
           alembic stamp base
           alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
@@ -89,50 +94,50 @@ jobs:
         run: |
           python - << 'PY'
           import os, sys, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb")
+          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           conn = psycopg2.connect(pgurl)
           cur = conn.cursor()
           def one(sql):
-              cur.execute(sql); return cur.fetchone()[0]
+            cur.execute(sql); return cur.fetchone()[0]
           checks = [
-              ("enum userrole has 'admin'", one("""
-                SELECT EXISTS (
-                  SELECT 1 FROM pg_enum e
-                  JOIN pg_type t ON t.oid=e.enumtypid
-                  WHERE t.typname='userrole' AND e.enumlabel='admin'
-                )""")),
-              ("unique on event_slots(event_id,label)", one("""
-                SELECT EXISTS (
-                  SELECT 1
-                  FROM pg_constraint c
-                  JOIN pg_class t ON t.oid=c.conrelid
-                  WHERE t.relname='event_slots'
-                    AND c.conname='event_slots_event_id_label_key'
-                )""")),
-              ("index ix_event_slots_event_id present", one("""
-                SELECT EXISTS (
-                  SELECT 1 FROM pg_indexes
-                  WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
-                )""")),
-              ("applications.slot_id column exists", one("""
-                SELECT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema='public' AND table_name='applications' AND column_name='slot_id'
-                )""")),
-              ("applications_slot_id_fkey present", one("""
-                SELECT EXISTS (
-                  SELECT 1
-                  FROM information_schema.table_constraints
-                  WHERE table_schema='public' AND table_name='applications'
-                    AND constraint_type='FOREIGN KEY'
-                    AND constraint_name='applications_slot_id_fkey'
-                )""")),
+            ("enum userrole has 'admin'", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM pg_enum e
+                JOIN pg_type t ON t.oid=e.enumtypid
+                WHERE t.typname='userrole' AND e.enumlabel='admin'
+              )""")),
+            ("unique on event_slots(event_id,label)", one("""
+              SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid=c.conrelid
+                WHERE t.relname='event_slots'
+                  AND c.conname='event_slots_event_id_label_key'
+              )""")),
+            ("index ix_event_slots_event_id present", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
+              )""")),
+            ("applications.slot_id column exists", one("""
+              SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='applications' AND column_name='slot_id'
+              )""")),
+            ("applications_slot_id_fkey present", one("""
+              SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE table_schema='public' AND table_name='applications'
+                  AND constraint_type='FOREIGN KEY'
+                  AND constraint_name='applications_slot_id_fkey'
+              )""")),
           ]
           bad = [name for name, ok in checks if not ok]
           for name, ok in checks: print(("OK   " if ok else "FAIL "), name)
           if bad:
-              print("Schema checks FAILED:", bad); sys.exit(1)
+            print("Schema checks FAILED:", bad); sys.exit(1)
           print("Schema checks OK")
           PY
 
