@@ -6,8 +6,6 @@ on:
 
 jobs:
   migrate:
-    container:
-      image: python:3.11-slim
     runs-on: ubuntu-latest
 
     services:
@@ -17,6 +15,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
+        ports:
+          - "5432:5432"   # expose to runner; we'll use 127.0.0.1
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s
@@ -24,47 +24,41 @@ jobs:
           --health-retries=30
 
     env:
-      # single source of truth for the run
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb
+      # use localhost since we published the port
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONPATH: .
 
     steps:
-      - name: Install system deps (build tools & libpq)
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential gcc libpq-dev curl git ca-certificates
-          rm -rf /var/lib/apt/lists/*
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Python deps
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install python deps
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
+      # Force the env var for all subsequent steps (wins over repo/org vars)
+      - name: Force CI DATABASE_URL (override anything)
+        run: |
+          echo 'DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
+          echo "CI DATABASE_URL set for subsequent steps"
+
+      # Optional: reflect URL into .env and alembic.ini (belt & suspenders)
       - name: Set URL everywhere (env file + alembic.ini)
         run: |
-          # 1) write a fresh .env so python-dotenv picks THIS up
           printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
-          echo ".env contents:"
-          cat .env
-
-          # 2) force alembic.ini fallback to the same URL
           if [ -f alembic.ini ]; then
             sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = '"$DATABASE_URL"'#' alembic.ini
-            echo "alembic.ini sqlalchemy.url:"
-            grep -E '^sqlalchemy\.url' alembic.ini || true
           fi
-
-      - name: Show effective sources (debug)
-        run: |
           echo "ENV DATABASE_URL: $DATABASE_URL"
-          [ -f .env ] && echo ".env:" && cat .env
-          [ -f alembic.ini ] && echo "alembic.ini url:" && grep -E '^sqlalchemy\.url' alembic.ini || true
+          [ -f alembic.ini ] && grep -E '^sqlalchemy\.url' alembic.ini || true
 
       - name: Wait for Postgres (python loop)
         run: |
@@ -72,14 +66,12 @@ jobs:
           import os, time, psycopg2
           url = os.getenv("DATABASE_URL")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-          for i in range(90):
+          for i in range(120):
             try:
-              conn = psycopg2.connect(pgurl)
-              conn.close()
-              print("Postgres is ready")
-              break
+              conn = psycopg2.connect(pgurl); conn.close()
+              print("Postgres is ready"); break
             except Exception as e:
-              print(f"waiting for Postgres... ({i+1}/90): {e}")
+              print(f"waiting for Postgres... ({i+1}/120): {e}")
               time.sleep(1)
           else:
             raise SystemExit("Postgres not ready in time")
@@ -102,8 +94,7 @@ jobs:
           import os, sys, psycopg2
           url = os.getenv("DATABASE_URL")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-          conn = psycopg2.connect(pgurl)
-          cur = conn.cursor()
+          conn = psycopg2.connect(pgurl); cur = conn.cursor()
           def one(sql): cur.execute(sql); return cur.fetchone()[0]
           checks = [
             ("enum userrole has 'admin'", one("""
@@ -114,8 +105,7 @@ jobs:
               )""")),
             ("unique on event_slots(event_id,label)", one("""
               SELECT EXISTS (
-                SELECT 1
-                FROM pg_constraint c
+                SELECT 1 FROM pg_constraint c
                 JOIN pg_class t ON t.oid=c.conrelid
                 WHERE t.relname='event_slots'
                   AND c.conname='event_slots_event_id_label_key'
@@ -141,8 +131,7 @@ jobs:
           ]
           bad = [name for name, ok in checks if not ok]
           for name, ok in checks: print(("OK   " if ok else "FAIL "), name)
-          if bad:
-            print("Schema checks FAILED:", bad); sys.exit(1)
+          if bad: print("Schema checks FAILED:", bad); sys.exit(1)
           print("Schema checks OK")
           PY
 
