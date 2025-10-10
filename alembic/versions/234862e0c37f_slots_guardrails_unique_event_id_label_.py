@@ -1,16 +1,14 @@
 from alembic import op
-import sqlalchemy as sa
 
-# revision identifiers, used by Alembic.
+# ---- Alembic identifiers ----
 revision = "234862e0c37f"
-down_revision = "706341e69f48"
+down_revision = "58281d45d383"
 branch_labels = None
 depends_on = None
 
+
 def upgrade():
-    # 1) Ensure UNIQUE(event_id,label) exists.
-    #    If a matching unique index already exists (e.g. ux_event_slots_event_label),
-    #    attach it to the table constraint; else create the constraint.
+    # 1) Ensure UNIQUE(event_id, label) on event_slots
     op.execute("""
     DO $$
     DECLARE
@@ -26,7 +24,7 @@ def upgrade():
         ) INTO has_constraint;
 
         IF NOT has_constraint THEN
-            -- Look for any unique index on (event_id, label)
+            -- Find any existing unique index on (event_id, label)
             SELECT i.relname
               INTO idx_name
             FROM pg_class t
@@ -49,10 +47,11 @@ def upgrade():
                 UNIQUE (event_id, label);
             END IF;
         END IF;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)
 
-    # 2) Helpful index for list queries (IF NOT EXISTS)
+    # 2) Helpful index for list queries
     op.execute("""
     DO $$
     BEGIN
@@ -64,10 +63,29 @@ def upgrade():
         ) THEN
             CREATE INDEX ix_event_slots_event_id ON public.event_slots (event_id);
         END IF;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)
 
-    # 3) Applications.slot_id FK -> event_slots.id with ON DELETE SET NULL (idempotent)
+    # 3) Ensure applications.slot_id column exists (nullable)
+    op.execute("""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'applications'
+              AND column_name  = 'slot_id'
+        ) THEN
+            ALTER TABLE public.applications
+            ADD COLUMN slot_id INTEGER NULL;
+        END IF;
+    END
+    $$ LANGUAGE plpgsql;
+    """)
+
+    # 4) (Re)create FK applications.slot_id -> event_slots.id (ON DELETE SET NULL)
     op.execute("""
     DO $$
     BEGIN
@@ -78,18 +96,21 @@ def upgrade():
               AND table_name = 'applications'
               AND constraint_type = 'FOREIGN KEY'
         ) THEN
-            ALTER TABLE public.applications DROP CONSTRAINT applications_slot_id_fkey;
+            ALTER TABLE public.applications
+            DROP CONSTRAINT applications_slot_id_fkey;
         END IF;
 
         ALTER TABLE public.applications
         ADD CONSTRAINT applications_slot_id_fkey
         FOREIGN KEY (slot_id) REFERENCES public.event_slots(id)
         ON DELETE SET NULL;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)
 
+
 def downgrade():
-    # Downgrade best-effort (safe to re-run)
+    # Drop FK (best effort)
     op.execute("""
     DO $$
     BEGIN
@@ -100,11 +121,14 @@ def downgrade():
               AND table_name = 'applications'
               AND constraint_type = 'FOREIGN KEY'
         ) THEN
-            ALTER TABLE public.applications DROP CONSTRAINT applications_slot_id_fkey;
+            ALTER TABLE public.applications
+            DROP CONSTRAINT applications_slot_id_fkey;
         END IF;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)
 
+    # Drop unique constraint if present
     op.execute("""
     DO $$
     BEGIN
@@ -118,9 +142,11 @@ def downgrade():
             ALTER TABLE public.event_slots
             DROP CONSTRAINT event_slots_event_id_label_key;
         END IF;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)
 
+    # Drop index if present (leave slot_id column in place)
     op.execute("""
     DO $$
     BEGIN
@@ -132,5 +158,6 @@ def downgrade():
         ) THEN
             DROP INDEX public.ix_event_slots_event_id;
         END IF;
-    END$$;
+    END
+    $$ LANGUAGE plpgsql;
     """)

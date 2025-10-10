@@ -1,17 +1,17 @@
 # alembic/env.py
 from __future__ import annotations
 
-import os
-import sys
+import os, sys
 from pathlib import Path
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-# ── Ensure project root on sys.path & load .env ────────────────────────────────
+# ── Ensure project root on sys.path & load .env BEFORE importing app modules ──
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 try:
     from dotenv import load_dotenv  # optional
@@ -19,7 +19,7 @@ try:
 except Exception:
     pass
 
-# ── Alembic config & logging ───────────────────────────────────────────────────
+# ── Alembic config & logging ─────────────────────────────────────────────────
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
@@ -28,58 +28,36 @@ if config.config_file_name:
 db_url = os.environ.get("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
 if not db_url:
     raise RuntimeError("Set DATABASE_URL or sqlalchemy.url in alembic.ini")
-
 config.set_main_option("sqlalchemy.url", db_url)
 is_sqlite = db_url.startswith("sqlite:")
 
-# --- Import Base and models (tolerant) ----------------------------------------
-from app.db import Base
+# ── Import Base & models exactly once (so metadata is populated) ──────────────
+# ── Import Base & models exactly once (so metadata is populated) ──────────────
+from app.db import Base  # single source of truth for Base
 
-def _try_import(mod: str) -> bool:
+def _try_import(mod: str):
     try:
         __import__(mod)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[alembic] optional import failed: {mod}: {e}")
         return False
 
-# Import only modules that actually exist
-_try_import("app.models.event")
-_try_import("app.models.vendor")
-_try_import("app.models.application")
-_try_import("app.models.slot")      # <= our Slot model
-# _try_import("app.models.user")    # add if/when available
+# Import model modules so tables register on Base.metadata
+for mod in (
+    "app.models.event",
+    "app.models.vendor",
+    "app.models.application",
+    "app.models.slot",
+    # "app.models.user",  # uncomment only if this module actually exists
+):
+    _try_import(mod)
 
 target_metadata = Base.metadata
 
-# Whitelist the tables to manage now
-MANAGED_TABLES = {
-    "events",
-    "event_slots",
-    "applications",
-    "vendors",
-    # "users",
-    # "vendor_profiles",
-}
-
+# If you want to restrict tables later, re-enable include_object after baseline.
 def _include_object(object, name, type_, reflected, compare_to):
-    """
-    Only manage whitelisted tables, and avoid dropping tables that exist
-    in DB but aren't in metadata.
-    """
-    if type_ == "table":
-        if name not in MANAGED_TABLES:
-            return False
-        if reflected and compare_to is None:  # would become a DROP — block it
-            return False
-        return True
-
-    parent = getattr(object, "table", None)
-    if parent is not None:
-        if parent.name not in MANAGED_TABLES:
-            return False
-        if reflected and compare_to is None:
-            return False
-    return True
+    return True  # baseline: include everything
 
 # ── Migration runners ─────────────────────────────────────────────────────────
 def run_migrations_offline() -> None:
