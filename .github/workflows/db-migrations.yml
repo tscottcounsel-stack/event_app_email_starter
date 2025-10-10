@@ -6,7 +6,6 @@ on:
 
 jobs:
   migrate:
-    # Run this job IN a container, so service hostnames (e.g., "postgres") resolve.
     container:
       image: python:3.11-slim
     runs-on: ubuntu-latest
@@ -18,7 +17,6 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
-        # No port mapping needed; the job container can reach "postgres:5432"
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s
@@ -26,7 +24,7 @@ jobs:
           --health-retries=30
 
     env:
-      # IMPORTANT: use the service hostname from inside the container
+      # single source of truth for the run
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONPATH: .
@@ -46,25 +44,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Fallbacks if not pinned
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
-      - name: Show Alembic info (pre)
+      - name: Set URL everywhere (env file + alembic.ini)
         run: |
-          alembic --version || true
-          alembic heads || true
-          alembic history || true
+          # 1) write a fresh .env so python-dotenv picks THIS up
+          printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
+          echo ".env contents:"
+          cat .env
 
-      - name: Show effective URL sources
+          # 2) force alembic.ini fallback to the same URL
+          if [ -f alembic.ini ]; then
+            sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = '"$DATABASE_URL"'#' alembic.ini
+            echo "alembic.ini sqlalchemy.url:"
+            grep -E '^sqlalchemy\.url' alembic.ini || true
+          fi
+
+      - name: Show effective sources (debug)
         run: |
           echo "ENV DATABASE_URL: $DATABASE_URL"
-          grep -E '^sqlalchemy\.url' alembic.ini || true
+          [ -f .env ] && echo ".env:" && cat .env
+          [ -f alembic.ini ] && echo "alembic.ini url:" && grep -E '^sqlalchemy\.url' alembic.ini || true
 
       - name: Wait for Postgres (python loop)
         run: |
           python - << 'PY'
           import os, time, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
+          url = os.getenv("DATABASE_URL")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           for i in range(90):
             try:
@@ -85,7 +91,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -eux
-          # ensure alembic picks env var (env.py prefers DATABASE_URL; alembic.ini is a fallback)
+          alembic --version
           alembic stamp base
           alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
@@ -94,12 +100,11 @@ jobs:
         run: |
           python - << 'PY'
           import os, sys, psycopg2
-          url = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/eventdb")
+          url = os.getenv("DATABASE_URL")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           conn = psycopg2.connect(pgurl)
           cur = conn.cursor()
-          def one(sql):
-            cur.execute(sql); return cur.fetchone()[0]
+          def one(sql): cur.execute(sql); return cur.fetchone()[0]
           checks = [
             ("enum userrole has 'admin'", one("""
               SELECT EXISTS (
