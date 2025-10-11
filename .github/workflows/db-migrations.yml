@@ -16,7 +16,7 @@ jobs:
           POSTGRES_DB: eventdb
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - "5432:5432"   # use 127.0.0.1 from the runner
+          - "5432:5432"
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s --health-timeout=5s --health-retries=60
@@ -40,13 +40,11 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
-      # Force the env var for all subsequent steps (wins over repo/org vars)
       - name: Force CI DATABASE_URL (override anything)
         run: |
           echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
           echo "CI DATABASE_URL set for subsequent steps"
 
-      # Optional: reflect URL into .env and alembic.ini (belt & suspenders)
       - name: Set URL everywhere (env file + alembic.ini)
         run: |
           printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
@@ -71,15 +69,6 @@ jobs:
               time.sleep(1)
           else:
             raise SystemExit("Postgres not ready in time")
-          PY
-
-      - name: Show effective DB host (env.py will log too)
-        run: |
-          python - << 'PY'
-          import os, urllib.parse as u
-          url = os.getenv("DATABASE_URL","")
-          p = u.urlparse(url.replace("postgresql+psycopg2://","postgresql://"))
-          print("DATABASE_URL host:", p.hostname)
           PY
 
       - name: psql smoke
@@ -120,7 +109,7 @@ jobs:
                 WHERE t.relname='event_slots'
                   AND c.conname='event_slots_event_id_label_key'
               )""")),
-            ("index ix_event_slots_event_id present", one("""
+            ("index ix_event_slots_event_id present)", one("""
               SELECT EXISTS (
                 SELECT 1 FROM pg_indexes
                 WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
