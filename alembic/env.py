@@ -39,20 +39,20 @@ else:
 if not db_url:
     raise RuntimeError("Set DATABASE_URL (preferred) or sqlalchemy.url in alembic.ini/.env")
 
-# In CI, auto-rewrite localhost -> service hostname 'postgres'
-if IN_CI and ("127.0.0.1" in db_url or "@localhost" in db_url or "://localhost" in db_url):
-    from urllib.parse import urlparse, urlunparse
-    raw = db_url.replace("postgresql+psycopg2://", "postgresql://")
-    u = urlparse(raw)
-    userinfo = (u.username or "postgres"), (u.password or "postgres")
-    host = "postgres"
-    port = u.port or 5432
-    path = u.path or "/eventdb"
-    db_url = f"postgresql+psycopg2://{userinfo[0]}:{userinfo[1]}@{host}:{port}{path}"
+# ⚠️ IMPORTANT: DO NOT rewrite/guard localhost here.
+# The workflow decides whether to use 127.0.0.1 or the 'postgres' service host.
 
-# Mirror URL into Alembic config for consistency
 config.set_main_option("sqlalchemy.url", db_url)
-print(f"[db] Effective DATABASE_URL = {db_url}")
+
+# Log only the host, not full URL
+def _host_only(u: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(u.replace("postgresql+psycopg2://", "postgresql://"))
+        return p.hostname or "?"
+    except Exception:
+        return "?"
+print(f"[db] Effective host: {_host_only(db_url)}")
 is_sqlite = db_url.startswith("sqlite:")
 
 # ── Import Base & models so metadata is populated ────────────────────────────
