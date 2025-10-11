@@ -9,25 +9,24 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: eventdb
-        ports:
-          - "5432:5432"   # expose to runner; we'll use 127.0.0.1
-        options: >-
-          --health-cmd="pg_isready -U postgres -d eventdb"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=30
+   services:
+  postgres:
+    image: postgres:17
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: eventdb
+      POSTGRES_HOST_AUTH_METHOD: trust   # <-- allow passwordless auth in CI
+    ports:
+      - "5432:5432"
+    options: >-
+      --health-cmd="pg_isready -U postgres -d eventdb"
+      --health-interval=5s --health-timeout=5s --health-retries=60
+
 
     env:
-      # use localhost since we published the port
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PYTHONPATH: .
+  DATABASE_URL: postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb
+  PYTHONPATH: .
+
 
     steps:
       - name: Checkout
@@ -51,14 +50,15 @@ jobs:
           echo "CI DATABASE_URL set for subsequent steps"
 
       # Optional: reflect URL into .env and alembic.ini (belt & suspenders)
-      - name: Set URL everywhere (env file + alembic.ini)
-        run: |
-          printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
-          if [ -f alembic.ini ]; then
-            sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = '"$DATABASE_URL"'#' alembic.ini
-          fi
-          echo "ENV DATABASE_URL: $DATABASE_URL"
-          [ -f alembic.ini ] && grep -E '^sqlalchemy\.url' alembic.ini || true
+      - name: Force CI DATABASE_URL (override anything)
+  run: |
+    echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
+    echo "CI DATABASE_URL set for subsequent steps"
+- name: psql smoke
+  run: |
+    sudo apt-get update && sudo apt-get install -y postgresql-client
+    psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
+
 
       - name: Wait for Postgres (python loop)
         run: |
@@ -76,6 +76,20 @@ jobs:
           else:
             raise SystemExit("Postgres not ready in time")
           PY
+
+      - name: Show effective DB host (env.py will log too)
+        run: |
+          python - << 'PY'
+          import os, urllib.parse as u
+          url = os.getenv("DATABASE_URL","")
+          p = u.urlparse(url.replace("postgresql+psycopg2://","postgresql://"))
+          print("DATABASE_URL host:", p.hostname)
+          PY
+
+      - name: psql smoke
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
 
       - name: Run migrations (base -> baseline -> head)
         env:
