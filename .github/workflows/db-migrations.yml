@@ -9,24 +9,21 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-   services:
-  postgres:
-    image: postgres:17
-    env:
-      POSTGRES_USER: postgres
-      POSTGRES_DB: eventdb
-      POSTGRES_HOST_AUTH_METHOD: trust   # <-- allow passwordless auth in CI
-    ports:
-      - "5432:5432"
-    options: >-
-      --health-cmd="pg_isready -U postgres -d eventdb"
-      --health-interval=5s --health-timeout=5s --health-retries=60
-
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: eventdb
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - "5432:5432"   # use 127.0.0.1 from the runner
+        options: >-
+          --health-cmd="pg_isready -U postgres -d eventdb"
+          --health-interval=5s --health-timeout=5s --health-retries=60
 
     env:
-  DATABASE_URL: postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb
-  PYTHONPATH: .
-
+      DATABASE_URL: postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb
+      PYTHONPATH: .
 
     steps:
       - name: Checkout
@@ -46,25 +43,24 @@ jobs:
       # Force the env var for all subsequent steps (wins over repo/org vars)
       - name: Force CI DATABASE_URL (override anything)
         run: |
-          echo 'DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
+          echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
           echo "CI DATABASE_URL set for subsequent steps"
 
       # Optional: reflect URL into .env and alembic.ini (belt & suspenders)
-      - name: Force CI DATABASE_URL (override anything)
-  run: |
-    echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
-    echo "CI DATABASE_URL set for subsequent steps"
-- name: psql smoke
-  run: |
-    sudo apt-get update && sudo apt-get install -y postgresql-client
-    psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
-
+      - name: Set URL everywhere (env file + alembic.ini)
+        run: |
+          printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
+          if [ -f alembic.ini ]; then
+            sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = '"$DATABASE_URL"'#' alembic.ini
+          fi
+          echo "ENV DATABASE_URL: $DATABASE_URL"
+          [ -f alembic.ini ] && grep -E '^sqlalchemy\.url' alembic.ini || true
 
       - name: Wait for Postgres (python loop)
         run: |
           python - << 'PY'
           import os, time, psycopg2
-          url = os.getenv("DATABASE_URL")
+          url = os.getenv("DATABASE_URL", "")
           pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
           for i in range(120):
             try:
@@ -89,7 +85,7 @@ jobs:
       - name: psql smoke
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
+          psql -w -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
 
       - name: Run migrations (base -> baseline -> head)
         env:
