@@ -16,7 +16,7 @@ jobs:
           POSTGRES_DB: eventdb
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
-          - "5432:5432"   # expose to runner; we use 127.0.0.1
+          - "5432:5432"
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=5s --health-timeout=5s --health-retries=60
@@ -40,13 +40,11 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
 
-      # Force the env var for all subsequent steps (wins over repo/org vars)
       - name: Force CI DATABASE_URL (override anything)
         run: |
           echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
           echo "CI DATABASE_URL set for subsequent steps"
 
-      # Optional: reflect URL into .env and alembic.ini (belt & suspenders)
       - name: Set URL everywhere (env file + alembic.ini)
         run: |
           printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
