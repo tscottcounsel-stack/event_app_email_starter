@@ -1,4 +1,4 @@
-﻿name: DB Migrations
+name: DB Migrations
 
 on:
   push:
@@ -70,6 +70,26 @@ jobs:
           else:
             raise SystemExit("Postgres not ready in time")
           PY
+      - name: Python connect smoke (psycopg2)
+        run: |
+          python - << 'PY'
+          import os, psycopg2, urllib.parse as u
+          url = os.getenv("DATABASE_URL","")
+          print("DATABASE_URL =", url)
+          p = u.urlparse(url.replace("postgresql+psycopg2://","postgresql://"))
+          conn = psycopg2.connect(
+            dbname=p.path.lstrip("/"),
+            user=p.username or "postgres",
+            host=p.hostname or "127.0.0.1",
+            port=p.port or 5432,
+            password=p.password or ""  # blank on purpose; we use trust
+          )
+          with conn.cursor() as cur:
+              cur.execute("SELECT version();")
+              print("Connected OK:", cur.fetchone()[0])
+          conn.close()
+          PY
+
 
       - name: psql smoke
         run: |
