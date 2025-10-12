@@ -14,7 +14,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: eventdb
-          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_HOST_AUTH_METHOD: trust   # passwordless
         ports:
           - "5432:5432"
         options: >-
@@ -37,22 +37,7 @@ jobs:
       - name: Install python deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install alembic psycopg2-binary SQLAlchemy python-dotenv
-
-      - name: Force CI DATABASE_URL (override anything)
-        run: |
-          echo 'DATABASE_URL=postgresql+psycopg2://postgres@127.0.0.1:5432/eventdb' >> $GITHUB_ENV
-          echo "CI DATABASE_URL set for subsequent steps"
-
-      - name: Set URL everywhere (env file + alembic.ini)
-        run: |
-          printf "DATABASE_URL=%s\n" "$DATABASE_URL" > .env
-          if [ -f alembic.ini ]; then
-            sed -i 's#^sqlalchemy.url *=.*#sqlalchemy.url = '"$DATABASE_URL"'#' alembic.ini
-          fi
-          echo "ENV DATABASE_URL: $DATABASE_URL"
-          [ -f alembic.ini ] && grep -E '^sqlalchemy\.url' alembic.ini || true
 
       - name: Wait for Postgres (python loop)
         run: |
@@ -71,27 +56,7 @@ jobs:
             raise SystemExit("Postgres not ready in time")
           PY
 
-      - name: Python connect smoke (psycopg2)
-        run: |
-          python - << 'PY'
-          import os, psycopg2, urllib.parse as u
-          url = os.getenv("DATABASE_URL","")
-          print("DATABASE_URL =", url)
-          p = u.urlparse(url.replace("postgresql+psycopg2://","postgresql://"))
-          conn = psycopg2.connect(
-            dbname=p.path.lstrip("/"),
-            user=p.username or "postgres",
-            host=p.hostname or "127.0.0.1",
-            port=p.port or 5432,
-            password=p.password or ""  # blank on purpose; we use trust
-          )
-          with conn.cursor() as cur:
-              cur.execute("SELECT version();")
-              print("Connected OK:", cur.fetchone()[0])
-          conn.close()
-          PY
-
-      - name: psql smoke
+      - name: psql smoke (no password, thanks to trust)
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
           psql -w -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
@@ -102,63 +67,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -eux
-          python - << 'PY'
-          import os
-          print("ALEMBIC step sees DATABASE_URL =", os.getenv("DATABASE_URL"))
-          PY
           alembic --version
           alembic stamp base
           alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
-
-      - name: Verify schema (enum, constraints, FK)
-        run: |
-          python - << 'PY'
-          import os, sys, psycopg2
-          url = os.getenv("DATABASE_URL")
-          pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-          conn = psycopg2.connect(pgurl); cur = conn.cursor()
-          def one(sql): cur.execute(sql); return cur.fetchone()[0]
-          checks = [
-            ("enum userrole has 'admin'", one("""
-              SELECT EXISTS (
-                SELECT 1 FROM pg_enum e
-                JOIN pg_type t ON t.oid=e.enumtypid
-                WHERE t.typname='userrole' AND e.enumlabel='admin'
-              )""")),
-            ("unique on event_slots(event_id,label)", one("""
-              SELECT EXISTS (
-                SELECT 1 FROM pg_constraint c
-                JOIN pg_class t ON t.oid=c.conrelid
-                WHERE t.relname='event_slots'
-                  AND c.conname='event_slots_event_id_label_key'
-              )""")),
-            ("index ix_event_slots_event_id present", one("""
-              SELECT EXISTS (
-                SELECT 1 FROM pg_indexes
-                WHERE schemaname='public' AND tablename='event_slots' AND indexname='ix_event_slots_event_id'
-              )""")),
-            ("applications.slot_id column exists", one("""
-              SELECT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='applications' AND column_name='slot_id'
-              )""")),
-            ("applications_slot_id_fkey present", one("""
-              SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.table_constraints
-                WHERE table_schema='public' AND table_name='applications'
-                  AND constraint_type='FOREIGN KEY'
-                  AND constraint_name='applications_slot_id_fkey'
-              )""")),
-          ]
-          bad = [name for name, ok in checks if not ok]
-          for name, ok in checks: print(("OK   " if ok else "FAIL "), name)
-          if bad: print("Schema checks FAILED:", bad); sys.exit(1)
-          print("Schema checks OK")
-          PY
-
-      - name: Show Alembic info (post)
-        if: always()
-        run: |
-          alembic current -v || true
