@@ -20,10 +20,25 @@ if not db_url:
 # Mirror into Alembic so CLI shows the same URL
 config.set_main_option("sqlalchemy.url", db_url)
 
-# We’re intentionally NOT importing app models/Base here.
-# These migrations are hand-written / idempotent; no autogenerate required.
+# ── Preflight: connect once with psycopg2 so we see the *real* error clearly ─
+try:
+    import psycopg2
+    from urllib.parse import urlparse
+    p = urlparse(db_url.replace("postgresql+psycopg2://", "postgresql://"))
+    conn = psycopg2.connect(
+        dbname=(p.path or "/").lstrip("/") or "postgres",
+        user=p.username or "postgres",
+        host=p.hostname or "127.0.0.1",
+        port=p.port or 5432,
+        password=p.password or "",  # empty is fine with HOST_AUTH_METHOD=trust
+    )
+    conn.close()
+    print("[db] Preflight psycopg2 connect: OK")
+except Exception as e:
+    # show the exact server error here and stop
+    raise RuntimeError(f"[db] Preflight psycopg2 connect failed: {e}")
 
-# Dummy metadata & include all objects (not used, but keep args consistent)
+# We are not using autogenerate; metadata isn’t required for these migrations.
 target_metadata = None
 
 def _include_object(object, name, type_, reflected, compare_to):
