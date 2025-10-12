@@ -70,6 +70,7 @@ jobs:
           else:
             raise SystemExit("Postgres not ready in time")
           PY
+
       - name: Python connect smoke (psycopg2)
         run: |
           python - << 'PY'
@@ -90,7 +91,6 @@ jobs:
           conn.close()
           PY
 
-
       - name: psql smoke
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -102,6 +102,10 @@ jobs:
           PYTHONPATH: .
         run: |
           set -eux
+          python - << 'PY'
+          import os
+          print("ALEMBIC step sees DATABASE_URL =", os.getenv("DATABASE_URL"))
+          PY
           alembic --version
           alembic stamp base
           alembic upgrade 0678be8d8c2b
