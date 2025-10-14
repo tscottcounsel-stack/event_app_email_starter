@@ -1,0 +1,12 @@
+# Normalize text files in repo
+* text=auto
+
+# Force LF for source & config
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+
+# Keep CRLF for PowerShell scripts (optional)
+*.ps1  text eol=crlf
