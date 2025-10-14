@@ -57,15 +57,15 @@ jobs:
 
       - name: Run migrations (example)
         env:
-          DATABASE_URL: ${{ env.DATABASE_URL }}
+          DATABASE_URL: "${{ env.DATABASE_URL }}"
         run: |
           alembic --version
           alembic stamp base || true
-          # If you have a baseline, run it here (otherwise just go to head):
+          # If you have a baseline revision, put it here:
           # alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
 
       - name: Run unit tests
         env:
-          DATABASE_URL: ${{ env.DATABASE_URL }}
+          DATABASE_URL: "${{ env.DATABASE_URL }}"
         run: pytest -q
