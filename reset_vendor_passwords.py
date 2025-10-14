@@ -1,14 +1,10 @@
+from auth import hash_pw
 from database import SessionLocal
 from models import User
-from auth import hash_pw
 
 db = SessionLocal()
 
-vendors = [
-    "catering@example.com",
-    "photography@example.com",
-    "dj@example.com"
-]
+vendors = ["catering@example.com", "photography@example.com", "dj@example.com"]
 
 for email in vendors:
     vendor = db.query(User).filter(User.email == email).first()

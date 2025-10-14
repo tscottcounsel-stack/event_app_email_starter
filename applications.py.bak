@@ -76,4 +76,3 @@ def delete_application(application_id: int, db: Session = Depends(get_db)):
     db.delete(app)
     db.commit()
     return {"message": f"Application {application_id} deleted successfully"}
-

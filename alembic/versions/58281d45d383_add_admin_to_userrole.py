@@ -12,9 +12,11 @@ depends_on = None
 
 from alembic import op
 
+
 def upgrade():
     # 1) Ensure the enum type exists
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'userrole') THEN
@@ -22,10 +24,12 @@ def upgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # 2) Add 'admin' only if not present
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -39,7 +43,9 @@ def upgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
+
 
 def downgrade():
     # No safe way to remove an enum value in Postgres without heavy surgery.

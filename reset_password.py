@@ -1,6 +1,6 @@
+from auth import hash_pw
 from database import SessionLocal
 from models import User
-from auth import hash_pw
 
 db = SessionLocal()
 

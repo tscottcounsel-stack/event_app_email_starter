@@ -1,12 +1,14 @@
 # app/models/event.py
 from __future__ import annotations
-from typing import Optional, List
-from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, DateTime
+from datetime import datetime
+from typing import List, Optional
+
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base  # <- no TimestampMixin here
+
 
 class Event(Base):  # <- removed TimestampMixin
     __tablename__ = "events"
@@ -15,7 +17,9 @@ class Event(Base):  # <- removed TimestampMixin
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     organizer_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    date: Mapped[datetime] = mapped_column(DateTime(), nullable=False)  # timestamp w/o tz
+    date: Mapped[datetime] = mapped_column(
+        DateTime(), nullable=False
+    )  # timestamp w/o tz
     location: Mapped[str] = mapped_column(String(255), nullable=False)
 
     description: Mapped[Optional[str]] = mapped_column(Text)
@@ -28,8 +32,11 @@ class Event(Base):  # <- removed TimestampMixin
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-applications = relationship("Application", back_populates="event", cascade="all, delete-orphan")
+
+
+applications = relationship(
+    "Application", back_populates="event", cascade="all, delete-orphan"
+)
 
 
 slots = relationship("Slot", cascade="all, delete-orphan", back_populates="event")
-

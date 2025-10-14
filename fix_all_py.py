@@ -1,14 +1,19 @@
-import pathlib, re, io, sys
+import io
+import pathlib
+import re
+import sys
 
 root = pathlib.Path(".").resolve()
 
+
 def norm(s: str) -> str:
-    s = s.lstrip("\ufeff")                  # strip BOM
-    s = s.replace("\t", "    ")             # tabs -> 4 spaces
-    s = s.replace("\u00A0", " ")            # NBSP -> space
+    s = s.lstrip("\ufeff")  # strip BOM
+    s = s.replace("\t", "    ")  # tabs -> 4 spaces
+    s = s.replace("\u00A0", " ")  # NBSP -> space
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+\n", "\n", s)        # trim trailing spaces
+    s = re.sub(r"[ \t]+\n", "\n", s)  # trim trailing spaces
     return s
+
 
 changed = 0
 for p in root.rglob("*.py"):

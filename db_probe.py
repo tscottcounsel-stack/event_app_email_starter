@@ -1,4 +1,7 @@
-import os, sys, traceback
+import os
+import sys
+import traceback
+
 import sqlalchemy as sa
 
 u = os.environ.get("DATABASE_URL")

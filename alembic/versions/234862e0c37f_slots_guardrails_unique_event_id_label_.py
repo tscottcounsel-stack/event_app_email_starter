@@ -9,7 +9,8 @@ depends_on = None
 
 def upgrade():
     # 1) Ensure UNIQUE(event_id, label) on event_slots
-    op.execute("""
+    op.execute(
+        """
     DO $$
     DECLARE
         has_constraint bool;
@@ -49,10 +50,12 @@ def upgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # 2) Helpful index for list queries
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -65,10 +68,12 @@ def upgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # 3) Ensure applications.slot_id column exists (nullable)
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -83,10 +88,12 @@ def upgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # 4) (Re)create FK applications.slot_id -> event_slots.id (ON DELETE SET NULL)
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF EXISTS (
@@ -106,12 +113,14 @@ def upgrade():
         ON DELETE SET NULL;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
 
 def downgrade():
     # Drop FK (best effort)
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF EXISTS (
@@ -126,10 +135,12 @@ def downgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # Drop unique constraint if present
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF EXISTS (
@@ -144,10 +155,12 @@ def downgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )
 
     # Drop index if present (leave slot_id column in place)
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
         IF EXISTS (
@@ -160,4 +173,5 @@ def downgrade():
         END IF;
     END
     $$ LANGUAGE plpgsql;
-    """)
+    """
+    )

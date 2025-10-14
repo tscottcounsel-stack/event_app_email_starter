@@ -1,7 +1,9 @@
-﻿from pathlib import Path
-from dotenv import load_dotenv
-import os, random
+﻿import os
+import random
+from pathlib import Path
+
 import sqlalchemy as sa
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=ROOT / ".env")
@@ -14,12 +16,13 @@ with e.begin() as c:
         "select id from public.users where role in ('organizer','admin') order by id limit 1"
     ).first()
     if row:
-        print(row[0]); raise SystemExit
+        print(row[0])
+        raise SystemExit
 
     # create a simple organizer
     email = f"org_{random.randint(1000,9999)}@example.com"
     r = c.exec_driver_sql(
         "insert into public.users (email, password, role) values (%(email)s, %(password)s, 'organizer') returning id",
-        {"email": email, "password": "pass"}
+        {"email": email, "password": "pass"},
     )
     print(r.scalar())

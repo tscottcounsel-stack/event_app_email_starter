@@ -1,6 +1,9 @@
-﻿import os, sqlalchemy as sa
-u=os.environ["DATABASE_URL"]
-e=sa.create_engine(u, pool_pre_ping=True)
+﻿import os
+
+import sqlalchemy as sa
+
+u = os.environ["DATABASE_URL"]
+e = sa.create_engine(u, pool_pre_ping=True)
 with e.connect() as c:
     q = """SELECT is_nullable
              FROM information_schema.columns

@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Optional, List
+
+from typing import List, Optional
 
 from sqlalchemy import Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -25,4 +26,8 @@ class Vendor(TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-applications = relationship("Application", back_populates="vendor", cascade="all, delete-orphan")
+
+
+applications = relationship(
+    "Application", back_populates="vendor", cascade="all, delete-orphan"
+)

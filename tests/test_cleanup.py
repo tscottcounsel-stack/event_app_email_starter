@@ -1,5 +1,6 @@
 import requests
 
+
 def test_cleanup_users(base_url):
     res = requests.get(f"{base_url}/users/")
     assert res.status_code == 200

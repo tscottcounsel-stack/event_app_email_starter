@@ -1,4 +1,7 @@
-import os, sqlalchemy as sa
+import os
+
+import sqlalchemy as sa
+
 e = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
 sql = """
 select schemaname, tablename, indexname, indexdef

@@ -1,14 +1,13 @@
 # Event App Email Starter
 
-This is a simple FastAPI project with Gmail email-sending support.
+![DB Migrations](https://github.com/tscottcounsel-stack/event-app-api/actions/workflows/db-migrations.yml/badge.svg)
 
 ## Setup
-
-1. Install Python (>=3.9 recommended)
-2. Install dependencies:
+1. Python 3.11 recommended
+2. Install deps:
    ```bash
    pip install -r requirements.txt
-   ```
+
 3. Copy `.env.example` to `.env` and update with your Gmail + App Password.
    - You must enable **2FA on your Gmail** and create an **App Password**.
 4. Run the server:
@@ -27,5 +26,16 @@ POST `/send-email/` with JSON body:
   "body": "This is a test email!"
 }
 ```
+# Event Organizer–Vendor API
+
+A minimal FastAPI app used for vendor/event flows with simple in-memory storage and auth stubs.
+
+## Quickstart
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt -r dev-requirements.txt
+uvicorn main:app --reload
+
 
 Enjoy!

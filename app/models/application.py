@@ -4,11 +4,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
     String,
     Text,
-    DateTime,
-    Integer,
-    ForeignKey,
     UniqueConstraint,
     func,
 )
@@ -36,14 +36,20 @@ class Application(Base):
     )
 
     # pricing / status
-    price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)  # <-- matches migration
-    status: Mapped[str] = mapped_column(String(50), nullable=False, server_default="submitted")
+    price_cents: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )  # <-- matches migration
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="submitted"
+    )
 
     # flow fields
     desired_location: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # timestamps
     created_at: Mapped[datetime] = mapped_column(

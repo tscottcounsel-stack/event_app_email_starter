@@ -1,24 +1,29 @@
-from alembic import op
 import sqlalchemy as sa
 
-revision = "2bc4ea9ce529"        # KEEP your value
-down_revision = "a1b2c3d4e5f6"    # KEEP your value
+from alembic import op
+
+revision = "2bc4ea9ce529"  # KEEP your value
+down_revision = "a1b2c3d4e5f6"  # KEEP your value
 branch_labels = None
 depends_on = None
 
+
 def upgrade():
     # (Optional) ensure enum exists if this migration also adds it
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='userrole') THEN
         CREATE TYPE userrole AS ENUM ('organizer','vendor');
       END IF;
     END $$;
-    """)
+    """
+    )
 
     # Rewire FKs idempotently and correctly
-    op.execute("""
+    op.execute(
+        """
     DO $$
     DECLARE
       con_rec record;
@@ -40,10 +45,13 @@ def upgrade():
         ADD CONSTRAINT applications_vendor_id_fkey
           FOREIGN KEY (vendor_id) REFERENCES public.vendors(id) ON DELETE CASCADE;
     END $$;
-    """)
+    """
+    )
+
 
 def downgrade():
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
       IF EXISTS (
@@ -69,4 +77,5 @@ def downgrade():
         ADD CONSTRAINT applications_vendor_id_fkey
           FOREIGN KEY (vendor_id) REFERENCES public.vendors(id);
     END $$;
-    """)
+    """
+    )

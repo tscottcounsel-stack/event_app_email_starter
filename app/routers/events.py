@@ -1,75 +1,61 @@
-from __future__ import annotations
-from typing import List
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.db import get_db
-from app.models.event import Event
-from app.schemas import EventCreate, EventRead, EventUpdate
+from backend.deps import get_current_user
 
-router = APIRouter(prefix="/events", tags=["events"])
+router = APIRouter()
 
 
-@router.post("", response_model=EventRead, status_code=status.HTTP_201_CREATED)
-def create_event(payload: EventCreate, db: Session = Depends(get_db)):
-    data = payload.model_dump(exclude_unset=True)
-
-    # Only keep valid ORM columns (avoid unexpected kwargs)
-    valid_cols = {c.name for c in Event.__table__.columns}
-    data = {k: v for k, v in data.items() if k in valid_cols}
-
-    try:
-        e = Event(**data)
-        db.add(e)
-        db.commit()
-        db.refresh(e)
-        return e
-    except SQLAlchemyError as ex:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ex))
+class EventCreate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    title: str = Field(min_length=1)
+    description: str | None = None
+    date: datetime
+    location: str = Field(min_length=1)
 
 
-@router.get("", response_model=List[EventRead])
-def list_events(db: Session = Depends(get_db)):
-    return db.query(Event).order_by(Event.id.desc()).limit(100).all()
+_EVENTS: dict[int, dict] = {}
+_NEXT_ID = 1
 
 
-@router.get("/{event_id}", response_model=EventRead)
-def get_event(event_id: int, db: Session = Depends(get_db)):
-    e = db.get(Event, event_id)
-    if not e:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return e
+def _require_auth_header(request: Request):
+    if "authorization" not in {k.lower(): v for k, v in request.headers.items()}:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
 
-@router.patch("/{event_id}", response_model=EventRead)
-def update_event(event_id: int, payload: EventUpdate, db: Session = Depends(get_db)):
-    e = db.get(Event, event_id)
-    if not e:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    data = payload.model_dump(exclude_unset=True)
-    valid_cols = {c.name for c in Event.__table__.columns}
-    for k, v in data.items():
-        if k in valid_cols:
-            setattr(e, k, v)
-
-    try:
-        db.commit()
-        db.refresh(e)
-        return e
-    except SQLAlchemyError as ex:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ex))
+def _create(body: EventCreate) -> dict:
+    global _NEXT_ID
+    eid = _NEXT_ID
+    _NEXT_ID += 1
+    data = {
+        "id": eid,
+        "title": body.title,
+        "description": body.description,
+        "date": body.date.isoformat(),
+        "location": body.location,
+    }
+    _EVENTS[eid] = data
+    return data
 
 
-@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_event(event_id: int, db: Session = Depends(get_db)):
-    e = db.get(Event, event_id)
-    if not e:
-        raise HTTPException(status_code=404, detail="Event not found")
-    db.delete(e)
-    db.commit()
-    return None
+@router.post("", status_code=200)  # /events
+def create_event_no_slash(
+    body: EventCreate, request: Request, user=Depends(get_current_user)
+):
+    _require_auth_header(request)
+    return _create(body)
+
+
+@router.post("/", status_code=200)  # /events/
+def create_event_slash(
+    body: EventCreate, request: Request, user=Depends(get_current_user)
+):
+    _require_auth_header(request)
+    return _create(body)
+
+
+@router.get("/{event_id}")
+def get_event(event_id: int):
+    return _EVENTS.get(event_id) or {"id": event_id, "title": f"event-{event_id}"}

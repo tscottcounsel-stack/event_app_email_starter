@@ -1,46 +1,54 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-import sqlalchemy as sa
+from typing import Any
 
-from app.db import get_db
-from app.deps import role_required
-from app.schemas import VendorCreate, VendorRead
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
-router = APIRouter(prefix="/vendors", tags=["vendors"])
+from backend.deps import get_current_user
 
-@router.post("", response_model=dict, dependencies=[Depends(role_required("organizer","admin"))], status_code=201)
-def create_vendor(p: VendorCreate, db: Session = Depends(get_db)):
-    row = db.execute(sa.text("""
-        INSERT INTO public.vendors (name, category, phone, description)
-        VALUES (:name, :category, :phone, :description)
-        RETURNING id
-    """), p.model_dump()).fetchone()
-    db.commit()
-    return {"id": row.id}
+router = APIRouter()
 
-@router.get("/{vendor_id}", response_model=VendorRead)
-def get_vendor(vendor_id: int, db: Session = Depends(get_db)):
-    row = db.execute(sa.text("""
-        SELECT id, name, category, phone, description, created_at, updated_at
-        FROM public.vendors
-        WHERE id = :vid
-    """), {"vid": vendor_id}).mappings().first()
-    if not row:
-        raise HTTPException(404, "vendor not found")
-    return dict(row)
 
-@router.get("", response_model=list[VendorRead])
-def list_vendors(
-    db: Session = Depends(get_db),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    rows = db.execute(sa.text("""
-        SELECT id, name, category, phone, description, created_at, updated_at
-        FROM public.vendors
-        ORDER BY id
-        LIMIT :limit OFFSET :offset
-    """), {"limit": limit, "offset": offset}).mappings().all()
-    return [dict(r) for r in rows]
+@router.get("/health")
+def health():
+    return {"ok": True}
+
+
+_VENDORS: dict[int, dict] = {}
+_NEXT_ID: int = 1
+
+
+@router.get("")
+def list_vendors(limit: int = Query(100, ge=1, le=1000)):
+    return list(_VENDORS.values())[:limit]
+
+
+@router.post("", status_code=201)
+def create_vendor(body: Any = Body(default=None), user=Depends(get_current_user)):
+    raw = body if isinstance(body, dict) else {}
+    global _NEXT_ID
+    vid = _NEXT_ID
+    _NEXT_ID += 1
+    name = raw.get("name") or raw.get("display_name") or f"vendor-{vid}"
+    display_name = raw.get("display_name") or raw.get("name") or f"Vendor {vid}"
+    data = {
+        "id": vid,
+        "name": name,
+        "display_name": display_name,
+        "email": raw.get("email"),
+        **{
+            k: v
+            for k, v in raw.items()
+            if k not in {"id", "name", "display_name", "email"}
+        },
+    }
+    _VENDORS[vid] = data
+    return data
+
+
+@router.get("/{vendor_id}")
+def get_vendor(vendor_id: int):
+    v = _VENDORS.get(vendor_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return v

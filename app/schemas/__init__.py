@@ -1,7 +1,12 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+from .vendor import VendorCreate, VendorRead, VendorUpdate
+
 
 # ── Vendors ───────────────────────────────────────────────────────────
 class VendorCreate(BaseModel):
@@ -9,6 +14,7 @@ class VendorCreate(BaseModel):
     category: Optional[str] = None
     phone: Optional[str] = None
     description: Optional[str] = None
+
 
 class VendorRead(BaseModel):
     id: int
@@ -19,14 +25,17 @@ class VendorRead(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+
 # ── Applications ──────────────────────────────────────────────────────
 _ALLOWED_STATUSES = {"pending", "submitted", "approved", "declined"}
+
 
 class ApplicationCreate(BaseModel):
     event_id: int
     vendor_id: int
     desired_location: Optional[str] = None
     notes: Optional[str] = None
+
 
 class ApplicationPatch(BaseModel):
     status: Optional[str] = None
@@ -42,6 +51,7 @@ class ApplicationPatch(BaseModel):
         if v not in _ALLOWED_STATUSES:
             raise ValueError(f"status must be one of {sorted(_ALLOWED_STATUSES)}")
         return v
+
 
 class ApplicationRead(BaseModel):
     id: int

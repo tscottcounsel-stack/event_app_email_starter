@@ -1,20 +1,18 @@
-from backend.deps import get_current_user
-
-from backend.deps import current_user
-from backend.deps import get_current_user
-# auth.py
-from fastapi import APIRouter, Depends, HTTPException, Security, Query
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
-from passlib.context import CryptContext
-from jose import jwt
-from datetime import datetime, timedelta
-from pydantic import EmailStr
 import os
+from datetime import datetime, timedelta
 
-from database import get_db, Base, engine
+# auth.py
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import jwt
+from passlib.context import CryptContext
+from pydantic import EmailStr
+from sqlalchemy.orm import Session
+
+from backend.deps import current_user, get_current_user
+from database import Base, engine, get_db
 from models import User, UserRole
-from schemas import UserCreate, UserOut, Token, LoginRequest  # ? import LoginRequest
+from schemas import LoginRequest, Token, UserCreate, UserOut  # ? import LoginRequest
 
 # Create tables (SQLite file: app.db) on import
 Base.metadata.create_all(bind=engine)
@@ -57,12 +55,18 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     raw = None
-    if credentials and credentials.scheme.lower() == "bearer" and credentials.credentials:
+    if (
+        credentials
+        and credentials.scheme.lower() == "bearer"
+        and credentials.credentials
+    ):
         raw = credentials.credentials.strip()
     if not raw and token:
         raw = token.strip()
     if not raw:
-        raise HTTPException(status_code=401, detail="Missing authorization header or token")
+        raise HTTPException(
+            status_code=401, detail="Missing authorization header or token"
+        )
 
     try:
         data = jwt.decode(raw, JWT_SECRET, algorithms=[JWT_ALGO])
@@ -108,6 +112,3 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 @router.get("/me", response_model=UserOut)
 def me(current: User = Depends(current_user)):
     return current
-
-
-

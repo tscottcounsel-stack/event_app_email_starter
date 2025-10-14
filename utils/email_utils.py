@@ -1,7 +1,10 @@
 # utils/email_utils.py
-import smtplib, ssl, os
-from email.mime.text import MIMEText
+import os
+import smtplib
+import ssl
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,7 +12,10 @@ load_dotenv()
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 
-def send_email(to_email: str, subject: str, body: str, html: bool = False) -> tuple[bool, str | None]:
+
+def send_email(
+    to_email: str, subject: str, body: str, html: bool = False
+) -> tuple[bool, str | None]:
     """
     Sends an email via Gmail.
     - If html=False: send plain text
@@ -27,7 +33,9 @@ def send_email(to_email: str, subject: str, body: str, html: bool = False) -> tu
             msg["To"] = to_email
 
             # Plain fallback
-            plain = MIMEText("Your email client does not support HTML.", "plain", "utf-8")
+            plain = MIMEText(
+                "Your email client does not support HTML.", "plain", "utf-8"
+            )
             rich = MIMEText(body, "html", "utf-8")
             msg.attach(plain)
             msg.attach(rich)
@@ -49,7 +57,13 @@ def send_email(to_email: str, subject: str, body: str, html: bool = False) -> tu
         print("❌ Error sending email:", err)
         return False, err
 
-def render_template(headline: str, message: str, button_text: str | None = None, button_url: str | None = None) -> str:
+
+def render_template(
+    headline: str,
+    message: str,
+    button_text: str | None = None,
+    button_url: str | None = None,
+) -> str:
     """
     Very simple, inline-CSS HTML template (brand-neutral).
     """
@@ -100,6 +114,8 @@ def render_template(headline: str, message: str, button_text: str | None = None,
 </html>
     """
 
+
 def datetime_now():
     from datetime import datetime
+
     return datetime.now().strftime("%Y")

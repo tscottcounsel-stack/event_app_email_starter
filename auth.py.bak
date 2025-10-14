@@ -105,4 +105,3 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 @router.get("/me", response_model=UserOut)
 def me(current: User = Depends(get_current_user)):
     return current
-

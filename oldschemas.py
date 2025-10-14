@@ -1,8 +1,9 @@
 # backend/models/schemas.py
 
-from pydantic import BaseModel, EmailStr, ConfigDict
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 
 # ==============================
@@ -106,7 +107,7 @@ class EventOut(EventCreate):
 # ==============================
 class ApplicationCreate(BaseModel):
     event_id: int
-    vendor_id: int   # ✅ required so we know which vendor applied
+    vendor_id: int  # ✅ required so we know which vendor applied
     message: Optional[str] = None
 
 

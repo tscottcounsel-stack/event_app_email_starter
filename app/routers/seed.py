@@ -1,16 +1,18 @@
 from __future__ import annotations
+
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
 from sqlalchemy import text  # ← IMPORTANT in SQLAlchemy 2.0
+from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import vendor as m_vendor
-from app.models import event as m_event
 from app.models import application as m_app
+from app.models import event as m_event
+from app.models import vendor as m_vendor
 
 router = APIRouter(prefix="/seed", tags=["dev-seed"])
+
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def seed_demo(db: Session = Depends(get_db)):
@@ -19,12 +21,18 @@ def seed_demo(db: Session = Depends(get_db)):
     Requires at least one existing users.id to use as organizer_id.
     """
     # find a user id to use as organizer (highest id)
-    uid = db.execute(text("select id from public.users order by id desc limit 1")).scalar()
+    uid = db.execute(
+        text("select id from public.users order by id desc limit 1")
+    ).scalar()
     if not uid:
-        raise HTTPException(status_code=400, detail="No users found; create a user first.")
+        raise HTTPException(
+            status_code=400, detail="No users found; create a user first."
+        )
 
     # create a vendor
-    v = m_vendor.Vendor(name="Seed Vendor", category="catering", phone="555-0101", description="Seeded")
+    v = m_vendor.Vendor(
+        name="Seed Vendor", category="catering", phone="555-0101", description="Seeded"
+    )
     db.add(v)
     db.flush()  # to get v.id without a commit
 

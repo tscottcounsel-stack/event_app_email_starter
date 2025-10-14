@@ -1,14 +1,17 @@
-from alembic import op
 import sqlalchemy as sa
 
-revision = "a1b2c3d4e5f6"        # KEEP your value
-down_revision = "5f965d041c4a"   # KEEP your value
+from alembic import op
+
+revision = "a1b2c3d4e5f6"  # KEEP your value
+down_revision = "5f965d041c4a"  # KEEP your value
 branch_labels = None
 depends_on = None
 
+
 def upgrade():
     # Create table without FKs first (safe to re-run)
-    op.execute("""
+    op.execute(
+        """
     CREATE TABLE IF NOT EXISTS public.applications (
         id           SERIAL PRIMARY KEY,
         event_id     INTEGER NOT NULL,
@@ -20,10 +23,12 @@ def upgrade():
         updated_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         notes        TEXT
     );
-    """)
+    """
+    )
 
     # Unique (event_id, vendor_id) — idempotent via index
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -36,10 +41,12 @@ def upgrade():
           ON public.applications(event_id, vendor_id);
       END IF;
     END $$;
-    """)
+    """
+    )
 
     # Add FKs only if referenced tables exist; make sure vendor FK points to vendors(id)
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
       IF to_regclass('public.events')  IS NOT NULL
@@ -66,14 +73,18 @@ def upgrade():
             FOREIGN KEY (vendor_id) REFERENCES public.vendors(id) ON DELETE CASCADE;
       END IF;
     END $$;
-    """)
+    """
+    )
+
 
 def downgrade():
-    op.execute("""
+    op.execute(
+        """
     DO $$
     BEGIN
       IF to_regclass('public.applications') IS NOT NULL THEN
         DROP TABLE public.applications;
       END IF;
     END $$;
-    """)
+    """
+    )

@@ -5,12 +5,15 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-from alembic import op
 from sqlalchemy.engine import Connection
+
+from alembic import op
+
 
 def _import_models() -> None:
     # Import all model modules so their tables register on Base.metadata
     import importlib
+
     for mod in (
         "app.models.event",
         "app.models.vendor",
@@ -23,14 +26,18 @@ def _import_models() -> None:
         except Exception as e:
             print(f"[baseline] optional import failed: {mod}: {e}")
 
+
 def upgrade() -> None:
     _import_models()
     from app.db import Base
+
     bind: Connection = op.get_bind()
     Base.metadata.create_all(bind)
+
 
 def downgrade() -> None:
     _import_models()
     from app.db import Base
+
     bind: Connection = op.get_bind()
     Base.metadata.drop_all(bind)

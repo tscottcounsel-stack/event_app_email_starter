@@ -7,6 +7,7 @@ on:
 jobs:
   migrate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     services:
       postgres:
@@ -45,7 +46,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install alembic psycopg2-binary SQLAlchemy python-dotenv
+          pip install alembic psycopg2-binary SQLAlchemy python-dotenv pytest
 
       - name: Wait for Postgres (python loop)
         run: |
@@ -81,3 +82,13 @@ jobs:
           alembic stamp base
           alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
+
+      - name: Run unit tests
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          PYTHONPATH: .
+        run: pytest -q
+
+      - name: Show Alembic info (post)
+        if: always()
+        run: alembic current -v || true

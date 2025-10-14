@@ -82,4 +82,3 @@ def upsert_my_organizer_profile(
     db.commit()
     db.refresh(prof)
     return prof
-

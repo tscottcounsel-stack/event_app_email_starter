@@ -106,4 +106,3 @@ def featured_vendors(
 
     # Default: random
     return random.sample(vendors, min(count, len(vendors)))
-

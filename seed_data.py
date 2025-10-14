@@ -1,7 +1,7 @@
 # seed_data.py
-from database import SessionLocal, Base, engine
-from models import User, UserRole, VendorProfile
 from auth import hash_pw
+from database import Base, SessionLocal, engine
+from models import User, UserRole, VendorProfile
 
 # Ensure tables exist
 Base.metadata.create_all(bind=engine)
@@ -24,7 +24,7 @@ sample_vendors = [
             "rate_min": 500,
             "rate_max": 5000,
             "bio": "We provide gourmet catering for weddings and corporate events.",
-            "availability_notes": "Available all weekdays and weekends"
+            "availability_notes": "Available all weekdays and weekends",
         },
     },
     {
@@ -41,7 +41,7 @@ sample_vendors = [
             "rate_min": 300,
             "rate_max": 2000,
             "bio": "Event and wedding photography with 10+ years experience.",
-            "availability_notes": "Weekends preferred"
+            "availability_notes": "Weekends preferred",
         },
     },
     {
@@ -58,7 +58,7 @@ sample_vendors = [
             "rate_min": 200,
             "rate_max": 1500,
             "bio": "Professional DJ specializing in weddings and parties.",
-            "availability_notes": "Evenings and weekends"
+            "availability_notes": "Evenings and weekends",
         },
     },
 ]
@@ -120,5 +120,3 @@ if not existing_org:
     print(f"✅ Added organizer {organizer_email} (password: {organizer_pw})")
 else:
     print(f"Skipping organizer {organizer_email} (already exists)")
-
-

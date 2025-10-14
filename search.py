@@ -1,19 +1,18 @@
-from backend.deps import get_current_user
+import random
+from typing import List, Optional
 
-from backend.deps import current_user
-from backend.deps import get_current_user
 # search.py
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from typing import Optional, List
-import random
 
-from database import get_db
-from models import VendorProfile, User
-from schemas import VendorProfileOut
 from auth import get_current_user
+from backend.deps import current_user, get_current_user
+from database import get_db
+from models import User, VendorProfile
+from schemas import VendorProfileOut
 
 router = APIRouter(prefix="/search", tags=["Search"])
+
 
 # ---- JWT-protected search (requires login) ----
 @router.get("/vendors", response_model=List[VendorProfileOut])
@@ -84,7 +83,9 @@ def search_vendors_public(
 @router.get("/vendors/featured", response_model=List[VendorProfileOut])
 def featured_vendors(
     mode: str = Query("random", description="Choose 'random' or 'cheap'"),
-    category: Optional[str] = Query(None, description="Filter featured vendors by category"),
+    category: Optional[str] = Query(
+        None, description="Filter featured vendors by category"
+    ),
     count: int = Query(3, ge=1, le=10, description="Number of vendors to return"),
     db: Session = Depends(get_db),
 ):
@@ -109,5 +110,3 @@ def featured_vendors(
 
     # Default: random
     return random.sample(vendors, min(count, len(vendors)))
-
-
