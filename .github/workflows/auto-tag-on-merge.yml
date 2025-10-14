@@ -1,0 +1,64 @@
+name: Auto tag on merge
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine bump from labels
+        id: bump
+        run: |
+          labels="$(jq -r '.pull_request.labels[].name' <<< '${{ toJson(github.event) }}')"
+          echo "PR LABELS:"
+          echo "$labels"
+
+          bump="patch"
+          if echo "$labels" | grep -qiE '(^|[^a-z])major([^a-z]|$)|breaking-change'; then bump="major"; fi
+          if echo "$labels" | grep -qiE '(^|[^a-z])minor([^a-z]|$)|enhancement|feature'; then bump="minor"; fi
+          if echo "$labels" | grep -qiE '(^|[^a-z])patch([^a-z]|$)|bug|fix'; then [ "$bump" = "patch" ] && bump="patch"; fi
+
+          echo "bump=$bump" >> $GITHUB_OUTPUT
+
+      - name: Get latest tag
+        id: last
+        run: |
+          git fetch --tags
+          tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$tag" ]; then tag="v0.0.0"; fi
+          echo "latest=$tag" >> $GITHUB_OUTPUT
+
+      - name: Compute next version
+        id: next
+        run: |
+          latest='${{ steps.last.outputs.latest }}'
+          bump='${{ steps.bump.outputs.bump }}'
+          echo "Latest: $latest  Bump: $bump"
+
+          ver="${latest#v}"
+          IFS='.' read -r MA MI PA <<< "$ver"
+          case "$bump" in
+            major) MA=$((MA+1)); MI=0; PA=0 ;;
+            minor) MI=$((MI+1)); PA=0 ;;
+            patch) PA=$((PA+1)) ;;
+          esac
+          next="v${MA}.${MI}.${PA}"
+          echo "next=$next" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          next='${{ steps.next.outputs.next }}'
+          echo "Creating tag $next"
+          git tag -a "$next" -m "Release $next (auto-tagged on PR merge)"
+          git push origin "$next"

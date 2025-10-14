@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions / help
+    url: https://github.com/tscottcounsel-stack/event_app_email_starter/discussions
+    about: Ask questions or request guidance here.
