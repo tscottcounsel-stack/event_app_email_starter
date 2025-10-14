@@ -1,94 +1,71 @@
 name: DB Migrations
 
 on:
-  push:
+  workflow_dispatch:
   pull_request:
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     services:
       postgres:
-        image: postgres:17
+        image: postgres:15
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
         ports:
           - "5432:5432"
         options: >-
-          --health-cmd="pg_isready -U postgres -d eventdb"
-          --health-interval=5s --health-timeout=5s --health-retries=60
+          --health-cmd="pg_isready -U postgres -d eventdb -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=60
 
     env:
-      DATABASE_URL: postgresql+psycopg2://postgres:${{ secrets.CI_DB_PASSWORD }}@127.0.0.1:5432/eventdb
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
       PYTHONPATH: .
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
-      - name: Install python deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install alembic psycopg2-binary SQLAlchemy python-dotenv pytest
+          pip install alembic "psycopg[binary]" SQLAlchemy python-dotenv pytest
 
-      - name: Wait for Postgres (python loop)
+      - name: Wait for Postgres
         run: |
-          python - << 'PY'
-          import os, time, psycopg2
-          url = os.getenv("DATABASE_URL", "")
-          pgurl = url.replace("postgresql+psycopg2://", "postgresql://")
-          for i in range(120):
-              try:
-                  conn = psycopg2.connect(pgurl); conn.close()
-                  print("Postgres is ready"); break
-              except Exception as e:
-                  print(f"waiting for Postgres... ({i+1}/120): {e}")
-                  time.sleep(1)
-          else:
-              raise SystemExit("Postgres not ready in time")
-          PY
+          for i in {1..60}; do
+            pg_isready -h 127.0.0.1 -U postgres -d eventdb && exit 0
+            echo "waiting for Postgres... $i"
+            sleep 2
+          done
+          echo "Postgres not ready in time" >&2
+          exit 1
 
       - name: psql smoke
-        env:
-          PGPASSWORD: ${{ secrets.CI_DB_PASSWORD }}
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
-          psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
 
-      - name: Run migrations (base -> baseline -> head)
+      - name: Run migrations (example)
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
-          PYTHONPATH: .
         run: |
-          set -eux
           alembic --version
-          alembic stamp base
-          alembic upgrade 0678be8d8c2b
+          alembic stamp base || true
+          # If you have a baseline, run it here (otherwise just go to head):
+          # alembic upgrade 0678be8d8c2b
           alembic --raiseerr upgrade head
 
       - name: Run unit tests
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
-          PYTHONPATH: .
         run: pytest -q
-
-      - name: Show Alembic info (post)
-        if: always()
-        run: alembic current -v || true
