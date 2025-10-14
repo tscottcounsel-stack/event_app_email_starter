@@ -34,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f dev-requirements.txt ]; then pip install -r dev-requirements.txt; fi
-          pip install pytest httpx uvicorn fastapi "pydantic[dotenv]" sqlalchemy python-multipart
+          pip install pytest requests httpx uvicorn fastapi "pydantic[dotenv]" sqlalchemy python-multipart
       - name: Run tests (USE_DB=0)
         env:
           USE_DB: "0"
