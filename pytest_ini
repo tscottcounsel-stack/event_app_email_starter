@@ -1,7 +1,0 @@
-[pytest]
-filterwarnings =
-    ignore:Please use `import python_multipart` instead.:PendingDeprecationWarning:starlette\.formparsers
-    ignore:The 'app' shortcut is now deprecated:DeprecationWarning:httpx\._client
-    ignore:websockets\.legacy is deprecated:DeprecationWarning:websockets\.legacy
-    ignore:WebSocketServerProtocol is deprecated:DeprecationWarning:uvicorn\.protocols\.websockets\.websockets_impl
-    ignore:datetime\.datetime\.utcnow\(\) is deprecated:DeprecationWarning

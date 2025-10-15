@@ -1,1 +1,72 @@
-﻿<PASTE THE CI.YML CONTENT FROM ABOVE HERE>
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install pre-commit
+        run: python -m pip install --upgrade pip pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install mypy + stubs
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install mypy types-requests types-PyYAML
+      - name: Run mypy
+        run: mypy .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f dev-requirements.txt ]; then pip install -r dev-requirements.txt; fi
+          # direct deps needed by tests
+          pip install pytest pytest-cov requests httpx uvicorn fastapi "pydantic[dotenv]" sqlalchemy python-multipart
+      - name: Import app smoke
+        run: python -c "import main; print('app loaded')"
+      - name: Run tests with coverage (USE_DB=0)
+        env:
+          USE_DB: "0"
+        run: |
+          pytest -q --maxfail=1 \
+            --cov=. --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+      - name: Upload coverage.xml
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml

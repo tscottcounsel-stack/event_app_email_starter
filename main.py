@@ -7,13 +7,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # ======================================================================================
 # App setup
 # ======================================================================================
 app = FastAPI(title="Event Organizer-Vendor API")
-app.router.redirect_slashes = False  # avoid 307s between /x and /x/
+# Important: we’ll keep strict paths, but we register BOTH variants where it matters.
+app.router.redirect_slashes = False
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +24,25 @@ app.add_middleware(
 )
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
+# Debug helpers: confirm we’re hitting THIS file and list routes.
+# (We expose BOTH slash and no-slash to avoid 404 confusion.)
+# --------------------------------------------------------------------------------------
+@app.get("/__whoami")
+@app.get("/__whoami/")
+def whoami():
+    return {"file": __file__}
+
+
+@app.get("/__routes")
+@app.get("/__routes/")
+def list_routes():
+    return sorted(getattr(r, "path", "?") for r in app.routes)
+
+
+# --------------------------------------------------------------------------------------
 # Health & Meta
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 @app.get("/")
 def root():
     return {"message": "ok"}
@@ -39,6 +56,24 @@ def ping():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# --------------------------------------------------------------------------------------
+# Email (simple echo endpoint) — registered with and without trailing slash
+# --------------------------------------------------------------------------------------
+class EmailIn(BaseModel):
+    to_email: EmailStr
+    subject: str
+    body: str
+
+
+@app.post("/send-email", status_code=200)
+@app.post("/send-email/", status_code=200)
+def send_email(payload: EmailIn):
+    print(
+        f"[mail] to={payload.to_email} subj={payload.subject} body_len={len(payload.body)}"
+    )
+    return {"ok": True, "sent_to": payload.to_email}
 
 
 # ======================================================================================
@@ -104,6 +139,26 @@ def require_auth(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
         )
     return True
+
+
+# ======================================================================================
+# Send Email (simple echo for now)
+# ======================================================================================
+class EmailIn(BaseModel):
+    to_email: EmailStr
+    subject: str
+    body: str
+
+
+# accept both with and without trailing slash
+@app.post("/send-email", status_code=200)
+@app.post("/send-email/", status_code=200)
+def send_email(payload: EmailIn):
+    # TODO: wire to your real mailer; for now just log & echo
+    print(
+        f"[mail] to={payload.to_email} subj={payload.subject} body_len={len(payload.body)}"
+    )
+    return {"ok": True, "sent_to": payload.to_email}
 
 
 # ======================================================================================
