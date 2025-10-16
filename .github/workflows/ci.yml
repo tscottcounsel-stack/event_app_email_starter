@@ -1,1 +1,24 @@
-﻿<PASTE THE YAML ABOVE>
+﻿name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sanity:
+    name: Sanity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "Ref: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+          python3 --version || true
+          node --version || true
