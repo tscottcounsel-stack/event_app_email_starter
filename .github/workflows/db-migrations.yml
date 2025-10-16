@@ -1,4 +1,4 @@
-﻿name: DB Migrations
+name: DB Migrations
 on:
   workflow_dispatch:
 jobs:
