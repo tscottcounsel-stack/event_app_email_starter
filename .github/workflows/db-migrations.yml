@@ -1,10 +1,49 @@
-name: DB Migrations
+﻿name: DB Migrations
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "alembic/**"
+      - "alembic.ini"
+      - ".github/workflows/db-migrations.yml"
 
 jobs:
-  sanity:
+  migrate:
     runs-on: ubuntu-latest
+
     steps:
-      - run: echo OK
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH: .
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ensure these are present even if not in requirements.txt
+          pip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests
+          python - <<'PY'
+          import sys, pkgutil
+          print("Python:", sys.version)
+          for m in ("sqlalchemy","alembic","psycopg","requests"):
+              print(m, "OK" if pkgutil.find_loader(m) else "MISSING")
+          PY
+
+      - name: Run Alembic migrations
+        if: env.DATABASE_URL != ''
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euxo pipefail
+          alembic upgrade head
