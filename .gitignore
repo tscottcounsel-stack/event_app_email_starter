@@ -37,3 +37,11 @@ node_modules/
 # IDE
 .vscode/
 .idea/
+# CI/debug logs
+*.log
+ci_logs/
+job_*.zip
+run_full.log
+ci_job.log
+ci_failed_steps.log
+check_runs.json
