@@ -8,3 +8,15 @@
 *.ini text eol=lf
 *.cfg text eol=lf
 *.txt text eol=lf
+@'
+* text=auto
+*.ps1 text eol=lf
+*.sh  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.md  text eol=lf
+*.txt text eol=lf
+'@ | Set-Content .gitattributes -Encoding utf8
