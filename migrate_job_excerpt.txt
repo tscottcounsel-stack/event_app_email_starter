@@ -1,0 +1,61 @@
+﻿migrate	Install system packages	2025-10-16T00:50:03.8071370Z (Reading database ... 70%
+migrate	Install system packages	2025-10-16T00:50:04.4359628Z (Reading database ... 75%
+migrate	Install system packages	2025-10-16T00:50:05.1040125Z (Reading database ... 80%
+migrate	Install system packages	2025-10-16T00:50:05.8456900Z (Reading database ... 85%
+migrate	Install system packages	2025-10-16T00:50:06.6484684Z (Reading database ... 90%
+migrate	Install system packages	2025-10-16T00:50:07.4817995Z (Reading database ... 95%
+migrate	Install system packages	2025-10-16T00:50:07.4818619Z (Reading database ... 100%
+migrate	Install system packages	2025-10-16T00:50:07.4819582Z (Reading database ... 214596 files and directories currently installed.)
+migrate	Install system packages	2025-10-16T00:50:07.4865993Z Preparing to unpack .../postgresql-client_16+257build1.1_all.deb ...
+migrate	Install system packages	2025-10-16T00:50:07.4888473Z Unpacking postgresql-client (16+257build1.1) ...
+migrate	Install system packages	2025-10-16T00:50:07.5383558Z Setting up postgresql-client (16+257build1.1) ...
+migrate	Install system packages	2025-10-16T00:50:08.9836985Z
+migrate	Install system packages	2025-10-16T00:50:08.9837487Z Running kernel seems to be up-to-date.
+migrate	Install system packages	2025-10-16T00:50:08.9837859Z
+migrate	Install system packages	2025-10-16T00:50:08.9837968Z Restarting services...
+migrate	Install system packages	2025-10-16T00:50:08.9912842Z
+migrate	Install system packages	2025-10-16T00:50:08.9913305Z Service restarts being deferred:
+migrate	Install system packages	2025-10-16T00:50:08.9916773Z  systemctl restart hosted-compute-agent.service
+migrate	Install system packages	2025-10-16T00:50:08.9917152Z
+migrate	Install system packages	2025-10-16T00:50:08.9917480Z No containers need to be restarted.
+migrate	Install system packages	2025-10-16T00:50:08.9917770Z
+migrate	Install system packages	2025-10-16T00:50:08.9917963Z No user sessions are running outdated binaries.
+migrate	Install system packages	2025-10-16T00:50:08.9918283Z
+migrate	Install system packages	2025-10-16T00:50:08.9918547Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+migrate	Install Python deps	∩╗┐2025-10-16T00:50:10.0692450Z ##[group]Run set -euxo pipefail
+migrate	Install Python deps	2025-10-16T00:50:10.0692796Z [36;1mset -euxo pipefail[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693081Z [36;1mpython -m pip install --upgrade pip[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693459Z [36;1mif [ -f requirements.txt ]; then pip install -r requirements.txt; fi[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693900Z [36;1m# Ensure these are present even if not in requirements.txt[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694366Z [36;1mpip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694755Z [36;1mpython - <<'PY'[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694963Z [36;1mimport sys, pkgutil[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695190Z [36;1mprint("Python:", sys.version)[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695504Z [36;1mfor m in ("sqlalchemy","alembic","psycopg","requests"):[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695879Z [36;1m    print(m, "OK" if pkgutil.find_loader(m) else "MISSING")[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0696170Z [36;1mPY[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0730343Z shell: /usr/bin/bash -e {0}
+migrate	Install Python deps	2025-10-16T00:50:10.0730579Z env:
+migrate	Install Python deps	2025-10-16T00:50:10.0731185Z   DATABASE_URL: ***127.0.0.1:5432/eventdb
+migrate	Install Python deps	2025-10-16T00:50:10.0731459Z   PYTHONPATH: .
+migrate	Install Python deps	2025-10-16T00:50:10.0731717Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0732114Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.11/x64/lib/pkgconfig
+migrate	Install Python deps	2025-10-16T00:50:10.0732521Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0732876Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0733233Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0733576Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.11/x64/lib
+migrate	Install Python deps	2025-10-16T00:50:10.0733864Z ##[endgroup]
+migrate	Install Python deps	2025-10-16T00:50:10.0787447Z + python -m pip install --upgrade pip
+migrate	Install Python deps	2025-10-16T00:50:12.2493321Z Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages (25.2)
+migrate	Install Python deps	2025-10-16T00:50:12.3922259Z + '[' -f requirements.txt ']'
+migrate	Install Python deps	2025-10-16T00:50:12.3922936Z + pip install -r requirements.txt
+migrate	Install Python deps	2025-10-16T00:50:13.2383388Z ERROR: Exception:
+migrate	Install Python deps	2025-10-16T00:50:13.2384404Z Traceback (most recent call last):
+migrate	Install Python deps	2025-10-16T00:50:13.2394146Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 107, in _run_wrapper
+migrate	Install Python deps	2025-10-16T00:50:13.2394991Z     status = _inner_run()
+migrate	Install Python deps	2025-10-16T00:50:13.2395271Z              ^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2396010Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 98, in _inner_run
+migrate	Install Python deps	2025-10-16T00:50:13.2396768Z     return self.run(options, args)
+migrate	Install Python deps	2025-10-16T00:50:13.2397062Z            ^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2397785Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/req_command.py", line 71, in wrapper
+migrate	Install Python deps	2025-10-16T00:50:13.2398508Z     return func(self, options, args)

@@ -1,0 +1,121 @@
+﻿migrate	Install system packages	2025-10-16T00:50:01.6850527Z (Reading database ... 20%
+migrate	Install system packages	2025-10-16T00:50:01.6850936Z (Reading database ... 25%
+migrate	Install system packages	2025-10-16T00:50:01.6851346Z (Reading database ... 30%
+migrate	Install system packages	2025-10-16T00:50:01.6851742Z (Reading database ... 35%
+migrate	Install system packages	2025-10-16T00:50:01.6852125Z (Reading database ... 40%
+migrate	Install system packages	2025-10-16T00:50:01.6852508Z (Reading database ... 45%
+migrate	Install system packages	2025-10-16T00:50:01.6852891Z (Reading database ... 50%
+migrate	Install system packages	2025-10-16T00:50:01.8032584Z (Reading database ... 55%
+migrate	Install system packages	2025-10-16T00:50:02.4967954Z (Reading database ... 60%
+migrate	Install system packages	2025-10-16T00:50:03.1329226Z (Reading database ... 65%
+migrate	Install system packages	2025-10-16T00:50:03.8071370Z (Reading database ... 70%
+migrate	Install system packages	2025-10-16T00:50:04.4359628Z (Reading database ... 75%
+migrate	Install system packages	2025-10-16T00:50:05.1040125Z (Reading database ... 80%
+migrate	Install system packages	2025-10-16T00:50:05.8456900Z (Reading database ... 85%
+migrate	Install system packages	2025-10-16T00:50:06.6484684Z (Reading database ... 90%
+migrate	Install system packages	2025-10-16T00:50:07.4817995Z (Reading database ... 95%
+migrate	Install system packages	2025-10-16T00:50:07.4818619Z (Reading database ... 100%
+migrate	Install system packages	2025-10-16T00:50:07.4819582Z (Reading database ... 214596 files and directories currently installed.)
+migrate	Install system packages	2025-10-16T00:50:07.4865993Z Preparing to unpack .../postgresql-client_16+257build1.1_all.deb ...
+migrate	Install system packages	2025-10-16T00:50:07.4888473Z Unpacking postgresql-client (16+257build1.1) ...
+migrate	Install system packages	2025-10-16T00:50:07.5383558Z Setting up postgresql-client (16+257build1.1) ...
+migrate	Install system packages	2025-10-16T00:50:08.9836985Z
+migrate	Install system packages	2025-10-16T00:50:08.9837487Z Running kernel seems to be up-to-date.
+migrate	Install system packages	2025-10-16T00:50:08.9837859Z
+migrate	Install system packages	2025-10-16T00:50:08.9837968Z Restarting services...
+migrate	Install system packages	2025-10-16T00:50:08.9912842Z
+migrate	Install system packages	2025-10-16T00:50:08.9913305Z Service restarts being deferred:
+migrate	Install system packages	2025-10-16T00:50:08.9916773Z  systemctl restart hosted-compute-agent.service
+migrate	Install system packages	2025-10-16T00:50:08.9917152Z
+migrate	Install system packages	2025-10-16T00:50:08.9917480Z No containers need to be restarted.
+migrate	Install system packages	2025-10-16T00:50:08.9917770Z
+migrate	Install system packages	2025-10-16T00:50:08.9917963Z No user sessions are running outdated binaries.
+migrate	Install system packages	2025-10-16T00:50:08.9918283Z
+migrate	Install system packages	2025-10-16T00:50:08.9918547Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+migrate	Install Python deps	∩╗┐2025-10-16T00:50:10.0692450Z ##[group]Run set -euxo pipefail
+migrate	Install Python deps	2025-10-16T00:50:10.0692796Z [36;1mset -euxo pipefail[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693081Z [36;1mpython -m pip install --upgrade pip[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693459Z [36;1mif [ -f requirements.txt ]; then pip install -r requirements.txt; fi[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0693900Z [36;1m# Ensure these are present even if not in requirements.txt[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694366Z [36;1mpip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694755Z [36;1mpython - <<'PY'[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0694963Z [36;1mimport sys, pkgutil[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695190Z [36;1mprint("Python:", sys.version)[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695504Z [36;1mfor m in ("sqlalchemy","alembic","psycopg","requests"):[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0695879Z [36;1m    print(m, "OK" if pkgutil.find_loader(m) else "MISSING")[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0696170Z [36;1mPY[0m
+migrate	Install Python deps	2025-10-16T00:50:10.0730343Z shell: /usr/bin/bash -e {0}
+migrate	Install Python deps	2025-10-16T00:50:10.0730579Z env:
+migrate	Install Python deps	2025-10-16T00:50:10.0731185Z   DATABASE_URL: ***127.0.0.1:5432/eventdb
+migrate	Install Python deps	2025-10-16T00:50:10.0731459Z   PYTHONPATH: .
+migrate	Install Python deps	2025-10-16T00:50:10.0731717Z   pythonLocation: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0732114Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.12.11/x64/lib/pkgconfig
+migrate	Install Python deps	2025-10-16T00:50:10.0732521Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0732876Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0733233Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.12.11/x64
+migrate	Install Python deps	2025-10-16T00:50:10.0733576Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.12.11/x64/lib
+migrate	Install Python deps	2025-10-16T00:50:10.0733864Z ##[endgroup]
+migrate	Install Python deps	2025-10-16T00:50:10.0787447Z + python -m pip install --upgrade pip
+migrate	Install Python deps	2025-10-16T00:50:12.2493321Z Requirement already satisfied: pip in /opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages (25.2)
+migrate	Install Python deps	2025-10-16T00:50:12.3922259Z + '[' -f requirements.txt ']'
+migrate	Install Python deps	2025-10-16T00:50:12.3922936Z + pip install -r requirements.txt
+migrate	Install Python deps	2025-10-16T00:50:13.2383388Z ERROR: Exception:
+migrate	Install Python deps	2025-10-16T00:50:13.2384404Z Traceback (most recent call last):
+migrate	Install Python deps	2025-10-16T00:50:13.2394146Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 107, in _run_wrapper
+migrate	Install Python deps	2025-10-16T00:50:13.2394991Z     status = _inner_run()
+migrate	Install Python deps	2025-10-16T00:50:13.2395271Z              ^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2396010Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 98, in _inner_run
+migrate	Install Python deps	2025-10-16T00:50:13.2396768Z     return self.run(options, args)
+migrate	Install Python deps	2025-10-16T00:50:13.2397062Z            ^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2397785Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/req_command.py", line 71, in wrapper
+migrate	Install Python deps	2025-10-16T00:50:13.2398508Z     return func(self, options, args)
+migrate	Install Python deps	2025-10-16T00:50:13.2398815Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2399648Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/commands/install.py", line 357, in run
+migrate	Install Python deps	2025-10-16T00:50:13.2400350Z     reqs = self.get_requirements(args, options, finder, session)
+migrate	Install Python deps	2025-10-16T00:50:13.2400688Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2401374Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/cli/req_command.py", line 272, in get_requirements
+migrate	Install Python deps	2025-10-16T00:50:13.2402057Z     for parsed_req in parse_requirements(
+migrate	Install Python deps	2025-10-16T00:50:13.2402337Z                       ^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2402986Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 165, in parse_requirements
+migrate	Install Python deps	2025-10-16T00:50:13.2403665Z     for parsed_line in parser.parse(filename, constraint):
+migrate	Install Python deps	2025-10-16T00:50:13.2404003Z                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2404569Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 346, in parse
+migrate	Install Python deps	2025-10-16T00:50:13.2405368Z     yield from self._parse_and_recurse(
+migrate	Install Python deps	2025-10-16T00:50:13.2405945Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 356, in _parse_and_recurse
+migrate	Install Python deps	2025-10-16T00:50:13.2406533Z     for line in self._parse_file(filename, constraint):
+migrate	Install Python deps	2025-10-16T00:50:13.2406819Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2407372Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 405, in _parse_file
+migrate	Install Python deps	2025-10-16T00:50:13.2407933Z     _, content = get_file_content(filename, self._session)
+migrate	Install Python deps	2025-10-16T00:50:13.2408203Z                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2408762Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 589, in get_file_content
+migrate	Install Python deps	2025-10-16T00:50:13.2409546Z     content = _decode_req_file(raw_content, url)
+migrate	Install Python deps	2025-10-16T00:50:13.2409825Z               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2410378Z   File "/opt/hostedtoolcache/Python/3.12.11/x64/lib/python3.12/site-packages/pip/_internal/req/req_file.py", line 597, in _decode_req_file
+migrate	Install Python deps	2025-10-16T00:50:13.2410960Z     return data[len(bom) :].decode(encoding)
+migrate	Install Python deps	2025-10-16T00:50:13.2411374Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+migrate	Install Python deps	2025-10-16T00:50:13.2411788Z UnicodeDecodeError: 'utf-16-le' codec can't decode byte 0x0a in position 3102: truncated data
+migrate	Install Python deps	2025-10-16T00:50:13.2757839Z ##[error]Process completed with exit code 2.
+migrate	Post Checkout	∩╗┐2025-10-16T00:50:13.2845278Z Post job cleanup.
+migrate	Post Checkout	2025-10-16T00:50:13.3787133Z [command]/usr/bin/git version
+migrate	Post Checkout	2025-10-16T00:50:13.3825169Z git version 2.51.0
+migrate	Post Checkout	2025-10-16T00:50:13.3869833Z Temporarily overriding HOME='/home/runner/work/_temp/3f3e099d-8671-4fb8-be7a-a8f7ec162d77' before making global git config changes
+migrate	Post Checkout	2025-10-16T00:50:13.3871112Z Adding repository directory to the temporary git global config as a safe directory
+migrate	Post Checkout	2025-10-16T00:50:13.3884452Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/event_app_email_starter/event_app_email_starter
+migrate	Post Checkout	2025-10-16T00:50:13.3921784Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+migrate	Post Checkout	2025-10-16T00:50:13.3955683Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+migrate	Post Checkout	2025-10-16T00:50:13.4252341Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+migrate	Post Checkout	2025-10-16T00:50:13.4275113Z http.https://github.com/.extraheader
+migrate	Post Checkout	2025-10-16T00:50:13.4287771Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+migrate	Post Checkout	2025-10-16T00:50:13.4318972Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+migrate	Stop containers	∩╗┐2025-10-16T00:50:13.4630102Z Print service container logs: be7fb28297f34e9a906a8b3fc78f04ac_postgres15_ec6088
+migrate	Stop containers	2025-10-16T00:50:13.4634766Z ##[command]/usr/bin/docker logs --details 6bc9d7d5b7aaad995b784b30074dd32e219e49fff63ec0f516aab74cbb351159
+migrate	Stop containers	2025-10-16T00:50:13.4749999Z  The files belonging to this database system will be owned by user "postgres".
+migrate	Stop containers	2025-10-16T00:50:13.4751953Z  initdb: warning: enabling "trust" authentication for local connections
+migrate	Stop containers	2025-10-16T00:50:13.4753116Z  initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+migrate	Stop containers	2025-10-16T00:50:13.4754521Z  2025-10-16 00:49:36.186 UTC [1] LOG:  starting PostgreSQL 15.14 (Debian 15.14-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+migrate	Stop containers	2025-10-16T00:50:13.4755430Z  2025-10-16 00:49:36.186 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+migrate	Stop containers	2025-10-16T00:50:13.4755862Z  2025-10-16 00:49:36.186 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+migrate	Stop containers	2025-10-16T00:50:13.4756388Z  2025-10-16 00:49:36.188 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+migrate	Stop containers	2025-10-16T00:50:13.4756887Z  2025-10-16 00:49:36.190 UTC [64] LOG:  database system was shut down at 2025-10-16 00:49:36 UTC
+migrate	Stop containers	2025-10-16T00:50:13.4757328Z  2025-10-16 00:49:36.194 UTC [1] LOG:  database system is ready to accept connections
+migrate	Stop containers	2025-10-16T00:50:13.4757700Z  This user must also own the server process.

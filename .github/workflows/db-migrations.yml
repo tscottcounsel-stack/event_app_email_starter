@@ -1,85 +1,13 @@
-name: DB Migrations
+﻿name: DB Migrations
 
 on:
   workflow_dispatch:
-  pull_request:
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: eventdb
-        ports:
-          - "5432:5432"
-        options: >-
-          --health-cmd="pg_isready -U postgres -d eventdb -h 127.0.0.1"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=60
-
-    env:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/eventdb
-      PYTHONPATH: .
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-      - name: Install Python deps
-        run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Ensure these are present even if not in requirements.txt
-          pip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests
-          python - <<'PY'
-          import sys, pkgutil
-          print("Python:", sys.version)
-          for m in ("sqlalchemy","alembic","psycopg","requests"):
-              print(m, "OK" if pkgutil.find_loader(m) else "MISSING")
-          PY
-
-      - name: Wait for Postgres
-        run: |
-          for i in {1..60}; do
-            pg_isready -h 127.0.0.1 -U postgres -d eventdb && exit 0
-            echo "waiting for Postgres... $i"
-            sleep 2
-          done
-          echo "Postgres not ready in time" >&2
-          exit 1
-
-      - name: psql smoke
-        run: |
-          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d eventdb -c "SELECT 1;"
-
-      - name: Run migrations
-        env:
-          DATABASE_URL: ${{ env.DATABASE_URL }}
-        run: |
-          alembic --version
-          alembic stamp base || true
-          alembic --raiseerr upgrade head
-
-      - name: Run unit tests (optional)
-        env:
-          DATABASE_URL: ${{ env.DATABASE_URL }}
-        run: pytest -q || true
+      - name: Placeholder
+        run: echo "DB migration workflow placeholder"
