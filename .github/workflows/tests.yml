@@ -1,13 +1,13 @@
-﻿name: tests
+name: tests
 
 on:
   push:
+    branches: [ "main" ]
   pull_request:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:15
@@ -15,24 +15,26 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: eventdb
-        ports: ["5432:5432"]
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
-
     env:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/eventdb
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/eventdb
       PYTHONPATH: .
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
 
       - name: Install deps
         shell: bash
@@ -56,6 +58,19 @@ jobs:
         run: |
           set -euxo pipefail
           alembic upgrade head
+
+      - name: Start FastAPI server (background) and wait until ready
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/docs >/dev/null; then
+              echo "API is up"
+              break
+            fi
+            sleep 1
+          done
 
       - name: Run tests
         shell: bash
