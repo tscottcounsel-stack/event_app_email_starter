@@ -1,81 +1,141 @@
-name: tests
+﻿name: Tests (All Branches)
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
 
+env:
+  PYTHONUNBUFFERED: "1"
+
 jobs:
-  pytest:
-    runs-on: ubuntu-24.04
+  linux-tests:
+    name: Linux • Python 3.13 • Postgres+Redis
+    runs-on: ubuntu-latest
 
     services:
       postgres:
-        image: postgres:15
+        image: postgres:16
         env:
-          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
           POSTGRES_DB: eventdb
         ports:
           - 5432:5432
         options: >-
           --health-cmd="pg_isready -U postgres -d eventdb"
-          --health-interval=10s
+          --health-interval=5s
           --health-timeout=5s
-          --health-retries=12
+          --health-retries=20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping || exit 1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
     env:
-      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/eventdb
-      PYTHONPATH: .
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/eventdb
+      REDIS_URL: redis://localhost:6379/0
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: "3.13"
 
-      - name: Install deps
-        shell: bash
-        run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests pytest-cov codecov
-
-      - name: Wait for Postgres
-        shell: bash
-        run: |
-          set -euxo pipefail
-          for i in {1..30}; do
-            if pg_isready -h 127.0.0.1 -p 5432 -U postgres; then break; fi
-            sleep 2
-          done
-
-      - name: Start app (uvicorn)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 &
-          # wait for HTTP readiness
-          for i in {1..30}; do
-            if curl -fsS "http://127.0.0.1:8000/docs" >/dev/null; then break; fi
-            sleep 2
-          done
-
-      - name: Run tests (with coverage)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          pytest -q --cov=. --cov-report=xml:coverage.xml --cov-report=term-missing
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
-          files: ./coverage.xml
-          fail_ci_if_error: true
-          # For private repos, add a CODECOV_TOKEN secret and uncomment the line below:
-          # token: ${{ secrets.CODECOV_TOKEN }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.cfg') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system clients
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements-dev.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements-dev.txt
+          elif [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            python -m pip install --upgrade pip
+            pip install ".[dev]" || pip install .
+          else
+            echo "No dependency manifest found" && exit 1
+          fi
+
+      - name: Wait for DB & apply migrations (if present)
+        run: |
+          for i in {1..30}; do
+            psql "host=localhost user=postgres password=postgres dbname=eventdb" -c "select 1" && break || sleep 2
+          done
+          if [ -f alembic.ini ]; then
+            alembic upgrade head
+          else
+            echo "alembic.ini not found; skipping migrations"
+          fi
+
+      - name: Run tests (Linux full)
+        run: |
+          pytest -q --maxfail=1 --disable-warnings
+
+  windows-tests:
+    name: Windows • Python 3.13 • SQLite
+    runs-on: windows-latest
+
+    env:
+      # Use SQLite on Windows to avoid external services
+      DATABASE_URL: sqlite:///./ci_test.db
+      # If your app auto-uses Redis only when set, this avoids connections.
+      REDIS_URL: ""
+      # (Optional) if you have a toggle to disable rate limits entirely:
+      RATE_LIMIT_DISABLED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.cfg') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements-dev.txt) {
+            pip install -r requirements-dev.txt
+          } elseif (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          } elseif (Test-Path pyproject.toml) {
+            pip install ".[dev]" 2>$null; if ($LASTEXITCODE -ne 0) { pip install . }
+          } else {
+            Write-Error "No dependency manifest found"; exit 1
+          }
+
+      - name: Run tests (Windows minimal)
+        shell: pwsh
+        run: |
+          pytest -q --maxfail=1 --disable-warnings
