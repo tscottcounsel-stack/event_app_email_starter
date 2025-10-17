@@ -1,0 +1,21 @@
+[tool.coverage.run]
+branch = true
+source = [
+  "app",
+  "main"
+]
+omit = [
+  "tests/*",
+  "**/__init__.py"
+]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+fail_under = 0
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"

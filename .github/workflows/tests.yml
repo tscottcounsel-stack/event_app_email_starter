@@ -64,14 +64,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then
-            python -m pip install --upgrade pip
             pip install -r requirements-dev.txt
           elif [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
             pip install -r requirements.txt
           elif [ -f pyproject.toml ]; then
-            python -m pip install --upgrade pip
             pip install ".[dev]" || pip install .
           else
             echo "No dependency manifest found" && exit 1
@@ -88,20 +86,40 @@ jobs:
             echo "alembic.ini not found; skipping migrations"
           fi
 
-      - name: Run tests (Linux full)
+      - name: Run tests with coverage (Linux full)
         run: |
-          pytest -q --maxfail=1 --disable-warnings
+          python -m pip install --upgrade pip
+          pip install pytest-cov coverage[toml] || true
+          # Adjust --cov targets to your modules/packages
+          pytest -q --maxfail=1 --disable-warnings \
+                 --cov=app --cov=main --cov-report=xml --cov-report=html
+
+      - name: Upload HTML coverage (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-linux
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload coverage to Codecov (Linux)
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: linux
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          # Public repos don't need a token. For private repos, add this secret in GitHub.
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   windows-tests:
     name: Windows • Python 3.13 • SQLite
     runs-on: windows-latest
 
     env:
-      # Use SQLite on Windows to avoid external services
       DATABASE_URL: sqlite:///./ci_test.db
-      # If your app auto-uses Redis only when set, this avoids connections.
       REDIS_URL: ""
-      # (Optional) if you have a toggle to disable rate limits entirely:
       RATE_LIMIT_DISABLED: "1"
 
     steps:
@@ -135,7 +153,28 @@ jobs:
             Write-Error "No dependency manifest found"; exit 1
           }
 
-      - name: Run tests (Windows minimal)
+      - name: Run tests with coverage (Windows)
         shell: pwsh
         run: |
-          pytest -q --maxfail=1 --disable-warnings
+          pip install pytest-cov coverage[toml] | Out-Null
+          # Adjust --cov targets to your modules/packages
+          pytest -q --maxfail=1 --disable-warnings `
+                 --cov=app --cov=main --cov-report=xml --cov-report=html
+
+      - name: Upload HTML coverage (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-windows
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload coverage to Codecov (Windows)
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: windows
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
