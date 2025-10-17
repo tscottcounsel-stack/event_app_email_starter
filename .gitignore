@@ -45,3 +45,13 @@ run_full.log
 ci_job.log
 ci_failed_steps.log
 check_runs.json
+# test/coverage artifacts
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+# test/coverage artifacts
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
