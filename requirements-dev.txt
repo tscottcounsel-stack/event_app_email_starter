@@ -10,3 +10,7 @@ flake8==7.1.1  # linting
 # âœ… Developer utilities
 ipython==8.27.0  # better interactive shell
 python-dotenv==1.0.1  # already in prod, but keep in dev for env mgmt
+
+pytest
+pytest-cov
+coverage[toml]
