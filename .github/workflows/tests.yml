@@ -9,14 +9,14 @@ env:
 
 jobs:
   linux-tests:
-    name: Linux • Python 3.13 • Postgres+Redis
+    name: Linux • Python 3.11 • Postgres+Redis
     runs-on: ubuntu-latest
 
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: Tazvendor
           POSTGRES_USER: postgres
           POSTGRES_DB: eventdb
         ports:
@@ -37,7 +37,7 @@ jobs:
           --health-retries=20
 
     env:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/eventdb
+      DATABASE_URL: postgresql+psycopg2://postgres:Tazvendor@localhost:5432/eventdb
       REDIS_URL: redis://localhost:6379/0
 
     steps:
@@ -47,7 +47,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -78,7 +78,7 @@ jobs:
       - name: Wait for DB & apply migrations (if present)
         run: |
           for i in {1..30}; do
-            psql "host=localhost user=postgres password=postgres dbname=eventdb" -c "select 1" && break || sleep 2
+            psql "host=localhost user=postgres password=Tazvendor dbname=eventdb" -c "select 1" && break || sleep 2
           done
           if [ -f alembic.ini ]; then
             alembic upgrade head
@@ -86,9 +86,20 @@ jobs:
             echo "alembic.ini not found; skipping migrations"
           fi
 
+      - name: Sanity check DB URL and connectivity
+        run: |
+          python - <<'PY'
+          import os, sqlalchemy as sa
+          url = os.environ.get("DATABASE_URL")
+          print("DB URL =", url)
+          e = sa.create_engine(url, pool_pre_ping=True)
+          with e.connect() as c:
+              v = c.exec_driver_sql("select version()").scalar()
+              print("Connected OK:", v)
+          PY
+
       - name: Run tests with coverage (Linux full)
         run: |
-          python -m pip install --upgrade pip
           pip install pytest-cov coverage[toml] || true
           # Adjust --cov targets to your modules/packages
           pytest -q --maxfail=1 --disable-warnings \
@@ -114,7 +125,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   windows-tests:
-    name: Windows • Python 3.13 • SQLite
+    name: Windows • Python 3.11 • SQLite
     runs-on: windows-latest
 
     env:
@@ -129,7 +140,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
       - name: Cache pip
         uses: actions/cache@v4
