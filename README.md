@@ -31,3 +31,5 @@ uvicorn main:app --reload
 
 
 <!-- ci ping: 2025-10-15T13:06:55 -->
+
+[![Deploy](https://github.com//tscottcounsel-stack/event_app_email_starter/actions/workflows/deploy.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/deploy.yml)
