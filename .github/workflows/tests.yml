@@ -1,4 +1,4 @@
-name: tests
+﻿name: tests
 
 on:
   push:
@@ -7,7 +7,8 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
     services:
       postgres:
         image: postgres:15
@@ -22,6 +23,7 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=12
+
     env:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/eventdb
       PYTHONPATH: .
@@ -30,11 +32,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: "pip"
 
       - name: Install deps
         shell: bash
@@ -42,7 +44,7 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests
+          pip install "psycopg[binary]" SQLAlchemy alembic python-dotenv pytest requests pytest-cov codecov
 
       - name: Wait for Postgres
         shell: bash
@@ -53,27 +55,27 @@ jobs:
             sleep 2
           done
 
-      - name: Alembic upgrade
+      - name: Start app (uvicorn)
         shell: bash
         run: |
           set -euxo pipefail
-          alembic upgrade head
-
-      - name: Start FastAPI server (background) and wait until ready
-        shell: bash
-        run: |
-          set -euxo pipefail
-          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 &
+          # wait for HTTP readiness
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:8000/docs >/dev/null; then
-              echo "API is up"
-              break
-            fi
-            sleep 1
+            if curl -fsS "http://127.0.0.1:8000/docs" >/dev/null; then break; fi
+            sleep 2
           done
 
-      - name: Run tests
+      - name: Run tests (with coverage)
         shell: bash
         run: |
           set -euxo pipefail
-          pytest -q
+          pytest -q --cov=. --cov-report=xml:coverage.xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: true
+          # For private repos, add a CODECOV_TOKEN secret and uncomment the line below:
+          # token: ${{ secrets.CODECOV_TOKEN }}

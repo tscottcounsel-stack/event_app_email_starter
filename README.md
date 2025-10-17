@@ -1,4 +1,6 @@
-﻿<!-- CI BADGE START -->n[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)n[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)n<!-- CI BADGE END -->nn
+﻿[![codecov](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter/branch/main/graph/badge.svg)](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter)
+
+<!-- CI BADGE START -->n[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)n[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)n<!-- CI BADGE END -->nn
 [![Tests](https://github.com/OWNER/REPO/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/tests.yml)
 [![Lint](https://github.com/OWNER/REPO/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/lint.yml)
 
