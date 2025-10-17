@@ -1,12 +1,11 @@
-﻿# Render Blueprint: Docker-based web service + managed Postgres
-services:
+﻿services:
   - type: web
     name: event-app-api
     env: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
     autoDeploy: true
-    healthCheckPath: /health     # change if your app uses a different health route
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -17,7 +16,7 @@ services:
       - key: PYTHONDONTWRITEBYTECODE
         value: "1"
       - key: UVICORN_WORKERS
-        value: "2"               # optional; only used if you switch to gunicorn/uvicorn workers
+        value: "2"
     postDeployCommand: alembic upgrade head
 
 databases:
