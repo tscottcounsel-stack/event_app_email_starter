@@ -101,7 +101,6 @@ jobs:
       - name: Run tests with coverage (Linux full)
         run: |
           pip install pytest-cov coverage[toml] || true
-          # Adjust --cov targets to your modules/packages
           pytest -q --maxfail=1 --disable-warnings \
                  --cov=app --cov=main --cov-report=xml --cov-report=html
 
@@ -121,7 +120,6 @@ jobs:
           fail_ci_if_error: false
           verbose: true
         env:
-          # Public repos don't need a token. For private repos, add this secret in GitHub.
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   windows-tests:
@@ -168,7 +166,6 @@ jobs:
         shell: pwsh
         run: |
           pip install pytest-cov coverage[toml] | Out-Null
-          # Adjust --cov targets to your modules/packages
           pytest -q --maxfail=1 --disable-warnings `
                  --cov=app --cov=main --cov-report=xml --cov-report=html
 
