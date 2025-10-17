@@ -1,6 +1,6 @@
-\## 30-Day Go-To-Market Plan for Event Organizer–Vendor Platform
+\## 30-Day Go-To-Market Plan for Event Organizerâ€“Vendor Platform
 
-\## 30-Day Go-To-Market Plan for Event Organizer–Vendor Platform
+\## 30-Day Go-To-Market Plan for Event Organizerâ€“Vendor Platform
 
 
 
@@ -34,7 +34,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Collect name, email, service category, Instagram link, and city.
 
-&nbsp;  \* Headline: \*"Get early access – free exposure for your event business!"\*
+&nbsp;  \* Headline: \*"Get early access â€“ free exposure for your event business!"\*
 
 2\. \*\*Prepare vendor outreach templates\*\* (email + DM):
 
@@ -44,7 +44,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 
 
-&nbsp;    > Hi \[Name]! We’re building a new Atlanta-based platform that connects vendors (like \[category]) directly with event organizers. It’s free during launch, and we’re featuring early vendors on our homepage. Would you like to be listed?
+&nbsp;    > Hi \[Name]! Weâ€™re building a new Atlanta-based platform that connects vendors (like \[category]) directly with event organizers. Itâ€™s free during launch, and weâ€™re featuring early vendors on our homepage. Would you like to be listed?
 
 3\. \*\*Build your seed database\*\*
 
@@ -54,7 +54,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Prioritize categories that attract frequent bookings: catering, DJs, decorators, photo booths, venues.
 
-4\. \*\*Manually onboard 10–20 vendors\*\*
+4\. \*\*Manually onboard 10â€“20 vendors\*\*
 
 
 
@@ -84,7 +84,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Example: \*"Spring Wedding Expo 2025"\*, \*"Corporate Vendor Showcase"\*, etc.
 
-&nbsp;  \* Let vendors “apply” to simulate flow.
+&nbsp;  \* Let vendors â€œapplyâ€ to simulate flow.
 
 2\. \*\*Feature vendor listings on social media\*\*
 
@@ -92,13 +92,13 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Post vendor spotlights on Instagram and LinkedIn.
 
-&nbsp;  \* Tag vendors; they’ll often reshare.
+&nbsp;  \* Tag vendors; theyâ€™ll often reshare.
 
 3\. \*\*Create a simple press/launch announcement\*\*
 
 
 
-&nbsp;  \* Example caption: \*"Atlanta’s first platform connecting event vendors and organizers directly. Join free while we’re in beta!"\*
+&nbsp;  \* Example caption: \*"Atlantaâ€™s first platform connecting event vendors and organizers directly. Join free while weâ€™re in beta!"\*
 
 4\. \*\*Start building the email list for organizers\*\*
 
@@ -132,7 +132,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Highlight the preloaded vendor pool.
 
-&nbsp;  \* Example pitch: \*"We already have 30+ local vendors waiting to connect – want to post your next event for free?"\*
+&nbsp;  \* Example pitch: \*"We already have 30+ local vendors waiting to connect â€“ want to post your next event for free?"\*
 
 2\. \*\*Host a beta launch webinar or networking event\*\*
 
@@ -170,7 +170,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 
 
-&nbsp;  \* Short survey: What worked, what’s missing, what they’d pay for.
+&nbsp;  \* Short survey: What worked, whatâ€™s missing, what theyâ€™d pay for.
 
 2\. \*\*Highlight success stories\*\*
 
@@ -204,7 +204,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 \* Organizer signups: 10+
 
-\* Event listings created: 5–10 (real or demo)
+\* Event listings created: 5â€“10 (real or demo)
 
 \* Engagement: vendor profiles viewed, applications submitted
 
@@ -274,7 +274,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Collect name, email, service category, Instagram link, and city.
 
-&nbsp;  \* Headline: \*"Get early access – free exposure for your event business!"\*
+&nbsp;  \* Headline: \*"Get early access â€“ free exposure for your event business!"\*
 
 2\. \*\*Prepare vendor outreach templates\*\* (email + DM):
 
@@ -284,7 +284,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 
 
-&nbsp;    > Hi \[Name]! We’re building a new Atlanta-based platform that connects vendors (like \[category]) directly with event organizers. It’s free during launch, and we’re featuring early vendors on our homepage. Would you like to be listed?
+&nbsp;    > Hi \[Name]! Weâ€™re building a new Atlanta-based platform that connects vendors (like \[category]) directly with event organizers. Itâ€™s free during launch, and weâ€™re featuring early vendors on our homepage. Would you like to be listed?
 
 3\. \*\*Build your seed database\*\*
 
@@ -294,7 +294,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Prioritize categories that attract frequent bookings: catering, DJs, decorators, photo booths, venues.
 
-4\. \*\*Manually onboard 10–20 vendors\*\*
+4\. \*\*Manually onboard 10â€“20 vendors\*\*
 
 
 
@@ -324,7 +324,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Example: \*"Spring Wedding Expo 2025"\*, \*"Corporate Vendor Showcase"\*, etc.
 
-&nbsp;  \* Let vendors “apply” to simulate flow.
+&nbsp;  \* Let vendors â€œapplyâ€ to simulate flow.
 
 2\. \*\*Feature vendor listings on social media\*\*
 
@@ -332,13 +332,13 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Post vendor spotlights on Instagram and LinkedIn.
 
-&nbsp;  \* Tag vendors; they’ll often reshare.
+&nbsp;  \* Tag vendors; theyâ€™ll often reshare.
 
 3\. \*\*Create a simple press/launch announcement\*\*
 
 
 
-&nbsp;  \* Example caption: \*"Atlanta’s first platform connecting event vendors and organizers directly. Join free while we’re in beta!"\*
+&nbsp;  \* Example caption: \*"Atlantaâ€™s first platform connecting event vendors and organizers directly. Join free while weâ€™re in beta!"\*
 
 4\. \*\*Start building the email list for organizers\*\*
 
@@ -372,7 +372,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 &nbsp;  \* Highlight the preloaded vendor pool.
 
-&nbsp;  \* Example pitch: \*"We already have 30+ local vendors waiting to connect – want to post your next event for free?"\*
+&nbsp;  \* Example pitch: \*"We already have 30+ local vendors waiting to connect â€“ want to post your next event for free?"\*
 
 2\. \*\*Host a beta launch webinar or networking event\*\*
 
@@ -410,7 +410,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 
 
-&nbsp;  \* Short survey: What worked, what’s missing, what they’d pay for.
+&nbsp;  \* Short survey: What worked, whatâ€™s missing, what theyâ€™d pay for.
 
 2\. \*\*Highlight success stories\*\*
 
@@ -444,7 +444,7 @@ Seed the marketplace by onboarding vendors first, then attract organizers once v
 
 \* Organizer signups: 10+
 
-\* Event listings created: 5–10 (real or demo)
+\* Event listings created: 5â€“10 (real or demo)
 
 \* Engagement: vendor profiles viewed, applications submitted
 

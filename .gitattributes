@@ -21,3 +21,4 @@
 *.zip  binary
 *.7z   binary
 *.exe  binary
+*.md text eol=lf
