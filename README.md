@@ -5,7 +5,7 @@
 [![codecov](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter/branch/main/graph/badge.svg)](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter)
 
 <!-- CI BADGE START -->n[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)n[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)n<!-- CI BADGE END -->nn
-# Event Organizerâ€“Vendor API
+# Event OrganizerÃ¢â‚¬â€œVendor API
 # Event App Email Starter
 
 ![CI](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/ci.yml/badge.svg)
