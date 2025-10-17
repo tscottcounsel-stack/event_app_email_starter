@@ -1,15 +1,20 @@
 # Default: normalize to LF in the repo
-*           text=auto eol=lf
+*                 text=auto eol=lf
 
-# Windows-only scripts may keep CRLF on checkout
-*.bat       text eol=crlf
-*.cmd       text eol=crlf
-*.ps1       text eol=crlf
+# Windows-only scripts that truly require CRLF (rare) — leave empty unless needed
+# *.bat            text eol=crlf
+# *.cmd            text eol=crlf
 
 # Force these to LF
-.gitattributes text eol=lf
-.gitignore     text eol=lf
-.editorconfig  text eol=lf
+.gitattributes     text eol=lf
+.gitignore         text eol=lf
+.editorconfig      text eol=lf
+*.ps1              text eol=lf
+*.psm1             text eol=lf
+*.psd1             text eol=lf
+*.md               text eol=lf
+*.yml              text eol=lf
+*.yaml             text eol=lf
 
 # Binary files
 *.png  binary
@@ -21,4 +26,3 @@
 *.zip  binary
 *.7z   binary
 *.exe  binary
-*.md text eol=lf
