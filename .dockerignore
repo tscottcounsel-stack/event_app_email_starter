@@ -1,0 +1,28 @@
+﻿# Bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Venvs
+.venv/
+venv/
+
+# Git / CI
+.git/
+.gitignore
+.github/
+
+# Local env / secrets
+.env
+.env.*
+
+# Tests, artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+dist/
+build/
+
+# Docker/Render
+Dockerfile
+render.yaml
