@@ -91,9 +91,9 @@ def featured_vendors(
 ):
     """
     Get featured vendors for landing pages:
-    - mode=random → returns `count` random vendors
-    - mode=cheap → returns `count` vendors with lowest min_rate
-    - category=... → filter by vendor category first
+    - mode=random â†’ returns `count` random vendors
+    - mode=cheap â†’ returns `count` vendors with lowest min_rate
+    - category=... â†’ filter by vendor category first
     """
     q = db.query(VendorProfile)
 

@@ -1,4 +1,4 @@
-﻿[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)
+[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)
 [![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)
 [![pre-commit](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml)
 

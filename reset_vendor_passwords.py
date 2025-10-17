@@ -11,8 +11,8 @@ for email in vendors:
     if vendor:
         vendor.hashed_password = hash_pw("testpass")
         db.commit()
-        print(f"✅ Reset {email} password to 'testpass'")
+        print(f"âœ… Reset {email} password to 'testpass'")
     else:
-        print(f"❌ Vendor {email} not found")
+        print(f"âŒ Vendor {email} not found")
 
 db.close()

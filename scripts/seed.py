@@ -1,4 +1,4 @@
-﻿# scripts/seed.py
+# scripts/seed.py
 import os
 
 import sqlalchemy as sa

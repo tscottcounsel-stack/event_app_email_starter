@@ -17,14 +17,14 @@ function Safe-Request {
             return Invoke-RestMethod -Uri $Url -Method $Method
         }
     } catch {
-        Write-Host "⚠ $Name failed -> $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Ã¢Å¡Â  $Name failed -> $($_.Exception.Message)" -ForegroundColor Red
         return $null
     }
 }
 
 for ($i = 1; $i -le $Loops; $i++) {
     Write-Host "===================" -ForegroundColor Cyan
-    Write-Host "▶ Starting loop $i..." -ForegroundColor Cyan
+    Write-Host "Ã¢â€“Â¶ Starting loop $i..." -ForegroundColor Cyan
     Write-Host "===================" -ForegroundColor Cyan
 
     $startTime = Get-Date
@@ -38,19 +38,19 @@ for ($i = 1; $i -le $Loops; $i++) {
     }
     $user = Safe-Request "User" POST "$BaseUrl/users/" $userBody
     if (-not $user) { $errors++; continue }
-    Write-Host "[Loop $i] ✅ User created (ID: $($user.id))"
+    Write-Host "[Loop $i] Ã¢Å“â€¦ User created (ID: $($user.id))"
 
     # --- Organizer ---
     $orgBody = @{ display_name = "Organizer $i" }
     $organizer = Safe-Request "Organizer" POST "$BaseUrl/organizers/" $orgBody
     if (-not $organizer) { $errors++; continue }
-    Write-Host "[Loop $i] ✅ Organizer created (ID: $($organizer.id))"
+    Write-Host "[Loop $i] Ã¢Å“â€¦ Organizer created (ID: $($organizer.id))"
 
     # --- Vendor ---
     $vendorBody = @{ display_name = "Vendor $i" }
     $vendor = Safe-Request "Vendor" POST "$BaseUrl/vendors/" $vendorBody
     if (-not $vendor) { $errors++; continue }
-    Write-Host "[Loop $i] ✅ Vendor created (ID: $($vendor.id))"
+    Write-Host "[Loop $i] Ã¢Å“â€¦ Vendor created (ID: $($vendor.id))"
 
     # --- Event ---
     $eventBody = @{
@@ -61,19 +61,19 @@ for ($i = 1; $i -le $Loops; $i++) {
     }
     $event = Safe-Request "Event" POST "$BaseUrl/events/" $eventBody
     if (-not $event) { $errors++; continue }
-    Write-Host "[Loop $i] ✅ Event created (ID: $($event.id))"
+    Write-Host "[Loop $i] Ã¢Å“â€¦ Event created (ID: $($event.id))"
 
     # --- Application ---
     $appBody = @{ event_id = $event.id; message = "Vendor applying" }
     $application = Safe-Request "Application" POST "$BaseUrl/applications/" $appBody
     if ($application) {
-        Write-Host "[Loop $i] ✅ Application created (ID: $($application.id), status: $($application.status))"
+        Write-Host "[Loop $i] Ã¢Å“â€¦ Application created (ID: $($application.id), status: $($application.status))"
     } else {
         $errors++
     }
 
     # --- Cleanup ---
-    Write-Host "[Loop $i] 🗑 Starting cleanup..."
+    Write-Host "[Loop $i] Ã°Å¸â€”â€˜ Starting cleanup..."
     foreach ($del in @(
         @{Name="Application"; Url="$BaseUrl/applications/$($application.id)"},
         @{Name="Event"; Url="$BaseUrl/events/$($event.id)"},
@@ -84,9 +84,9 @@ for ($i = 1; $i -le $Loops; $i++) {
         if ($del.Url -and $del.Url -notmatch "null") {
             try {
                 Invoke-RestMethod -Uri $del.Url -Method DELETE | Out-Null
-                Write-Host "[Loop $i] 🗑 $($del.Name) deleted"
+                Write-Host "[Loop $i] Ã°Å¸â€”â€˜ $($del.Name) deleted"
             } catch {
-                Write-Host "[Loop $i] ⚠ Failed to delete $($del.Name): $($_.Exception.Message)"
+                Write-Host "[Loop $i] Ã¢Å¡Â  Failed to delete $($del.Name): $($_.Exception.Message)"
             }
         }
     }
@@ -103,7 +103,7 @@ for ($i = 1; $i -le $Loops; $i++) {
         DurationSeconds  = [math]::Round($duration, 2)
     }
 
-    Write-Host "[Loop $i] 🎉 Cycle complete!"
+    Write-Host "[Loop $i] Ã°Å¸Å½â€° Cycle complete!"
 }
 
 # === Shared Logging ===
@@ -116,5 +116,5 @@ if ($results.Count -gt 0) {
         $_
     } | Export-Csv -Path $CsvLog -NoTypeInformation -Append
 
-    Write-Host "✅ Results appended to $CsvLog (Mode=$Mode)"
+    Write-Host "Ã¢Å“â€¦ Results appended to $CsvLog (Mode=$Mode)"
 }

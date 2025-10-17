@@ -50,11 +50,11 @@ def send_email(
             server.login(EMAIL_USER, EMAIL_PASS)
             server.sendmail(EMAIL_USER, [to_email], msg.as_string())
 
-        print(f"✅ Email sent to {to_email}")
+        print(f"âœ… Email sent to {to_email}")
         return True, None
     except Exception as e:
         err = str(e)
-        print("❌ Error sending email:", err)
+        print("âŒ Error sending email:", err)
         return False, err
 
 
@@ -97,13 +97,13 @@ def render_template(
                 <p style="margin:0;color:#374151;line-height:1.6;font-size:16px;">{message}</p>
                 {button_html}
                 <p style="margin-top:28px;color:#6b7280;font-size:12px;">
-                  If you weren’t expecting this email, you can safely ignore it.
+                  If you werenâ€™t expecting this email, you can safely ignore it.
                 </p>
               </td>
             </tr>
             <tr>
               <td style="background:#f3f4f6;padding:14px 24px;color:#6b7280;font-size:12px;font-family:Segoe UI,Arial,sans-serif;">
-                © {datetime_now()} Event App — All rights reserved.
+                Â© {datetime_now()} Event App â€” All rights reserved.
               </td>
             </tr>
           </table>

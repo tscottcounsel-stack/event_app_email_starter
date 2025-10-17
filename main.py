@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 # App setup
 # ======================================================================================
 app = FastAPI(title="Event Organizer-Vendor API")
-# Important: we’ll keep strict paths, but we register BOTH variants where it matters.
+# Important: weâ€™ll keep strict paths, but we register BOTH variants where it matters.
 app.router.redirect_slashes = False
 
 app.add_middleware(
@@ -25,7 +25,7 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------------------
-# Debug helpers: confirm we’re hitting THIS file and list routes.
+# Debug helpers: confirm weâ€™re hitting THIS file and list routes.
 # (We expose BOTH slash and no-slash to avoid 404 confusion.)
 # --------------------------------------------------------------------------------------
 @app.get("/__whoami")
@@ -59,7 +59,7 @@ def health():
 
 
 # --------------------------------------------------------------------------------------
-# Email (simple echo endpoint) — registered with and without trailing slash
+# Email (simple echo endpoint) â€” registered with and without trailing slash
 # --------------------------------------------------------------------------------------
 class EmailIn(BaseModel):
     to_email: EmailStr

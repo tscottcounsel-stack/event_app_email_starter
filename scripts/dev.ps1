@@ -1,4 +1,4 @@
-﻿Param(
+Param(
   [ValidateSet("dev","prod")] [string]$Mode = "dev",
   [string]$Token = "devtoken123",
   [switch]$Migrate,
@@ -45,7 +45,7 @@ function Smoke-Slots {
   Invoke-RestMethod "$base/events/$EventId/slots/$slotId" -Headers $auth -Method PATCH -ContentType "application/json" -Body $patch | Out-Null
 
   Invoke-RestMethod "$base/events/$EventId/slots/$slotId" -Headers $auth -Method DELETE | Out-Null
-  Write-Host "Smoke OK ✅"
+  Write-Host "Smoke OK âœ…"
 }
 
 if ($Migrate) { Migrate-Up }

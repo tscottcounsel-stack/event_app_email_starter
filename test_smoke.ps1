@@ -1,4 +1,4 @@
-# test_smoke.ps1  — run from repo root
+# test_smoke.ps1  Ã¢â‚¬â€ run from repo root
 $ErrorActionPreference = "Stop"
 $Base = "http://127.0.0.1:8000"
 $failed = 0
@@ -71,7 +71,7 @@ if ($hasEvents) {
     if ($evGet -and $evGet.id -eq $ev.id) { Pass "Fetched event id=$($evGet.id)" } else { Fail "Fetch event failed" }
   }
 } else {
-  Write-Host "(/events not mounted — skipping events tests.)"
+  Write-Host "(/events not mounted Ã¢â‚¬â€ skipping events tests.)"
 }
 
 Write-Section "Summary"

@@ -6,24 +6,24 @@ param(
 )
 
 if (-not (Test-Path $CsvPath)) {
-    Write-Host "❌ CSV file not found at $CsvPath" -ForegroundColor Red
+    Write-Host "Ã¢ÂÅ’ CSV file not found at $CsvPath" -ForegroundColor Red
     exit
 }
 
 # Import results
 $results = Import-Csv -Path $CsvPath
 if (-not $results) {
-    Write-Host "⚠ No data found in CSV." -ForegroundColor Yellow
+    Write-Host "Ã¢Å¡Â  No data found in CSV." -ForegroundColor Yellow
     exit
 }
 
 # Optional filter
 if ($Mode -ne "") {
     $results = $results | Where-Object { $_.Mode -eq $Mode }
-    Write-Host "📌 Filtering results for Mode: $Mode" -ForegroundColor Cyan
+    Write-Host "Ã°Å¸â€œÅ’ Filtering results for Mode: $Mode" -ForegroundColor Cyan
 }
 
-Write-Host "📊 Analyzing test results from $CsvPath`n" -ForegroundColor Cyan
+Write-Host "Ã°Å¸â€œÅ  Analyzing test results from $CsvPath`n" -ForegroundColor Cyan
 
 # --- Stats
 $total    = $results.Count
@@ -34,16 +34,16 @@ $avgErrs  = [math]::Round(($results | Measure-Object -Property Errors -Average).
 
 # --- Overall
 Write-Host "==================== Overall ====================" -ForegroundColor Yellow
-Write-Host (" Success:".PadRight(15) + "$success " + ("█" * ($success * 50 / $total)))
-Write-Host (" Failed:".PadRight(15) + "$failed " + ("█" * ($failed * 50 / $total))) -ForegroundColor Red
+Write-Host (" Success:".PadRight(15) + "$success " + ("Ã¢â€“Ë†" * ($success * 50 / $total)))
+Write-Host (" Failed:".PadRight(15) + "$failed " + ("Ã¢â€“Ë†" * ($failed * 50 / $total))) -ForegroundColor Red
 Write-Host " Average time (s):  $avgTime"
 Write-Host " Average errors:    $avgErrs"
 Write-Host "=================================================`n"
 
 # --- ASCII timeline
-Write-Host "📌 Recent results timeline (last $LastN):" -ForegroundColor Cyan
+Write-Host "Ã°Å¸â€œÅ’ Recent results timeline (last $LastN):" -ForegroundColor Cyan
 $timeline = ($results | Select-Object -Last $LastN | ForEach-Object {
-    if ($_.Status -eq "Success") { "✔" } else { "✘" }
+    if ($_.Status -eq "Success") { "Ã¢Å“â€" } else { "Ã¢Å“Ëœ" }
 }) -join ""
 Write-Host $timeline
 Write-Host "`n"
@@ -62,7 +62,7 @@ if (Test-Path $SummaryExport) {
 } else {
     $summary | Export-Csv -Path $SummaryExport -NoTypeInformation
 }
-Write-Host "✅ Summary saved to $SummaryExport" -ForegroundColor Green
+Write-Host "Ã¢Å“â€¦ Summary saved to $SummaryExport" -ForegroundColor Green
 
 # --- Optional Excel export with charts
 try {
@@ -83,8 +83,8 @@ try {
     }
     $wb.SaveAs($excelPath)
     $excel.Quit()
-    Write-Host "📊 Excel summary saved to $excelPath" -ForegroundColor Green
+    Write-Host "Ã°Å¸â€œÅ  Excel summary saved to $excelPath" -ForegroundColor Green
 }
 catch {
-    Write-Host "⚠ Excel export failed (likely Excel not installed)." -ForegroundColor Yellow
+    Write-Host "Ã¢Å¡Â  Excel export failed (likely Excel not installed)." -ForegroundColor Yellow
 }

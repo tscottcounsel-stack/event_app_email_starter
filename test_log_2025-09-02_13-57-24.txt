@@ -1,4 +1,4 @@
-﻿=== API Test Log Started at 09/02/2025 13:57:24 ===
+=== API Test Log Started at 09/02/2025 13:57:24 ===
 
 
 [Request] POST http://127.0.0.1:8000/users/

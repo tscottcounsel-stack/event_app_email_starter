@@ -1,4 +1,4 @@
-﻿name: pre-commit
+name: pre-commit
 
 on:
   push:

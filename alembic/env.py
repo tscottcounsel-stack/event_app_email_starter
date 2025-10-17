@@ -37,7 +37,7 @@ if PREFLIGHT and not context.is_offline_mode():
         # Log and keep going; don't block migrations.
         print(f"[db] Preflight skipped: {e}")
 
-# We’re not using autogenerate here
+# Weâ€™re not using autogenerate here
 target_metadata = None
 
 

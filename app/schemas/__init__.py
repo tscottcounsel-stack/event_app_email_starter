@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from .vendor import VendorCreate, VendorRead, VendorUpdate
 
 
-# ── Vendors ───────────────────────────────────────────────────────────
+# â”€â”€ Vendors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class VendorCreate(BaseModel):
     name: str
     category: Optional[str] = None
@@ -26,7 +26,7 @@ class VendorRead(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-# ── Applications ──────────────────────────────────────────────────────
+# â”€â”€ Applications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _ALLOWED_STATUSES = {"pending", "submitted", "approved", "declined"}
 
 

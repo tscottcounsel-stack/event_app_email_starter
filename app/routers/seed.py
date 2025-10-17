@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text  # ← IMPORTANT in SQLAlchemy 2.0
+from sqlalchemy import text  # â† IMPORTANT in SQLAlchemy 2.0
 from sqlalchemy.orm import Session
 
 from app.db import get_db

@@ -8,8 +8,8 @@ organizer = db.query(User).filter(User.email == "organizer@example.com").first()
 if organizer:
     organizer.hashed_password = hash_pw("testpass")
     db.commit()
-    print("✅ Organizer password reset to 'testpass'")
+    print("âœ… Organizer password reset to 'testpass'")
 else:
-    print("❌ Organizer not found")
+    print("âŒ Organizer not found")
 
 db.close()

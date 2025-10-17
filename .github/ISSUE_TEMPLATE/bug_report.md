@@ -1,6 +1,6 @@
 name: Bug report
 
-description: Something isn’t working as expected
+description: Something isnâ€™t working as expected
 
 labels: bug
 
@@ -34,11 +34,11 @@ body:
 
 &nbsp;     placeholder: |
 
-&nbsp;       1. Go to …
+&nbsp;       1. Go to â€¦
 
-&nbsp;       2. Run …
+&nbsp;       2. Run â€¦
 
-&nbsp;       3. See error …
+&nbsp;       3. See error â€¦
 
 &nbsp; - type: textarea
 

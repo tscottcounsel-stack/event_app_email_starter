@@ -1,22 +1,26 @@
-name-template: "v$NEXT_PATCH_VERSION"
-tag-template: "v$NEXT_PATCH_VERSION"
-change-template: "- $TITLE (#$NUMBER) by @$AUTHOR"
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
+
 categories:
-  - title: "🚀 Features"
-    labels: ["feature", "enhancement", "minor"]
-  - title: "🐛 Fixes"
-    labels: ["bug", "patch", "fix"]
-  - title: "🧰 Maintenance"
-    labels: ["chore", "maintenance", "ci", "docs", "refactor"]
-exclude-labels:
-  - "skip-changelog"
+  - title: 'Features'
+    labels: [feature, enhancement]
+  - title: 'Fixes'
+    labels: [bug, fix]
+  - title: 'Maintenance'
+    labels: [chore, deps, maintenance]
+
+exclude-labels: [skip-release]
+
 version-resolver:
   major:
-    labels: ["major", "breaking-change"]
+    labels: [major, 'breaking change']
   minor:
-    labels: ["minor", "feature", "enhancement"]
+    labels: [minor, feature, enhancement]
   patch:
-    labels: ["patch", "bug", "fix", "chore"]
+    labels: [patch, bug, fix]
+  default: patch
+
 template: |
-  ## Changes
+  ## What's Changed
   $CHANGES

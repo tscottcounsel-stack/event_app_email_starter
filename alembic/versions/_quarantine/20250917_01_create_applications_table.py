@@ -26,7 +26,7 @@ def upgrade():
     """
     )
 
-    # Unique (event_id, vendor_id) — idempotent via index
+    # Unique (event_id, vendor_id) â€” idempotent via index
     op.execute(
         """
     DO $$

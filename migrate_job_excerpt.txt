@@ -1,4 +1,4 @@
-﻿migrate	Install system packages	2025-10-16T00:50:03.8071370Z (Reading database ... 70%
+migrate	Install system packages	2025-10-16T00:50:03.8071370Z (Reading database ... 70%
 migrate	Install system packages	2025-10-16T00:50:04.4359628Z (Reading database ... 75%
 migrate	Install system packages	2025-10-16T00:50:05.1040125Z (Reading database ... 80%
 migrate	Install system packages	2025-10-16T00:50:05.8456900Z (Reading database ... 85%

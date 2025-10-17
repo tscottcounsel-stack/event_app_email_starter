@@ -87,7 +87,7 @@ for vendor in sample_vendors:
     print(f"Added vendor {vendor['profile']['display_name']} ({vendor['email']})")
 
 db.close()
-print("✅ Seeding complete!")
+print("âœ… Seeding complete!")
 
 # Sample organizer
 organizer_email = "organizer@example.com"
@@ -117,6 +117,6 @@ if not existing_org:
     db.add(org_profile)
     db.commit()
 
-    print(f"✅ Added organizer {organizer_email} (password: {organizer_pw})")
+    print(f"âœ… Added organizer {organizer_email} (password: {organizer_pw})")
 else:
     print(f"Skipping organizer {organizer_email} (already exists)")

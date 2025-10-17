@@ -12,7 +12,7 @@ def cleanup():
     # Remove DB file if exists
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
-        print(f"✅ Removed {DB_PATH}")
+        print(f"âœ… Removed {DB_PATH}")
 
     # Auto-prune CSVs, keep only latest
     if os.path.exists(CSV_DIR):
@@ -25,20 +25,20 @@ def cleanup():
             keep = csv_files[0]
             for f in csv_files[1:]:
                 os.remove(f)
-                print(f"🧹 Removed old CSV: {f}")
-            print(f"✅ Kept latest CSV: {keep}")
+                print(f"ðŸ§¹ Removed old CSV: {f}")
+            print(f"âœ… Kept latest CSV: {keep}")
         else:
-            print("⚠️ No CSV files found to prune.")
+            print("âš ï¸ No CSV files found to prune.")
 
 
 def check_db():
     if not os.path.exists(DB_PATH):
-        print("⚠️ Database not found. Creating new one...")
+        print("âš ï¸ Database not found. Creating new one...")
         conn = sqlite3.connect(DB_PATH)
         conn.close()
-        print(f"✅ Created {DB_PATH}")
+        print(f"âœ… Created {DB_PATH}")
     else:
-        print(f"✅ DB already exists: {DB_PATH}")
+        print(f"âœ… DB already exists: {DB_PATH}")
 
 
 if __name__ == "__main__":

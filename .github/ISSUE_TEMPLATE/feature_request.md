@@ -52,4 +52,4 @@ body:
 
 &nbsp;       - label: I checked existing issues/PRs
 
-&nbsp;       - label: I’m willing to help implement this
+&nbsp;       - label: Iâ€™m willing to help implement this

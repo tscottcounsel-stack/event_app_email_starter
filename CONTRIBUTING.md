@@ -2,7 +2,7 @@
 
 
 
-Thanks for contributing! 🎉
+Thanks for contributing! ðŸŽ‰
 
 
 
@@ -18,7 +18,7 @@ Thanks for contributing! 🎉
 
 \## Branching
 
-\- Create feature branches from `main`: `feat/…`, `fix/…`, `docs/…`
+\- Create feature branches from `main`: `feat/â€¦`, `fix/â€¦`, `docs/â€¦`
 
 \- Keep PRs small and focused.
 

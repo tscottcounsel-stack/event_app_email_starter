@@ -1,4 +1,4 @@
-﻿services:
+services:
   - type: web
     name: event-app-api
     env: docker

@@ -44,7 +44,7 @@ function Insert-ImportBlock {
   # If already present, no-op
   if ($text -match [regex]::Escape($ImportLine)) { return $false }
 
-  # Don’t add to our own deps module
+  # DonÃ¢â‚¬â„¢t add to our own deps module
   if ($FilePath -like "*core\deps.py") { return $false }
 
   # Only touch files that actually reference get_current_user
