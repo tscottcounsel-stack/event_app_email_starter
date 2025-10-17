@@ -80,3 +80,8 @@ coverage.xml
 htmlcov/
 coverage.xml
 .pytest_cache/
+# test/coverage artifacts
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
