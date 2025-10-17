@@ -1,9 +1,10 @@
-﻿[![codecov](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter/branch/main/graph/badge.svg)](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter)
+[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)
+[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)
+[![pre-commit](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml)
+
+[![codecov](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter/branch/main/graph/badge.svg)](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter)
 
 <!-- CI BADGE START -->n[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)n[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)n<!-- CI BADGE END -->nn
-[![Tests](https://github.com/OWNER/REPO/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/tests.yml)
-[![Lint](https://github.com/OWNER/REPO/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/OWNER/REPO/actions/workflows/lint.yml)
-
 # Event Organizerâ€“Vendor API
 # Event App Email Starter
 
@@ -16,7 +17,6 @@
 ![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)
 ![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen)
 [![GitHub release](https://img.shields.io/github/v/release/tscottcounsel-stack/event_app_email_starter?display_name=tag)](https://github.com/tscottcounsel-stack/event_app_email_starter/releases)
-
 FastAPI app for organizer/vendor flows. Defaults to in-memory storage (fast tests). Optional SQLite persistence behind a flag.
 
 ## Quickstart
