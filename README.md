@@ -1,11 +1,11 @@
-[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)
+﻿[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)
 [![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)
 [![pre-commit](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/pre-commit.yml)
 
 [![codecov](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter/branch/main/graph/badge.svg)](https://codecov.io/gh/tscottcounsel-stack/event_app_email_starter)
 
 <!-- CI BADGE START -->n[![Tests](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/tests.yml)n[![Lint](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/lint.yml)n<!-- CI BADGE END -->nn
-# Event OrganizerÃ¢â‚¬â€œVendor API
+# Event OrganizerÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“Vendor API
 # Event App Email Starter
 
 ![CI](https://github.com/tscottcounsel-stack/event_app_email_starter/actions/workflows/ci.yml/badge.svg)

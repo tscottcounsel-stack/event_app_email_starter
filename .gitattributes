@@ -1,22 +1,28 @@
-﻿# Normalize text files to LF in repo, convert to CRLF on Windows checkout
-* text=auto
-*.ps1 text eol=lf
-*.sh  text eol=lf
-*.yml text eol=lf
+# Normalize all text to LF in repo
+* text=auto eol=lf
+
+# Explicit text files (pin LF)
+*.py   text eol=lf
+*.ps1  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
 *.yaml text eol=lf
+*.ini  text eol=lf
+*.cfg  text eol=lf
 *.toml text eol=lf
-*.ini text eol=lf
-*.cfg text eol=lf
-*.txt text eol=lf
-@'
-* text=auto
-*.ps1 text eol=lf
-*.sh  text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-*.toml text eol=lf
-*.ini text eol=lf
-*.cfg text eol=lf
-*.md  text eol=lf
-*.txt text eol=lf
-'@ | Set-Content .gitattributes -Encoding utf8
+*.gitignore text eol=lf
+
+# Binary files
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.tar.gz binary
+
+# Don’t normalize coverage artifacts
+coverage.xml -text
+*.coverage -text
