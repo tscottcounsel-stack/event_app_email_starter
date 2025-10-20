@@ -56,7 +56,7 @@ iniconfig==2.1.0
 
 ipython==8.27.0
 
-isort==5.13.2
+isort==7.0.0
 
 jedi==0.19.2
 

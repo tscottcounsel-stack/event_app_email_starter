@@ -4,7 +4,7 @@ httpx==0.27.2  # async HTTP client (great for FastAPI tests)
 
 # âœ… Linting & Code Style
 black==24.8.0  # opinionated auto-formatter
-isort==5.13.2  # sort imports
+isort==7.0.0  # sort imports
 flake8==7.1.1  # linting
 
 # âœ… Developer utilities
