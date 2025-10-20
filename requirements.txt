@@ -132,7 +132,7 @@ python-jose==3.3.0
 
 python-multipart==0.0.20
 
-PyYAML==6.0.2
+PyYAML==6.0.3
 
 requests==2.31.0
 
