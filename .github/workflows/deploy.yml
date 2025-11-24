@@ -29,7 +29,7 @@ jobs:
     if: ${{ secrets.FLY_API_TOKEN }}
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Deploy to Fly
         env:
@@ -43,7 +43,7 @@ jobs:
     if: ${{ secrets.RAILWAY_TOKEN && secrets.RAILWAY_PROJECT_ID }}
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Railway CLI
         run: curl -fsSL https://railway.app/install.sh | sh
       - name: Deploy to Railway
