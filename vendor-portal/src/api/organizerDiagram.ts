@@ -1,160 +1,89 @@
-// src/api/organizerDiagram.ts
-import { apiGet, apiPut } from "../api";
+// vendor-portal/src/api/organizerDiagram.ts
+import { apiGet, apiPut } from "./api";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+export type SlotStatus =
+  | "available"
+  | "assigned"
+  | "pending"
+  | "reserved"
+  | "hidden";
 
-export type DiagramBooth = {
+export interface BoothSlot {
+  id: string;
   label: string;
   x: number;
   y: number;
-  width: number;
-  height: number;
-  priceCents?: number | null;
-  status?: string | null;
-  // link to a real application if assigned
-  assignedApplicationId?: number | null;
-};
-
-export type DiagramBody = {
-  width: number;
-  height: number;
-  boothMap: Record<string, DiagramBooth>;
-};
-
-export type OrganizerDiagram = {
-  event_id: number;
-  version: number | null;
-  diagram: DiagramBody | null;
-  updated_at: string | null;
-};
-
-export type SaveDiagramPayload = {
-  diagram: DiagramBody;
-  // optimistic concurrency; backend expects snake_case
-  expect_version?: number | null;
-};
-
-// ---------------------------------------------------------------------------
-// Normalization helpers
-// ---------------------------------------------------------------------------
-
-function normalizeBody(raw: any): DiagramBody {
-  const inner =
-    raw && typeof raw === "object" && "diagram" in raw
-      ? (raw.diagram as any)
-      : raw;
-
-  const width =
-    typeof inner?.width === "number"
-      ? inner.width
-      : typeof inner?.w === "number"
-      ? inner.w
-      : 1200;
-
-  const height =
-    typeof inner?.height === "number"
-      ? inner.height
-      : typeof inner?.h === "number"
-      ? inner.h
-      : 800;
-
-  const boothMapRaw = inner?.boothMap ?? {};
-  const boothMap: Record<string, DiagramBooth> = {};
-
-  for (const [label, value] of Object.entries(boothMapRaw as any)) {
-    const b: any = value ?? {};
-
-    const bw =
-      typeof b.width === "number"
-        ? b.width
-        : typeof b.w === "number"
-        ? b.w
-        : 1;
-    const bh =
-      typeof b.height === "number"
-        ? b.height
-        : typeof b.h === "number"
-        ? b.h
-        : 1;
-
-    boothMap[label] = {
-      label,
-      x: typeof b.x === "number" ? b.x : 0,
-      y: typeof b.y === "number" ? b.y : 0,
-      width: bw,
-      height: bh,
-      priceCents:
-        typeof b.priceCents === "number"
-          ? b.priceCents
-          : typeof b.price_cents === "number"
-          ? b.price_cents
-          : null,
-      status: (b.status as string) ?? null,
-      assignedApplicationId:
-        typeof b.assignedApplicationId === "number"
-          ? b.assignedApplicationId
-          : typeof b.assigned_application_id === "number"
-          ? b.assigned_application_id
-          : null,
-    };
-  }
-
-  return { width, height, boothMap };
+  w: number;
+  h: number;
+  status?: SlotStatus;
 }
 
-// ---------------------------------------------------------------------------
-// API helpers
-// ---------------------------------------------------------------------------
+export interface DiagramPayload {
+  width: number;
+  height: number;
+  slots: BoothSlot[];
+}
 
-/**
- * Load organizer diagram for an event.
- * Always returns a normalized body + the current version (if any).
- */
+export interface OrganizerDiagram {
+  width: number;
+  height: number;
+  slots: BoothSlot[];
+  version: number;
+}
+
+// --- API calls ---
+
+// GET /organizer/events/:eventId/diagram
 export async function getOrganizerDiagram(
-  eventId: number
-): Promise<{ version: number | null; body: DiagramBody }> {
-  const data = (await apiGet(
-    `/organizer/events/${eventId}/diagram`
-  )) as OrganizerDiagram | DiagramBody | null;
+  eventId: number | string
+): Promise<OrganizerDiagram> {
+  const data = await apiGet(`/organizer/events/${eventId}/diagram`);
 
-  // Support both raw organizer shape and plain body
-  let version: number | null = null;
-  if (data && typeof data === "object" && "event_id" in data) {
-    version = (data as OrganizerDiagram).version ?? null;
-  }
-
-  const body = normalizeBody(data);
-  return { version, body };
-}
-
-/**
- * Save a diagram body for an event. Uses optimistic concurrency via expect_version.
- */
-export async function saveOrganizerDiagram(
-  eventId: number,
-  body: DiagramBody,
-  opts?: { expectVersion?: number | null }
-): Promise<{ version: number | null; body: DiagramBody }> {
-  const payload: SaveDiagramPayload = {
-    diagram: body,
+  // Handle a couple of common shapes:
+  // 1) { diagram: { width, height, slots, version } }
+  // 2) { width, height, slots, version }
+  const diagram = (data.diagram ?? data) as {
+    width?: number;
+    height?: number;
+    slots?: BoothSlot[];
+    version?: number;
   };
 
-  if (opts && opts.expectVersion != null) {
-    payload.expect_version = opts.expectVersion;
-  }
+  return {
+    width: diagram.width ?? 32,
+    height: diagram.height ?? 16,
+    slots: diagram.slots ?? [],
+    version: diagram.version ?? 0,
+  };
+}
 
-  const data = (await apiPut(
-    `/organizer/events/${eventId}/diagram`,
-    payload
-  )) as OrganizerDiagram | DiagramBody;
+// PUT /organizer/events/:eventId/diagram
+// Body shape is commonly:
+//   { expect_version, diagram: { width, height, slots } }
+// Adjust if your backend expects a different shape.
+export async function saveOrganizerDiagram(
+  eventId: number | string,
+  diagram: DiagramPayload,
+  expectVersion: number
+): Promise<OrganizerDiagram> {
+  const body = {
+    expect_version: expectVersion,
+    diagram,
+  };
 
-  let version: number | null = null;
-  if (data && typeof data === "object" && "event_id" in data) {
-    version = (data as OrganizerDiagram).version ?? null;
-  }
+  const data = await apiPut(`/organizer/events/${eventId}/diagram`, body);
 
-  const normalized = normalizeBody(data);
-  return { version, body: normalized };
+  const returned = (data.diagram ?? data) as {
+    width?: number;
+    height?: number;
+    slots?: BoothSlot[];
+    version?: number;
+  };
+
+  return {
+    width: returned.width ?? diagram.width,
+    height: returned.height ?? diagram.height,
+    slots: returned.slots ?? diagram.slots,
+    version: returned.version ?? expectVersion,
+  };
 }

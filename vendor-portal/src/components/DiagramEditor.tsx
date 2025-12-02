@@ -1,578 +1,1231 @@
 // src/components/DiagramEditor.tsx
-import React, { useEffect, useMemo, useState } from "react";
+
+import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import {
-  DiagramBody,
   getOrganizerDiagram,
   saveOrganizerDiagram,
+  type SaveOrganizerDiagramPayload,
 } from "../api/organizerDiagram";
+import type { DiagramEnvelope, DiagramJson } from "../api/diagramTypes";
 import { DiagramGrid } from "./DiagramGrid";
+import { apiGet, apiPost } from "../api/api";
 
-type LoadState = "idle" | "loading" | "loaded" | "error";
-type SaveState = "idle" | "saving" | "saved" | "error";
+type LoadStatus = "idle" | "loading" | "loaded" | "saving" | "error";
+type ApplicationsLoadStatus = "idle" | "loading" | "loaded" | "error";
 
-type SimpleBooth = {
-  label: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
+const DEFAULT_WIDTH = 1200;
+const DEFAULT_HEIGHT = 800;
+const CELL_SIZE = 40; // must match DiagramGrid.tsx
 
-// ---------- overlap helpers ----------
-
-function normalizeBooths(boothMap: Record<string, any>): SimpleBooth[] {
-  return Object.entries(boothMap || {}).map(([label, raw]) => {
-    const b: any = raw || {};
-    const width =
-      typeof b.width === "number"
-        ? b.width
-        : typeof b.w === "number"
-        ? b.w
-        : 1;
-    const height =
-      typeof b.height === "number"
-        ? b.height
-        : typeof b.h === "number"
-        ? b.h
-        : 1;
-
-    return {
-      label,
-      x: typeof b.x === "number" ? b.x : 0,
-      y: typeof b.y === "number" ? b.y : 0,
-      width,
-      height,
-    };
-  });
+export interface DiagramEditorProps {
+  /** Optional: parent can pass eventId directly.
+   *  If omitted, we fall back to useParams().
+   */
+  eventId?: number;
+  /** Optional: initial booth label to select on load, e.g. B4 */
+  initialSlot?: string;
 }
 
-function countOverlaps(boothMap: Record<string, any>): number {
-  const booths = normalizeBooths(boothMap);
-  if (booths.length === 0) return 0;
-
-  const colliding = new Set<string>();
-
-  for (let i = 0; i < booths.length; i++) {
-    const a = booths[i];
-    const ax2 = a.x + a.width;
-    const ay2 = a.y + a.height;
-
-    for (let j = i + 1; j < booths.length; j++) {
-      const b = booths[j];
-      const bx2 = b.x + b.width;
-      const by2 = b.y + b.height;
-
-      const overlap =
-        a.x < bx2 && ax2 > b.x && a.y < by2 && ay2 > b.y;
-
-      if (overlap) {
-        colliding.add(a.label);
-        colliding.add(b.label);
-      }
-    }
-  }
-
-  return colliding.size;
+interface OrganizerApplication {
+  id: number;
+  vendor_name?: string;
+  business_name?: string;
+  vendorName?: string;
+  status: string;
+  payment_status?: string;
+  paymentStatus?: string;
+  assigned_slot_label?: string | null;
+  assigned_slot_code?: string | null; // tolerate either field name
+  assigned_slot_id?: number | null;
+  total_due_cents?: number;
+  total_paid_cents?: number;
 }
 
-function generateNextLabel(boothMap: Record<string, any>): string {
-  let maxNum = 0;
-  for (const label of Object.keys(boothMap || {})) {
-    const m = /^B(\d+)$/i.exec(label.trim());
-    if (m) {
-      const n = parseInt(m[1], 10);
-      if (!Number.isNaN(n)) maxNum = Math.max(maxNum, n);
-    }
-  }
-  const next = maxNum + 1 || 1;
-  return `B${next}`;
-}
-
-function findFreePosition(
-  boothMap: Record<string, any>,
-  width: number,
-  height: number
-): { x: number; y: number } {
-  const booths = normalizeBooths(boothMap);
-
-  let maxX = 0;
-  let maxY = 0;
-  for (const b of booths) {
-    maxX = Math.max(maxX, b.x + b.width);
-    maxY = Math.max(maxY, b.y + b.height);
-  }
-
-  const cols = Math.max(12, maxX + width + 2);
-  const rows = Math.max(8, maxY + height + 2);
-
-  const overlaps = (
-    x: number,
-    y: number,
-    w: number,
-    h: number
-  ): boolean => {
-    const x2 = x + w;
-    const y2 = y + h;
-    return booths.some((b) => {
-      const bx2 = b.x + b.width;
-      const by2 = b.y + b.height;
-      return x < bx2 && x2 > b.x && y < by2 && y2 > b.y;
-    });
+interface OrganizerEventApplicationsResponse {
+  summary: {
+    event_id: number;
+    total_applications: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+    total_due_cents: number;
+    total_paid_cents: number;
   };
-
-  for (let y = 0; y <= rows - height; y++) {
-    for (let x = 0; x <= cols - width; x++) {
-      if (!overlaps(x, y, width, height)) {
-        return { x, y };
-      }
-    }
-  }
-
-  return { x: maxX + 1, y: 0 };
+  items: OrganizerApplication[];
 }
 
-// ---------- component ----------
+interface VendorProfile {
+  id?: number | null;
+  business_name?: string | null;
+  contact_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  city?: string | null;
+  state?: string | null;
+  website?: string | null;
+  description?: string | null;
+}
 
-const DiagramEditor: React.FC = () => {
+/**
+ * Sync booth statuses in the diagram based on applications.
+ * This is the heart of:
+ *  - unified assignment logic + consistent colors
+ *  - auto-sync diagram when assignments change
+ */
+function syncBoothStatusesFromApplications(
+  diagram: DiagramJson,
+  apps: OrganizerApplication[],
+): DiagramJson {
+  const originalMap = (diagram.boothMap || {}) as Record<string, any>;
+  const newMap: Record<string, any> = {};
+
+  // 1) Copy all booths and reset them to a sane baseline
+  for (const [label, booth] of Object.entries(originalMap)) {
+    const existingStatus =
+      ((booth as any).status as string | undefined) ?? "available";
+
+    // Streets stay streets; everything else defaults back to "available"
+    const baseStatus = existingStatus === "street" ? "street" : "available";
+
+    newMap[label] = {
+      ...booth,
+      status: baseStatus,
+    };
+  }
+
+  // 2) Apply application-based statuses
+  for (const app of apps) {
+    const label = app.assigned_slot_label || app.assigned_slot_code;
+    if (!label) continue;
+
+    const booth = newMap[label];
+    if (!booth) continue;
+
+    const appStatus = (app.status || "").toLowerCase();
+    const payment = (app.payment_status || app.paymentStatus || "")
+      .toLowerCase()
+      .trim();
+
+    let statusFromApp = (booth as any).status ?? "available";
+
+    if (appStatus === "rejected") {
+      statusFromApp = "blocked"; // red
+    } else if (appStatus === "pending") {
+      statusFromApp = "pending"; // gold
+    } else if (appStatus === "approved") {
+      if (payment === "paid") {
+        statusFromApp = "assigned"; // blue
+      } else if (payment === "partial") {
+        statusFromApp = "reserved"; // maybe orange
+      } else {
+        statusFromApp = "reserved"; // approved but unpaid
+      }
+    }
+
+    newMap[label] = {
+      ...booth,
+      status: statusFromApp,
+    };
+  }
+
+  return {
+    ...diagram,
+    boothMap: newMap,
+  };
+}
+
+const DiagramEditor: React.FC<DiagramEditorProps> = ({
+  eventId,
+  initialSlot,
+}) => {
+  // Fallback to router param if prop not provided
   const { eventId: eventIdParam } = useParams<{ eventId: string }>();
-  const eventId = Number(eventIdParam);
+  const effectiveEventId =
+    eventId ?? (eventIdParam ? Number(eventIdParam) : NaN);
 
-  const [diagram, setDiagram] = useState<DiagramBody | null>(null);
-  const [version, setVersion] = useState<number | null>(null);
-
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [status, setStatus] = useState<LoadStatus>("loading");
   const [error, setError] = useState<string | null>(null);
-  const [isDirty, setIsDirty] = useState(false);
-  const [reloadToken, setReloadToken] = useState(0);
 
-  const [selectedLabel, setSelectedLabel] = useState<string | null>(
-    null
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "pending" | "approved" | "rejected"
+  >("all");
+  const [paymentFilter, setPaymentFilter] = useState<
+    "all" | "unpaid" | "partial" | "paid"
+  >("all");
+
+  const [envelope, setEnvelope] = useState<DiagramEnvelope | null>(null);
+  const [diagram, setDiagram] = useState<DiagramJson | null>(null);
+  const [selectedLabels, setSelectedLabels] = useState<string[]>(
+    initialSlot ? [initialSlot] : [],
   );
 
-  // ---- load -------------------------------------------------------
+  // last lane shape snapshot so we can revert
+  const [lastStreetSnapshot, setLastStreetSnapshot] = useState<{
+    label: string;
+    booth: any;
+  } | null>(null);
+
+  // applications for this event
+  const [applications, setApplications] = useState<OrganizerApplication[]>([]);
+  const [appsStatus, setAppsStatus] =
+    useState<ApplicationsLoadStatus>("idle");
+  const [appsError, setAppsError] = useState<string | null>(null);
+  const [selectedAppId, setSelectedAppId] = useState<number | null>(null);
+
+  const [assigning, setAssigning] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assignSuccess, setAssignSuccess] = useState<string | null>(null);
+
+  // Vendor modal state
+  const [vendorModalOpen, setVendorModalOpen] = useState(false);
+  const [vendorLoading, setVendorLoading] = useState(false);
+  const [vendorError, setVendorError] = useState<string | null>(null);
+  const [selectedVendor, setSelectedVendor] = useState<VendorProfile | null>(
+    null,
+  );
+
+  function getFilteredApplications(
+    apps: OrganizerApplication[],
+  ): OrganizerApplication[] {
+    return apps.filter((app) => {
+      const s = (app.status || "").toLowerCase();
+      const p = (app.payment_status || app.paymentStatus || "").toLowerCase();
+
+      if (statusFilter !== "all" && s !== statusFilter) {
+        return false;
+      }
+
+      if (paymentFilter !== "all" && p !== paymentFilter) {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  const filteredApplications = getFilteredApplications(applications);
+
+  // ---------------- load existing diagram + applications ----------------
+
   useEffect(() => {
-    if (!eventId || Number.isNaN(eventId)) {
-      setError("Missing or invalid event id.");
-      setLoadState("error");
+    if (!effectiveEventId || Number.isNaN(effectiveEventId)) {
+      setError("Invalid event id.");
+      setStatus("error");
       return;
     }
 
     let cancelled = false;
 
-    async function load() {
+    async function loadDiagram() {
       try {
-        setLoadState("loading");
+        setStatus("loading");
         setError(null);
 
-        const { version: v, body } = await getOrganizerDiagram(
-          eventId
+        console.log(
+          "[DiagramEditor] loading diagram for event",
+          effectiveEventId,
         );
+        const resp = await getOrganizerDiagram(effectiveEventId);
+        console.log("[DiagramEditor] got diagram", resp);
+
         if (cancelled) return;
 
-        setDiagram(body);
-        setVersion(v ?? null);
-        setIsDirty(false);
-        setSaveState("idle");
-        setLoadState("loaded");
-        setSelectedLabel(null);
+        setEnvelope(resp);
+
+        const incomingDiagram = resp.diagram ?? null;
+
+        if (incomingDiagram) {
+          setDiagram(incomingDiagram);
+        } else {
+          const blank: DiagramJson = {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            boothMap: {},
+          };
+          setDiagram(blank);
+        }
+
+        // only keep initialSlot selection if we still have that label
+        setSelectedLabels((prev) => {
+          if (prev.length === 1 && incomingDiagram?.boothMap?.[prev[0]]) {
+            return prev;
+          }
+          return [];
+        });
+
+        setLastStreetSnapshot(null);
+        setStatus("loaded");
       } catch (err) {
-        console.error("Failed to load diagram", err);
+        console.error("[DiagramEditor] failed to load diagram", err);
         if (cancelled) return;
 
-        setError("Could not load diagram for this event.");
-        setLoadState("error");
+        // Still allow editing by starting from blank
+        const blank: DiagramJson = {
+          width: DEFAULT_WIDTH,
+          height: DEFAULT_HEIGHT,
+          boothMap: {},
+        };
+        setDiagram(blank);
+        setEnvelope(null);
+        setSelectedLabels([]);
+        setLastStreetSnapshot(null);
+        setStatus("loaded");
+        setError(
+          "Could not load existing event map. Starting with a blank map.",
+        );
       }
     }
 
-    load();
+    async function loadApplications() {
+      try {
+        setAppsStatus("loading");
+        setAppsError(null);
+
+        const resp = await apiGet<OrganizerEventApplicationsResponse>(
+          `/organizer/events/${effectiveEventId}/applications?page=1&page_size=200`,
+        );
+
+        if (cancelled) return;
+
+        setApplications(resp.items ?? []);
+        setAppsStatus("loaded");
+
+        // auto-sync booth statuses from applications
+        setDiagram((prev) =>
+          prev
+            ? syncBoothStatusesFromApplications(prev, resp.items ?? [])
+            : prev,
+        );
+      } catch (err: any) {
+        console.error(
+          "[DiagramEditor] failed to load event applications – treating as no applications",
+          err,
+        );
+        if (cancelled) return;
+
+        // If the endpoint 404s / 401s / errors, just show "no applications"
+        setApplications([]);
+        setAppsStatus("loaded");
+        setAppsError(
+          err?.status === 401
+            ? "You are not authorized to view applications for this event."
+            : null,
+        );
+      }
+    }
+
+    loadDiagram();
+    loadApplications();
+
     return () => {
       cancelled = true;
     };
-  }, [eventId, reloadToken]);
+  }, [effectiveEventId]);
 
-  // ---- overlap detection ------------------------------------------
-  const conflictCount = useMemo(
-    () => (diagram ? countOverlaps(diagram.boothMap) : 0),
-    [diagram]
-  );
-  const hasConflicts = conflictCount > 0;
+  // ---------------- save handler ----------------
 
-  // ---- handlers ---------------------------------------------------
-
-  const handleDiagramChange = (next: any) => {
-    if (!diagram) return;
-
-    const safe: DiagramBody = {
-      width: next?.width ?? diagram.width,
-      height: next?.height ?? diagram.height,
-      boothMap: next?.boothMap ?? diagram.boothMap,
-    };
-
-    setDiagram(safe);
-    setIsDirty(true);
-    if (saveState === "saved" || saveState === "error") {
-      setSaveState("idle");
-    }
-  };
-
-  const handleSave = async () => {
-    if (!diagram || !eventId || Number.isNaN(eventId)) return;
-    if (hasConflicts) return;
+  async function handleSave() {
+    if (!diagram || !effectiveEventId || Number.isNaN(effectiveEventId)) return;
 
     try {
-      setSaveState("saving");
+      setStatus("saving");
       setError(null);
 
-      const { version: newVersion, body } = await saveOrganizerDiagram(
-        eventId,
+      const payload: SaveOrganizerDiagramPayload = {
         diagram,
-        { expectVersion: version ?? undefined }
-      );
+        expectVersion: envelope?.version,
+      };
 
-      setDiagram(body);
-      setVersion(newVersion ?? null);
-      setIsDirty(false);
-      setSaveState("saved");
+      console.log("[DiagramEditor] saving diagram", payload);
+
+      const resp = await saveOrganizerDiagram(effectiveEventId, payload);
+      console.log("[DiagramEditor] save result", resp);
+
+      setEnvelope(resp);
+      setDiagram(resp.diagram ?? diagram);
+      setStatus("loaded");
     } catch (err) {
-      console.error("Failed to save diagram", err);
-      setError("Could not save changes. Please try again.");
-      setSaveState("error");
+      console.error("[DiagramEditor] failed to save diagram", err);
+      setStatus("error");
+      setError("Could not save event map. Please try again.");
     }
-  };
+  }
 
-  const handleRetry = () => setReloadToken((p) => p + 1);
+  // ---------------- booth helpers (bulk tools + add booth + street tools) ----------------
 
-  const statusText =
-    saveState === "saving"
-      ? "Saving…"
-      : saveState === "saved" && !isDirty
-      ? "All changes saved"
-      : isDirty
-      ? "Unsaved changes"
-      : null;
+  const boothMap: Record<string, any> = (diagram as any)?.boothMap || {};
+  const selectionCount = selectedLabels.length;
+  const primaryLabel = selectionCount > 0 ? selectedLabels[0] : null;
+  const primaryBooth = primaryLabel ? boothMap[primaryLabel] : null;
 
-  const conflictText =
-    !diagram || conflictCount === 0
-      ? null
-      : conflictCount === 1
-      ? "1 overlapping booth – fix before saving."
-      : `${conflictCount} overlapping booths – fix before saving.`;
-
-  // ---- add / delete -----------------------------------------------
-
-  const handleAddBooth = () => {
+  function handleAddBooth() {
     if (!diagram) return;
 
-    const DEFAULT_W = 2;
-    const DEFAULT_H = 2;
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
 
-    const label = generateNextLabel(diagram.boothMap);
-    const { x, y } = findFreePosition(
-      diagram.boothMap,
-      DEFAULT_W,
-      DEFAULT_H
-    );
+    // Generate a unique label like B1, B2, B3...
+    let i = 1;
+    let newLabel = `B${i}`;
+    while (map[newLabel]) {
+      i += 1;
+      newLabel = `B${i}`;
+    }
 
-    const next: DiagramBody = {
-      ...diagram,
-      boothMap: {
-        ...diagram.boothMap,
-        [label]: {
-          label,
-          x,
-          y,
-          width: DEFAULT_W,
-          height: DEFAULT_H,
-          status: "available",
-        },
-      },
+    const newBooth = {
+      label: newLabel,
+      x: 0,
+      y: 0,
+      width: 2,
+      height: 2,
+      status: "available",
     };
 
-    setDiagram(next);
-    setIsDirty(true);
-    setSaveState("idle");
-    setSelectedLabel(label);
-  };
+    map[newLabel] = newBooth;
 
-  const handleDeleteBooth = () => {
-    if (!diagram || !selectedLabel) return;
-    if (!diagram.boothMap[selectedLabel]) return;
-
-    const nextBoothMap = { ...diagram.boothMap };
-    delete nextBoothMap[selectedLabel];
-
-    const next: DiagramBody = {
+    setDiagram({
       ...diagram,
-      boothMap: nextBoothMap,
-    };
+      boothMap: map,
+    });
+    setSelectedLabels([newLabel]);
+  }
 
-    setDiagram(next);
-    setIsDirty(true);
-    setSaveState("idle");
-    setSelectedLabel(null);
-  };
+  function handleDeleteSelected() {
+    if (!diagram || selectionCount === 0) return;
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
 
-  // ---- side-panel editing -----------------------------------------
+    for (const lbl of selectedLabels) {
+      delete map[lbl];
+    }
 
-  const updateSelectedBooth = (patch: Partial<any>) => {
-    if (!diagram || !selectedLabel) return;
-    const current = diagram.boothMap[selectedLabel];
+    setDiagram({
+      ...diagram,
+      boothMap: map,
+    });
+    setSelectedLabels([]);
+    setLastStreetSnapshot(null);
+  }
+
+  function handleDuplicateSelected() {
+    if (!diagram || selectionCount === 0) return;
+
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
+    const newLabels: string[] = [];
+
+    for (const label of selectedLabels) {
+      const original = map[label];
+      if (!original) continue;
+
+      const baseLabel = label;
+      let i = 2;
+      let newLabel = `${baseLabel}_${i}`;
+      while (map[newLabel]) {
+        i += 1;
+        newLabel = `${baseLabel}_${i}`;
+      }
+
+      const copy = {
+        ...original,
+        label: newLabel,
+        x: (original.x ?? 0) + 1,
+        y: (original.y ?? 0) + 1,
+      };
+
+      map[newLabel] = copy;
+      newLabels.push(newLabel);
+    }
+
+    setDiagram({
+      ...diagram,
+      boothMap: map,
+    });
+    if (newLabels.length > 0) {
+      setSelectedLabels(newLabels);
+    }
+    setLastStreetSnapshot(null);
+  }
+
+  function handleSetStatusForSelection(nextStatus: string) {
+    if (!diagram || selectionCount === 0) return;
+
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
+
+    for (const label of selectedLabels) {
+      const current = map[label];
+      if (!current) continue;
+      map[label] = {
+        ...current,
+        status: nextStatus,
+      };
+    }
+
+    setDiagram({
+      ...diagram,
+      boothMap: map,
+    });
+
+    if (nextStatus !== "street") {
+      setLastStreetSnapshot(null);
+    }
+  }
+
+  // Street helpers
+  function getGridDimensions() {
+    const w = diagram?.width ?? DEFAULT_WIDTH;
+    const h = diagram?.height ?? DEFAULT_HEIGHT;
+    const cols = Math.max(1, Math.floor(w / CELL_SIZE));
+    const rows = Math.max(1, Math.floor(h / CELL_SIZE));
+    return { cols, rows };
+  }
+
+  function snapshotCurrentStreetShape() {
+    if (!diagram || !primaryLabel || !primaryBooth) return;
+    setLastStreetSnapshot({
+      label: primaryLabel,
+      booth: { ...primaryBooth },
+    });
+  }
+
+  function handleStreetMakeHorizontal() {
+    if (!diagram || !primaryLabel || !primaryBooth) return;
+
+    const { cols } = getGridDimensions();
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
+    const current = map[primaryLabel];
     if (!current) return;
 
-    const updated = {
+    snapshotCurrentStreetShape();
+
+    map[primaryLabel] = {
       ...current,
-      ...patch,
+      x: 0,
+      width: cols,
     };
 
-    const next: DiagramBody = {
+    setDiagram({
       ...diagram,
-      boothMap: {
-        ...diagram.boothMap,
-        [selectedLabel]: updated,
-      },
+      boothMap: map,
+    });
+  }
+
+  function handleStreetMakeVertical() {
+    if (!diagram || !primaryLabel || !primaryBooth) return;
+
+    const { rows } = getGridDimensions();
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
+    const current = map[primaryLabel];
+    if (!current) return;
+
+    snapshotCurrentStreetShape();
+
+    map[primaryLabel] = {
+      ...current,
+      y: 0,
+      height: rows,
     };
 
-    setDiagram(next);
-    setIsDirty(true);
-    if (saveState === "saved" || saveState === "error") {
-      setSaveState("idle");
+    setDiagram({
+      ...diagram,
+      boothMap: map,
+    });
+  }
+
+  function handleStreetRevertShape() {
+    if (!diagram || !lastStreetSnapshot) return;
+
+    const { label, booth } = lastStreetSnapshot;
+    const map = { ...(diagram.boothMap || {}) } as Record<string, any>;
+    if (!map[label]) return;
+
+    map[label] = { ...booth };
+
+    setDiagram({
+      ...diagram,
+      boothMap: map,
+    });
+  }
+
+  // ---------------- Vendor profile helpers ----------------
+
+  async function handleViewVendor(appId: number) {
+    try {
+      setVendorModalOpen(true);
+      setVendorLoading(true);
+      setVendorError(null);
+      setSelectedVendor(null);
+
+      const profile = await apiGet<VendorProfile>(
+        `/organizer/applications/${appId}/vendor-profile`,
+      );
+
+      setSelectedVendor(profile);
+    } catch (err) {
+      console.error("[DiagramEditor] failed to load vendor profile", err);
+      setVendorError("Could not load vendor profile.");
+      setSelectedVendor(null);
+    } finally {
+      setVendorLoading(false);
     }
-  };
-
-  // ---- render states ----------------------------------------------
-
-  if (loadState === "loading" && !diagram) {
-    return (
-      <div className="p-6">
-        <p className="text-sm text-gray-600">Loading diagram…</p>
-      </div>
-    );
   }
 
-  if (loadState === "error" && !diagram) {
-    return (
-      <div className="p-6 space-y-3">
-        <p className="text-sm text-red-700">
-          {error ?? "Something went wrong loading the diagram."}
-        </p>
-        <button
-          type="button"
-          onClick={handleRetry}
-          className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-        >
-          Retry
-        </button>
-      </div>
-    );
+  function closeVendorModal() {
+    setVendorModalOpen(false);
+    setVendorLoading(false);
+    setVendorError(null);
+    setSelectedVendor(null);
   }
 
-  if (!diagram) {
-    return (
-      <div className="p-6">
-        <p className="text-sm text-gray-600">
-          No diagram data available for this event.
-        </p>
-      </div>
-    );
+  // ---------------- Assign booth to application ----------------
+
+  async function handleAssignToBooth() {
+    if (
+      !effectiveEventId ||
+      Number.isNaN(effectiveEventId) ||
+      !primaryLabel ||
+      selectedAppId == null
+    ) {
+      return;
+    }
+
+    try {
+      setAssigning(true);
+      setAssignError(null);
+      setAssignSuccess(null);
+
+      console.log(
+        "[DiagramEditor] assigning application",
+        selectedAppId,
+        "to booth",
+        primaryLabel,
+      );
+
+      // backend expects slot_label in the payload
+      await apiPost(
+        `/organizer/events/${effectiveEventId}/applications/${selectedAppId}/assign-slot`,
+        { slot_label: primaryLabel },
+      );
+
+      // Reload applications so we see updated assignment
+      const refreshed =
+        await apiGet<OrganizerEventApplicationsResponse>(
+          `/organizer/events/${effectiveEventId}/applications?page=1&page_size=200`,
+        );
+
+      setApplications(refreshed.items ?? []);
+
+      // sync booth statuses from fresh applications
+      setDiagram((prev) =>
+        prev
+          ? syncBoothStatusesFromApplications(prev, refreshed.items ?? [])
+          : prev,
+      );
+
+      setAssignSuccess(
+        `Assigned application #${selectedAppId} to booth ${primaryLabel}.`,
+      );
+    } catch (err) {
+      console.error("[DiagramEditor] failed to assign booth", err);
+      setAssignError(
+        "Could not assign this booth to the selected application.",
+      );
+    } finally {
+      setAssigning(false);
+    }
   }
 
-  const canDelete =
-    !!selectedLabel && !!diagram.boothMap[selectedLabel];
+  const isLoading = status === "loading" || status === "idle";
+  const isSaving = status === "saving";
 
-  const selectedBooth =
-    selectedLabel && diagram.boothMap[selectedLabel]
-      ? diagram.boothMap[selectedLabel]
-      : null;
+  const sizeText =
+    primaryBooth &&
+    `${(primaryBooth as any).width ?? (primaryBooth as any).w ?? 1}×${
+      (primaryBooth as any).height ?? (primaryBooth as any).h ?? 1
+    }`;
+  const statusText = (primaryBooth as any)?.status ?? "available";
 
-  const boothSizeText =
-    selectedBooth &&
-    typeof selectedBooth.width === "number" &&
-    typeof selectedBooth.height === "number"
-      ? `${selectedBooth.width} × ${selectedBooth.height}`
-      : "—";
+  const STATUS_OPTIONS = [
+    "available",
+    "assigned",
+    "pending",
+    "reserved",
+    "blocked",
+    "street",
+  ];
 
-  const boothPosText =
-    selectedBooth &&
-    typeof selectedBooth.x === "number" &&
-    typeof selectedBooth.y === "number"
-      ? `(${selectedBooth.x}, ${selectedBooth.y})`
-      : "—";
+  const canRevertStreetShape =
+    statusText === "street" &&
+    lastStreetSnapshot &&
+    lastStreetSnapshot.label === primaryLabel;
 
-  const boothStatus =
-    (selectedBooth?.status as string | undefined) ?? "available";
+  const selectedApp = applications.find((a) => a.id === selectedAppId);
 
-  const boothPrice =
-    typeof selectedBooth?.priceCents === "number"
-      ? (selectedBooth.priceCents / 100).toFixed(2)
-      : "";
-
-  const boothAssigned =
-    typeof selectedBooth?.assignedApplicationId === "number"
-      ? `#${selectedBooth.assignedApplicationId}`
-      : "None";
+  // ---------------- render ----------------
 
   return (
-    <div className="flex h-full flex-col gap-4 p-4">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold">Diagram editor</h1>
-          <p className="text-xs text-gray-500">
-            Drag / resize booths, then save to update the event map.
-          </p>
+    <div className="space-y-4">
+      {/* Top bar inside the editor card – just Save button, page has header */}
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!diagram || isSaving}
+          className="inline-flex items-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60 disabled:hover:bg-emerald-600"
+        >
+          {isSaving ? "Saving…" : "Save layout"}
+        </button>
+      </div>
+
+      {isLoading && (
+        <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600">
+          Loading event map…
         </div>
+      )}
 
-        <div className="flex flex-col items-end gap-1 text-right">
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {statusText && (
-              <span className="text-xs text-gray-500">
-                {statusText}
-              </span>
-            )}
-            {conflictText && (
-              <span className="text-xs font-medium text-red-500">
-                {conflictText}
-              </span>
-            )}
-          </div>
-
-          <div className="mt-1 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleAddBooth}
-              className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
-            >
-              + Add booth
-            </button>
-            <button
-              type="button"
-              onClick={handleDeleteBooth}
-              disabled={!canDelete}
-              className="inline-flex items-center rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-600 shadow-sm hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Delete selected
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={
-                !isDirty ||
-                saveState === "saving" ||
-                hasConflicts ||
-                loadState !== "loaded"
-              }
-              title={
-                hasConflicts
-                  ? "Resolve overlapping booths before saving."
-                  : undefined
-              }
-              className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {saveState === "saving" ? "Saving…" : "Save changes"}
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {error && loadState !== "error" && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+      {error && !isLoading && (
+        <div className="rounded-md bg-amber-50 p-3 text-xs text-amber-800">
           {error}
         </div>
       )}
 
-      <div className="flex-1 flex gap-4">
-        {/* Left: grid */}
-        <div className="flex-1 overflow-auto rounded-lg border border-gray-200 bg-slate-950/90 p-3">
-          <DiagramGrid
-            diagram={diagram}
-            onDiagramChange={handleDiagramChange}
-            selectedLabel={selectedLabel ?? undefined}
-            onSelectBooth={setSelectedLabel}
-          />
+      {/* Main layout: grid on the left, side panel on the right */}
+      <div className="grid gap-4 md:grid-cols-[minmax(0,3fr)_minmax(280px,1fr)]">
+        {/* Diagram grid */}
+        <div className="rounded-md bg-slate-950/90 p-3">
+          {diagram ? (
+            <DiagramGrid
+              diagram={diagram}
+              onDiagramChange={setDiagram}
+              selectedLabels={selectedLabels}
+              onSelectionChange={(labels) => {
+                setSelectedLabels(labels);
+              }}
+            />
+          ) : (
+            <div className="flex min-h-[320px] items-center justify-center text-sm text-slate-300">
+              No diagram data available for this event.
+            </div>
+          )}
         </div>
 
-        {/* Right: selected booth panel */}
-        <div className="w-80 rounded-lg border border-gray-200 bg-slate-950/90 p-4 text-sm text-gray-100">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-400">
-            Selected booth
-          </h2>
+        {/* Side panel */}
+        <div className="rounded-md bg-slate-900/95 p-3 text-xs text-slate-100">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold">Booth & applications</div>
+            <button
+              type="button"
+              onClick={handleAddBooth}
+              className="rounded-md bg-emerald-500 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600"
+            >
+              + Add booth
+            </button>
+          </div>
 
-          {!selectedBooth ? (
-            <p className="text-xs text-gray-500">
-              Click a booth in the grid to view details.
-            </p>
-          ) : (
+          {/* No booth selected */}
+          {selectionCount === 0 && (
+            <div className="space-y-3 text-slate-300/80">
+              <div>
+                Select a booth on the map to see its details here, or use{" "}
+                <span className="font-semibold">Add booth</span> to create a
+                new one. Hold <span className="font-semibold">Shift</span> or{" "}
+                <span className="font-semibold">Ctrl</span> to select multiple
+                booths.
+              </div>
+
+              <div className="pt-2 border-t border-slate-800">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                    Applications for this event
+                  </div>
+                  <div className="flex gap-2">
+                    <select
+                      className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px]"
+                      value={statusFilter}
+                      onChange={(e) =>
+                        setStatusFilter(e.target.value as typeof statusFilter)
+                      }
+                    >
+                      <option value="all">All statuses</option>
+                      <option value="pending">Pending</option>
+                      <option value="approved">Approved</option>
+                      <option value="rejected">Rejected</option>
+                    </select>
+                    <select
+                      className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px]"
+                      value={paymentFilter}
+                      onChange={(e) =>
+                        setPaymentFilter(
+                          e.target.value as typeof paymentFilter,
+                        )
+                      }
+                    >
+                      <option value="all">All payments</option>
+                      <option value="unpaid">Unpaid</option>
+                      <option value="partial">Partial</option>
+                      <option value="paid">Paid</option>
+                    </select>
+                  </div>
+                </div>
+
+                {appsStatus === "loading" && (
+                  <div className="text-slate-400">Loading applications…</div>
+                )}
+                {appsStatus === "error" && (
+                  <div className="text-rose-300 text-[11px]">
+                    {appsError ?? "Could not load applications."}
+                  </div>
+                )}
+                {appsStatus === "loaded" && applications.length === 0 && (
+                  <div className="text-slate-400">
+                    No applications have been submitted for this event yet.
+                  </div>
+                )}
+                {appsStatus === "loaded" && applications.length > 0 && (
+                  <div className="max-h-48 space-y-1 overflow-y-auto rounded-md bg-slate-950/60 p-2">
+                    {filteredApplications.map((app) => {
+                      const label =
+                        app.vendor_name ||
+                        app.business_name ||
+                        app.vendorName ||
+                        `Application #${app.id}`;
+                      const assignedLabel =
+                        app.assigned_slot_label || app.assigned_slot_code;
+
+                      return (
+                        <div
+                          key={app.id}
+                          role="button"
+                          onClick={() => {
+                            setSelectedAppId(app.id);
+                            // clicking an app highlights its booth
+                            if (assignedLabel) {
+                              setSelectedLabels([assignedLabel]);
+                            }
+                          }}
+                          className="w-full cursor-pointer rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-left text-[11px] hover:bg-slate-800"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="truncate font-medium">
+                              {label}
+                            </div>
+                            <div className="text-[10px] uppercase text-slate-400">
+                              {app.status}
+                            </div>
+                          </div>
+                          {assignedLabel && (
+                            <div className="mt-0.5 text-[10px] text-emerald-300">
+                              Assigned: {assignedLabel}
+                            </div>
+                          )}
+                          <div className="mt-1 flex justify-between gap-2">
+                            <div className="text-[10px] text-slate-400">
+                              {formatCents(app.total_paid_cents)} /{" "}
+                              {formatCents(app.total_due_cents)}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleViewVendor(app.id);
+                              }}
+                              className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-50 hover:bg-slate-700"
+                            >
+                              View vendor
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Single booth selected */}
+          {selectionCount === 1 && primaryBooth && primaryLabel && (
+            <div className="space-y-3">
+              {/* Booth details */}
+              <div className="space-y-2">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                    Label
+                  </div>
+                  <div className="text-sm font-medium">{primaryLabel}</div>
+                </div>
+
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                    Size
+                  </div>
+                  <div className="text-sm">{sizeText}</div>
+                </div>
+
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                    Status
+                  </div>
+                  <div className="text-sm capitalize">{statusText}</div>
+                </div>
+
+                {/* Status quick-set for single booth */}
+                <div className="pt-1">
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
+                    Set status
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {STATUS_OPTIONS.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => handleSetStatusForSelection(s)}
+                        className={`rounded-md px-2 py-0.5 text-[11px] capitalize ${
+                          statusText === s
+                            ? "bg-slate-100 text-slate-900"
+                            : "bg-slate-800 text-slate-100 hover:bg-slate-700"
+                        }`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Extra tools when this booth is a street */}
+                {statusText === "street" && (
+                  <div className="pt-2 space-y-2">
+                    <div>
+                      <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
+                        Street tools
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={handleStreetMakeHorizontal}
+                          className="rounded-md bg-slate-800 px-2 py-1 text-[11px] font-medium hover:bg-slate-700"
+                        >
+                          Make full-width lane
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStreetMakeVertical}
+                          className="rounded-md bg-slate-800 px-2 py-1 text-[11px] font-medium hover:bg-slate-700"
+                        >
+                          Make full-height lane
+                        </button>
+                      </div>
+                    </div>
+
+                    {canRevertStreetShape && (
+                      <div>
+                        <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
+                          Undo
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleStreetRevertShape}
+                          className="rounded-md bg-slate-700 px-2 py-1 text-[11px] font-medium hover:bg-slate-600"
+                        >
+                          Revert lane shape
+                        </button>
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          Restores this street booth to its previous position
+                          and size before using the lane tools.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Assign booth to application */}
+              <div className="pt-2 border-t border-slate-800">
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
+                  Assign booth to application
+                </div>
+
+                {appsStatus === "loading" && (
+                  <div className="text-slate-400 text-[11px]">
+                    Loading applications…
+                  </div>
+                )}
+
+                {appsStatus === "error" && (
+                  <div className="text-rose-300 text-[11px]">
+                    {appsError ?? "Could not load applications."}
+                  </div>
+                )}
+
+                {appsStatus === "loaded" && applications.length === 0 && (
+                  <div className="text-slate-400 text-[11px]">
+                    No applications yet. When vendors apply to this event,
+                    you&apos;ll be able to assign them to this booth.
+                  </div>
+                )}
+
+                {appsStatus === "loaded" && applications.length > 0 && (
+                  <>
+                    <div className="mb-1 text-[11px] text-slate-400">
+                      Select an application, then click{" "}
+                      <span className="font-semibold">
+                        Assign to this booth
+                      </span>
+                      .
+                    </div>
+                    <div className="max-h-40 space-y-1 overflow-y-auto rounded-md bg-slate-950/60 p-2">
+                      {filteredApplications.map((app) => {
+                        const label =
+                          app.vendor_name ||
+                          app.business_name ||
+                          app.vendorName ||
+                          `Application #${app.id}`;
+                        const isSelected = app.id === selectedAppId;
+                        const assignedLabel =
+                          app.assigned_slot_label || app.assigned_slot_code;
+                        const isAssignedHere =
+                          assignedLabel &&
+                          assignedLabel === primaryLabel;
+
+                        return (
+                          <div
+                            key={app.id}
+                            onClick={() => {
+                              setSelectedAppId(app.id);
+                              if (assignedLabel) {
+                                setSelectedLabels([assignedLabel]);
+                              }
+                            }}
+                            className={`w-full cursor-pointer rounded-md border px-2 py-1 text-left text-[11px] ${
+                              isSelected
+                                ? "border-sky-500 bg-sky-900/40"
+                                : "border-slate-800 bg-slate-900 hover:bg-slate-800"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="truncate font-medium">
+                                {label}
+                              </div>
+                              <div className="text-[10px] uppercase text-slate-400">
+                                {app.status}
+                              </div>
+                            </div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                              {app.payment_status && (
+                                <div className="text-[10px] text-slate-400">
+                                  Payment:{" "}
+                                  <span className="capitalize">
+                                    {app.payment_status}
+                                  </span>
+                                </div>
+                              )}
+                              {assignedLabel && (
+                                <div className="text-[10px] text-emerald-300">
+                                  Assigned: {assignedLabel}
+                                </div>
+                              )}
+                              {isAssignedHere && (
+                                <div className="text-[10px] text-emerald-300">
+                                  (This booth)
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-1 flex justify-between gap-2">
+                              <div className="text-[10px] text-slate-400">
+                                {formatCents(app.total_paid_cents)} /{" "}
+                                {formatCents(app.total_due_cents)}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleViewVendor(app.id);
+                                }}
+                                className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-50 hover:bg-slate-700"
+                              >
+                                View vendor
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-2 flex flex-col gap-1">
+                      <button
+                        type="button"
+                        onClick={handleAssignToBooth}
+                        disabled={
+                          !primaryLabel || !selectedAppId || assigning
+                        }
+                        className="inline-flex items-center justify-center rounded-md bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-60"
+                      >
+                        {assigning
+                          ? "Assigning…"
+                          : selectedAppId
+                          ? `Assign application #${selectedAppId} to booth ${primaryLabel}`
+                          : "Select an application to assign"}
+                      </button>
+                      {assignError && (
+                        <div className="text-[10px] text-rose-300">
+                          {assignError}
+                        </div>
+                      )}
+                      {assignSuccess && (
+                        <div className="text-[10px] text-emerald-300">
+                          {assignSuccess}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Basic booth bulk actions */}
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelected}
+                  className="flex-1 rounded-md bg-slate-700 px-2 py-1 text-xs font-medium hover:bg-slate-600"
+                >
+                  Duplicate booth
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteSelected}
+                  className="flex-1 rounded-md bg-rose-600 px-2 py-1 text-xs font-medium hover:bg-rose-500"
+                >
+                  Delete booth
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Multiple booths selected */}
+          {selectionCount > 1 && (
             <div className="space-y-3">
               <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                  Label
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                  Selection
                 </div>
-                <div className="mt-0.5 text-sm font-medium">
-                  {selectedBooth.label ?? selectedLabel}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                    Size (cells)
-                  </div>
-                  <div className="mt-0.5 text-sm">
-                    {boothSizeText}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                    Position
-                  </div>
-                  <div className="mt-0.5 text-sm">
-                    {boothPosText}
-                  </div>
+                <div className="text-sm font-medium">
+                  {selectionCount} booths selected
                 </div>
               </div>
 
               <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                  Status
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
+                  Set status for group
                 </div>
-                <select
-                  className="mt-1 w-full rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-gray-100 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                  value={boothStatus}
-                  onChange={(e) =>
-                    updateSelectedBooth({ status: e.target.value })
-                  }
+                <div className="flex flex-wrap gap-1">
+                  {STATUS_OPTIONS.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => handleSetStatusForSelection(s)}
+                      className="rounded-md bg-slate-800 px-2 py-0.5 text-[11px] capitalize hover:bg-slate-700"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-1 flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDuplicateSelected}
+                  className="flex-1 rounded-md bg-slate-700 px-2 py-1 text-xs font-medium hover:bg-slate-600"
                 >
-                  <option value="available">Available</option>
-                  <option value="assigned">Assigned</option>
-                  <option value="reserved">Reserved</option>
-                  <option value="pending">Pending</option>
-                  <option value="blocked">Blocked</option>
-                </select>
-              </div>
-
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                  Price
-                </div>
-                <div className="mt-0.5 text-sm">
-                  {boothPrice ? `$${boothPrice}` : "—"}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">
-                  Assigned application
-                </div>
-                <div className="mt-0.5 text-sm">{boothAssigned}</div>
+                  Duplicate selection
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteSelected}
+                  className="flex-1 rounded-md bg-rose-600 px-2 py-1 text-xs font-medium hover:bg-rose-500"
+                >
+                  Delete selection
+                </button>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      <p className="text-[11px] text-slate-500">
+        Tip: Click to select, hold Shift or Ctrl to select multiple, drag to
+        move the whole group, and drag the corner handle to resize all selected
+        booths together.
+      </p>
+
+      {/* Vendor profile modal */}
+      {vendorModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-md rounded-lg bg-white p-4 text-sm text-slate-900 shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-base font-semibold">Vendor profile</h2>
+              <button
+                onClick={closeVendorModal}
+                className="text-xs text-slate-500 hover:text-slate-800"
+              >
+                Close
+              </button>
+            </div>
+
+            {vendorLoading && (
+              <div className="py-4 text-xs text-slate-500">Loading…</div>
+            )}
+
+            {vendorError && (
+              <div className="mb-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                {vendorError}
+              </div>
+            )}
+
+            {selectedVendor && !vendorLoading && (
+              <div className="space-y-1 text-xs">
+                <div>
+                  <span className="font-semibold">Business:</span>{" "}
+                  {selectedVendor.business_name || "—"}
+                </div>
+                <div>
+                  <span className="font-semibold">Contact:</span>{" "}
+                  {selectedVendor.contact_name || "—"}
+                </div>
+                <div>
+                  <span className="font-semibold">Email:</span>{" "}
+                  {selectedVendor.email || "—"}
+                </div>
+                <div>
+                  <span className="font-semibold">Phone:</span>{" "}
+                  {selectedVendor.phone || "—"}
+                </div>
+                <div>
+                  <span className="font-semibold">Location:</span>{" "}
+                  {selectedVendor.city || "—"},{" "}
+                  {selectedVendor.state || ""}
+                </div>
+                <div>
+                  <span className="font-semibold">Website:</span>{" "}
+                  {selectedVendor.website || "—"}
+                </div>
+                <div className="mt-2">
+                  <span className="font-semibold">About:</span>
+                  <p className="mt-1 whitespace-pre-wrap text-slate-700">
+                    {selectedVendor.description || "No description provided."}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
+function formatCents(cents?: number) {
+  if (cents == null) return "—";
+  return `$${(cents / 100).toFixed(2)}`;
+}
 
 export default DiagramEditor;

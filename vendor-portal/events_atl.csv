@@ -1,0 +1,12 @@
+id,title,description,date,location,city,max_vendor_slots,kind,business_only,badge_required,created_at,updated_at
+1,Atlanta Fall Festival,"Food, art, music.",2025-11-10T00:00:00,Centennial Park,"Atlanta, GA",50,festival,False,False,2025-11-01T12:55:19.447422-04:00,2025-11-05T12:40:06.602242-05:00
+2,Atlanta Fall Festival,,2025-11-10T00:00:00,Centennial Park,"Atlanta, GA",1,festival,False,False,2025-11-01T12:55:19.447422-04:00,2025-11-05T12:40:06.602242-05:00
+10,Fall Harvest Market,"Vendors, food, music",2025-11-15T00:00:00,"123 Main St, Atlanta, GA 30303",Atlanta,40,festival,False,False,2025-11-01T12:55:19.447422-04:00,2025-11-05T12:40:06.602242-05:00
+27,Downtown Fall Fest,Booths + Food Trucks,2025-11-20T00:00:00,Centennial Park,Atlanta,50,general,False,False,2025-11-06T20:07:49.705027-05:00,2025-11-06T20:07:49.705027-05:00
+26,Downtown Fall Fest,Booths + Food Trucks,2025-11-20T00:00:00,Centennial Park,Atlanta,50,general,False,False,2025-11-06T19:46:02.105919-05:00,2025-11-06T19:46:02.105919-05:00
+19,Test Fair,Seeded for vendor app test,2025-11-20T13:11:21.002566,Expo Center,Atlanta,50,market,False,False,2025-11-06T13:11:21.002566-05:00,2025-11-06T13:11:21.002566-05:00
+20,Test Fair,Seeded for vendor app test,2025-11-20T13:20:28.962130,Expo Center,Atlanta,50,market,False,False,2025-11-06T13:20:28.962130-05:00,2025-11-06T13:20:28.962130-05:00
+12,Spring Market,"Local artisans, food trucks, and music.",2026-03-21T10:00:00,Centennial Park,Atlanta,25,festival,False,False,2025-11-04T13:06:17.740920-05:00,2025-11-05T12:40:06.602242-05:00
+15,Organizer Created Demo,Made via /organizer/events,2026-05-20T10:00:00,Centennial Park,Atlanta,12,festival,False,False,2025-11-04T13:15:00.200538-05:00,2025-11-05T12:40:06.602242-05:00
+16,Organizer Created Demo,Made via /organizer/events,2026-05-20T10:00:00,Centennial Park,Atlanta,12,festival,False,False,2025-11-04T13:19:47.087031-05:00,2025-11-05T12:40:06.602242-05:00
+13,Summer Food Fest,"BBQ, lemonade stands, and live bands.",2026-06-15T12:00:00,Piedmont Park,Atlanta,40,festival,False,False,2025-11-04T13:06:17.740920-05:00,2025-11-05T12:40:06.602242-05:00

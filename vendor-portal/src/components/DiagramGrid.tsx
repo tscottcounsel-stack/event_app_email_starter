@@ -4,8 +4,8 @@ import React, { useEffect, useMemo, useState } from "react";
 export type DiagramGridProps = {
   diagram: any;
   onDiagramChange: (next: any) => void;
-  selectedLabel?: string | null;
-  onSelectBooth?: (label: string | null) => void;
+  selectedLabels?: string[];
+  onSelectionChange?: (labels: string[]) => void;
 };
 
 type BoothView = {
@@ -21,19 +21,17 @@ type BoothView = {
 type DragState =
   | {
       mode: "move";
-      label: string;
+      labels: string[];
       startClientX: number;
       startClientY: number;
-      origX: number;
-      origY: number;
+      origins: { label: string; x: number; y: number }[];
     }
   | {
       mode: "resize";
-      label: string;
+      labels: string[];
       startClientX: number;
       startClientY: number;
-      origWidth: number;
-      origHeight: number;
+      origins: { label: string; width: number; height: number }[];
     }
   | null;
 
@@ -70,6 +68,12 @@ function statusClasses(status: string, selected: boolean): string {
         " border-red-400 bg-red-900/70 text-red-100 hover:bg-red-800" +
         ring
       );
+    case "street": // 🛣 street / walkway
+      return (
+        base +
+        " border-slate-400 border-dashed bg-slate-900/90 text-slate-100 hover:bg-slate-800" +
+        ring
+      );
     case "available":
     default: // green
       return (
@@ -79,14 +83,19 @@ function statusClasses(status: string, selected: boolean): string {
       );
   }
 }
-
 export const DiagramGrid: React.FC<DiagramGridProps> = ({
   diagram,
   onDiagramChange,
-  selectedLabel,
-  onSelectBooth,
+  selectedLabels = [],
+  onSelectionChange,
 }) => {
   const [drag, setDrag] = useState<DragState>(null);
+  const [hoverInfo, setHoverInfo] = useState<{
+    label: string;
+    booth: BoothView;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const booths: BoothView[] = useMemo(() => {
     const map = (diagram && diagram.boothMap) || {};
@@ -140,25 +149,35 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
       const dyCells = Math.round(dyPx / CELL_SIZE);
 
       const map = { ...(diagram.boothMap || {}) };
-      const current: any = map[drag.label];
-      if (!current) return;
 
       if (drag.mode === "move") {
-        const newX = Math.max(0, drag.origX + dxCells);
-        const newY = Math.max(0, drag.origY + dyCells);
-        map[drag.label] = {
-          ...current,
-          x: newX,
-          y: newY,
-        };
+        for (const origin of drag.origins) {
+          const current: any = map[origin.label];
+          if (!current) continue;
+
+          const newX = Math.max(0, origin.x + dxCells);
+          const newY = Math.max(0, origin.y + dyCells);
+
+          map[origin.label] = {
+            ...current,
+            x: newX,
+            y: newY,
+          };
+        }
       } else if (drag.mode === "resize") {
-        const newW = Math.max(1, drag.origWidth + dxCells);
-        const newH = Math.max(1, drag.origHeight + dyCells);
-        map[drag.label] = {
-          ...current,
-          width: newW,
-          height: newH,
-        };
+        for (const origin of drag.origins) {
+          const current: any = map[origin.label];
+          if (!current) continue;
+
+          const newW = Math.max(1, origin.width + dxCells);
+          const newH = Math.max(1, origin.height + dyCells);
+
+          map[origin.label] = {
+            ...current,
+            width: newW,
+            height: newH,
+          };
+        }
       }
 
       onDiagramChange({
@@ -184,16 +203,47 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
     booth: BoothView
   ) => {
     e.stopPropagation();
-    onSelectBooth?.(booth.label);
+
+    // Multi-select logic
+    let nextSelection: string[];
+    const multiKey = e.shiftKey || e.ctrlKey || e.metaKey;
+
+    if (multiKey) {
+      const alreadySelected = selectedLabels.includes(booth.label);
+      if (alreadySelected) {
+        nextSelection = selectedLabels.filter((l) => l !== booth.label);
+      } else {
+        nextSelection = [...selectedLabels, booth.label];
+      }
+    } else {
+      nextSelection = [booth.label];
+    }
+
+    onSelectionChange?.(nextSelection);
+
+    const activeLabels =
+      nextSelection.length > 0 ? nextSelection : [booth.label];
+
+    // Get origins for all active labels
+    const originsMove: { label: string; x: number; y: number }[] = [];
+    const originsResize: { label: string; width: number; height: number }[] =
+      [];
+
+    for (const lbl of activeLabels) {
+      const b = booths.find((x) => x.label === lbl);
+      if (!b) continue;
+      originsMove.push({ label: lbl, x: b.x, y: b.y });
+      originsResize.push({ label: lbl, width: b.width, height: b.height });
+    }
 
     if (e.button === 0) {
+      // left click -> move
       setDrag({
         mode: "move",
-        label: booth.label,
+        labels: activeLabels,
         startClientX: e.clientX,
         startClientY: e.clientY,
-        origX: booth.x,
-        origY: booth.y,
+        origins: originsMove,
       });
     }
   };
@@ -203,20 +253,40 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
     booth: BoothView
   ) => {
     e.stopPropagation();
-    onSelectBooth?.(booth.label);
+
+    const activeLabels =
+      selectedLabels.length > 0 && selectedLabels.includes(booth.label)
+        ? selectedLabels
+        : [booth.label];
+
+    onSelectionChange?.(
+      activeLabels.includes(booth.label) ? activeLabels : [booth.label]
+    );
+
+    const originsResize: { label: string; width: number; height: number }[] =
+      [];
+
+    for (const lbl of activeLabels) {
+      const b = booths.find((x) => x.label === lbl);
+      if (!b) continue;
+      originsResize.push({ label: lbl, width: b.width, height: b.height });
+    }
 
     setDrag({
       mode: "resize",
-      label: booth.label,
+      labels: activeLabels,
       startClientX: e.clientX,
       startClientY: e.clientY,
-      origWidth: booth.width,
-      origHeight: booth.height,
+      origins: originsResize,
     });
   };
 
   const handleBackgroundMouseDown = () => {
-    onSelectBooth?.(null);
+    onSelectionChange?.([]);
+  };
+
+  const handleBackgroundMouseLeave = () => {
+    setHoverInfo(null);
   };
 
   // ---------------- render ----------------
@@ -226,6 +296,7 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
       className="relative w-full overflow-hidden rounded-md bg-slate-950"
       style={{ minHeight: 320 }}
       onMouseDown={handleBackgroundMouseDown}
+      onMouseLeave={handleBackgroundMouseLeave}
     >
       {/* grid background */}
       <div
@@ -250,7 +321,7 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
           const top = booth.y * CELL_SIZE;
           const w = booth.width * CELL_SIZE;
           const h = booth.height * CELL_SIZE;
-          const isSelected = selectedLabel === booth.label;
+          const isSelected = selectedLabels.includes(booth.label);
 
           return (
             <div
@@ -258,6 +329,20 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
               className={statusClasses(booth.status, isSelected)}
               style={{ left, top, width: w, height: h }}
               onMouseDown={(e) => handleBoothMouseDown(e, booth)}
+              onMouseEnter={(e) =>
+                setHoverInfo({
+                  label: booth.label,
+                  booth,
+                  x: e.clientX,
+                  y: e.clientY,
+                })
+              }
+              onMouseMove={(e) =>
+                setHoverInfo((info) =>
+                  info ? { ...info, x: e.clientX, y: e.clientY } : null,
+                )
+              }
+              onMouseLeave={() => setHoverInfo(null)}
             >
               <div className="pointer-events-none flex flex-col items-center justify-center px-1 text-center leading-tight">
                 <div className="text-[10px] font-semibold">
@@ -277,6 +362,21 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
           );
         })}
       </div>
+
+      {hoverInfo && (
+        <div
+          className="pointer-events-none fixed z-50 rounded-md bg-black/80 px-2 py-1 text-xs text-white shadow-lg"
+          style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}
+        >
+          <div className="font-semibold">{hoverInfo.label}</div>
+          <div className="text-[11px] opacity-80">
+            Size: {hoverInfo.booth.width}×{hoverInfo.booth.height}
+          </div>
+          <div className="text-[11px] opacity-80">
+            Status: {hoverInfo.booth.status}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

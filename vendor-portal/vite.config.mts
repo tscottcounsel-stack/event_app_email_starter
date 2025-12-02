@@ -1,0 +1,19 @@
+// vite.config.mts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react"; // ✅ this one you *do* have
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8011",
+        changeOrigin: true,
+        secure: false,
+        // 👇 strip /api before sending to FastAPI
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+    },
+  },
+});
