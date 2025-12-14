@@ -1,149 +1,166 @@
 # app/routers/organizer_diagram.py
+from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import select
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import MetaData, Table, insert, select, text, update
 from sqlalchemy.orm import Session
 
-from app import models
-from app.database import get_db
+from app.db import get_db
 
-router = APIRouter(prefix="/organizer/events", tags=["organizer:diagram"])
+router = APIRouter(prefix="/organizer/events", tags=["organizer-diagram"])
+
+
+# ----------------------------
+# Reflection helpers
+# ----------------------------
+
+
+def _reflect(db: Session, name: str) -> Table:
+    bind = db.get_bind()
+    if bind is None:
+        raise HTTPException(500, "Database bind not available")
+    md = MetaData()
+    try:
+        return Table(name, md, autoload_with=bind)
+    except Exception as ex:
+        raise HTTPException(500, f"Could not reflect table '{name}': {ex}")
+
+
+def _col(t: Table, *names: str):
+    for n in names:
+        if n in t.c:
+            return t.c[n]
+    return None
+
+
+def _require(t: Table, *names: str):
+    c = _col(t, *names)
+    if c is None:
+        raise HTTPException(
+            500, f"Table '{t.name}' missing required column(s): {names}"
+        )
+    return c
+
+
+def _now_sql():
+    return text("now()")
+
+
+def _history_table(db: Session) -> Optional[Table]:
+    try:
+        return _reflect(db, "event_diagram_history")
+    except Exception:
+        return None
+
+
+# ----------------------------
+# Schemas
+# ----------------------------
 
 
 class SaveDiagramBody(BaseModel):
-    diagram: Dict[str, Any]
+    model_config = ConfigDict(extra="allow")
+    diagram: dict[str, Any]
     expect_version: Optional[int] = None
+    reason: Optional[str] = None
+    tag: Optional[str] = None
+    changed_by: Optional[int] = None
 
 
-def build_booth_status_map(db: Session, event_id: int) -> dict[int, str]:
-    """
-    Returns {slot_id: status_string} for all slots in this event,
-    based on vendor_applications.
-
-    Statuses:
-        - "available" (default)
-        - "pending"   (there is a pending application for this slot)
-        - "reserved"  (approved but not paid yet – tweak as you wish)
-        - "assigned"  (approved + paid)
-        - "blocked"   (rejected / blocked)
-    """
-    # Start with everything "available"
-    stmt_slots = select(models.EventSlot).where(models.EventSlot.event_id == event_id)
-    slots = db.execute(stmt_slots).scalars().all()
-
-    status_by_slot_id: dict[int, str] = {slot.id: "available" for slot in slots}
-
-    # Look at applications to upgrade statuses
-    stmt_apps = select(models.VendorApplication).where(
-        models.VendorApplication.event_id == event_id
-    )
-    apps = db.execute(stmt_apps).scalars().all()
-
-    for app in apps:
-        slot_id = app.assigned_slot_id
-        if not slot_id:
-            continue
-
-        current = status_by_slot_id.get(slot_id, "available")
-        app_status = (app.status or "").lower()
-        pay_status = (app.payment_status or "").lower()
-
-        # Highest priority: fully assigned (approved + paid)
-        if app_status == "approved" and pay_status == "paid":
-            status_by_slot_id[slot_id] = "assigned"
-            continue
-
-        # Next priority: pending application
-        if app_status == "pending":
-            # Don't downgrade an already-assigned slot
-            if current != "assigned":
-                status_by_slot_id[slot_id] = "pending"
-            continue
-
-        # Next: approved but not paid -> reserved
-        if app_status == "approved" and pay_status != "paid":
-            if current not in ("assigned", "pending"):
-                status_by_slot_id[slot_id] = "reserved"
-            continue
-
-        # Finally: rejected -> blocked (only if not already higher priority)
-        if app_status == "rejected":
-            if current not in ("assigned", "pending", "reserved"):
-                status_by_slot_id[slot_id] = "blocked"
-            continue
-
-    return status_by_slot_id
+# ----------------------------
+# Routes
+# ----------------------------
 
 
 @router.get("/{event_id}/diagram")
 def get_event_diagram(event_id: int, db: Session = Depends(get_db)):
-    diagram = (
-        db.query(models.EventDiagram)
-        .filter(models.EventDiagram.event_id == event_id)
-        .one_or_none()
+    t = _reflect(db, "event_diagram")
+
+    c_event_id = _require(t, "event_id", "events_id")
+    c_diagram = _require(
+        t, "diagram", "data", "payload", "diagram_json", "diagram_data"
     )
-    if not diagram:
-        raise HTTPException(status_code=404, detail="Diagram not found")
+    c_version = _col(t, "version", "rev", "revision")
+    c_id = _col(t, "id")
 
-    body = diagram.diagram or {}
-    booth_map_raw = body.get("boothMap") or {}
+    cols = [c_diagram]
+    if c_version is not None:
+        cols.append(c_version)
+    if c_id is not None:
+        cols.append(c_id)
 
-    # Ensure we have a plain dict we can mutate
-    if isinstance(booth_map_raw, dict):
-        booth_map = dict(booth_map_raw)
-    else:
-        booth_map = {}
+    q = select(*cols).where(c_event_id == event_id)
+    if c_id is not None:
+        q = q.order_by(c_id.desc())
+    q = q.limit(1)
 
-    # Fetch slots for this event
-    stmt_slots = select(models.EventSlot).where(models.EventSlot.event_id == event_id)
-    slots = db.execute(stmt_slots).scalars().all()
+    row = db.execute(q).mappings().first()
+    if not row:
+        # UI-friendly empty payload (matches your current "slots/width/height" shape)
+        return {
+            "event_id": event_id,
+            "version": 0,
+            "diagram": {"width": 32, "height": 16, "slots": []},
+        }
 
-    status_by_slot_id = build_booth_status_map(db, event_id)
+    diagram = row.get(c_diagram.name) or {"width": 32, "height": 16, "slots": []}
+    version = int(row.get(c_version.name) or 0) if c_version is not None else 0
+    return {"event_id": event_id, "version": version, "diagram": diagram}
 
-    # Build a mapping from some "code-like" field -> slot.id
-    # Try several common attribute names so we don't crash if one doesn't exist.
-    slot_id_by_code: dict[str, int] = {}
-    for slot in slots:
-        code = (
-            getattr(slot, "code", None)
-            or getattr(slot, "label", None)
-            or getattr(slot, "name", None)
+
+@router.get("/{event_id}/diagram/history")
+def get_event_diagram_history(
+    event_id: int,
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    h = _history_table(db)
+    if h is None:
+        return {"event_id": event_id, "items": []}
+
+    c_event_id = _require(h, "event_id", "events_id", "eventid")
+    c_id = _col(h, "id")
+    c_version = _col(h, "version", "rev", "revision")
+    c_created_at = _col(h, "created_at")
+    c_tag = _col(h, "tag")
+    c_reason = _col(h, "reason")
+    c_changed_by = _col(h, "changed_by")
+
+    cols = [
+        c
+        for c in [c_id, c_version, c_created_at, c_tag, c_reason, c_changed_by]
+        if c is not None
+    ]
+    if not cols:
+        cols = [h]
+
+    q = select(*cols).where(c_event_id == event_id)
+    if c_id is not None:
+        q = q.order_by(c_id.desc())
+    q = q.limit(int(limit))
+
+    rows = db.execute(q).mappings().all()
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        items.append(
+            {
+                "id": r.get(c_id.name) if c_id is not None else None,
+                "version": r.get(c_version.name) if c_version is not None else None,
+                "created_at": (
+                    r.get(c_created_at.name) if c_created_at is not None else None
+                ),
+                "tag": r.get(c_tag.name) if c_tag is not None else None,
+                "reason": r.get(c_reason.name) if c_reason is not None else None,
+                "changed_by": (
+                    r.get(c_changed_by.name) if c_changed_by is not None else None
+                ),
+            }
         )
-        if not code:
-            continue
-        slot_id_by_code[str(code)] = slot.id
 
-    # Attach status to each booth if we can match it to a slot.
-    # IMPORTANT: only set status if the booth does NOT already
-    # have a status. This way, manually-set statuses in JSON
-    # won't be overwritten on every GET.
-    for code, slot_data in booth_map.items():
-        slot_id = slot_id_by_code.get(str(code))
-        if slot_id is None:
-            continue
-
-        status = status_by_slot_id.get(slot_id)
-        if not status:
-            continue
-
-        if not isinstance(slot_data, dict):
-            continue
-
-        # Only apply auto status if booth has no explicit status
-        if not slot_data.get("status"):
-            slot_data["status"] = status
-
-    body["boothMap"] = booth_map
-
-    return {
-        "event_id": event_id,
-        "version": diagram.version,
-        "diagram": body,
-        "updated_at": diagram.updated_at,
-    }
+    return {"event_id": event_id, "items": items}
 
 
 @router.put("/{event_id}/diagram")
@@ -152,66 +169,118 @@ def save_event_diagram(
     payload: SaveDiagramBody,
     db: Session = Depends(get_db),
 ):
-    """
-    Save (or create) the event diagram.
+    t = _reflect(db, "event_diagram")
+    h = _history_table(db)
 
-    Frontend sends:
-        {
-          "diagram": { "boothMap": { ... } },
-          "expect_version": <int or null>
-        }
-    """
-    # Make sure event exists (optional but nice)
-    event = db.query(models.Event).filter(models.Event.id == event_id).one_or_none()
-    if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
+    c_event_id = _require(t, "event_id", "events_id")
+    c_diagram = _require(
+        t, "diagram", "data", "payload", "diagram_json", "diagram_data"
+    )
+    c_version = _col(t, "version", "rev", "revision")
+    c_updated_at = _col(t, "updated_at", "modified_at")
 
-    # Fetch existing diagram row or create one
-    diagram = (
-        db.query(models.EventDiagram)
-        .filter(models.EventDiagram.event_id == event_id)
-        .one_or_none()
+    if c_version is None:
+        raise HTTPException(
+            500, f"{t.name} missing version column (version/rev/revision)"
+        )
+
+    # Load current row
+    current = (
+        db.execute(select(t).where(c_event_id == event_id).limit(1)).mappings().first()
     )
 
-    if diagram is None:
-        # First time we’re saving a diagram for this event
-        diagram = models.EventDiagram(
-            event_id=event_id,
-            version=1,
-            diagram=payload.diagram,
+    # Create if missing
+    if not current:
+        ins = {
+            c_event_id.name: event_id,
+            c_diagram.name: payload.diagram,
+            c_version.name: 1,
+        }
+        if c_updated_at is not None:
+            ins[c_updated_at.name] = _now_sql()
+        try:
+            db.execute(insert(t).values(**ins))
+            db.commit()
+        except Exception as ex:
+            db.rollback()
+            raise HTTPException(500, f"Insert failed: {ex}")
+
+        row = (
+            db.execute(select(t).where(c_event_id == event_id).limit(1))
+            .mappings()
+            .first()
         )
-        db.add(diagram)
-        db.commit()
-        db.refresh(diagram)
         return {
             "event_id": event_id,
-            "version": diagram.version,
-            "diagram": diagram.diagram,
-            "updated_at": diagram.updated_at,
+            "version": int(row.get(c_version.name) or 0),
+            "diagram": row.get(c_diagram.name) or {},
         }
 
-    # Optimistic concurrency check (if frontend sent expect_version)
-    if payload.expect_version is not None and diagram.version != payload.expect_version:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "version_mismatch",
-                "message": "Diagram version mismatch",
-                "current_version": diagram.version,
-            },
-        )
+    # Optimistic concurrency
+    if payload.expect_version is not None:
+        cur_ver = int(current.get(c_version.name) or 0)
+        if cur_ver != int(payload.expect_version):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "version_mismatch",
+                    "message": "Diagram version mismatch",
+                    "current_version": cur_ver,
+                },
+            )
 
-    # Update diagram JSON + bump version
-    diagram.diagram = payload.diagram
-    diagram.version += 1
+    # Snapshot to history (best-effort)
+    if h is not None:
+        try:
+            h_event_id = _col(h, "event_id", "events_id", "eventid")
+            h_data = _col(h, "data")
+            h_version = _col(h, "version", "rev", "revision")
+            if h_event_id is not None and h_data is not None and h_version is not None:
+                hv = {
+                    h_event_id.name: event_id,
+                    h_data.name: current.get(c_diagram.name) or {},
+                    h_version.name: int(current.get(c_version.name) or 0),
+                }
+                h_reason = _col(h, "reason")
+                h_tag = _col(h, "tag")
+                h_changed_by = _col(h, "changed_by")
+                h_created_at = _col(h, "created_at")
 
-    db.add(diagram)
-    db.commit()
-    db.refresh(diagram)
+                if h_reason is not None and payload.reason is not None:
+                    hv[h_reason.name] = str(payload.reason)
+                if h_tag is not None and payload.tag is not None:
+                    hv[h_tag.name] = str(payload.tag)
+                if h_changed_by is not None and payload.changed_by is not None:
+                    hv[h_changed_by.name] = int(payload.changed_by)
+                if h_created_at is not None:
+                    hv[h_created_at.name] = _now_sql()
 
+                db.execute(insert(h).values(**hv))
+                db.commit()
+        except Exception:
+            db.rollback()
+            # do not block saving if history fails
+
+    # Update canonical
+    values = {
+        c_diagram.name: payload.diagram,
+        c_version.name: (c_version + 1),
+    }
+    if c_updated_at is not None:
+        values[c_updated_at.name] = _now_sql()
+
+    try:
+        db.execute(update(t).where(c_event_id == event_id).values(**values))
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        raise HTTPException(500, f"Update failed: {ex}")
+
+    row = (
+        db.execute(select(t).where(c_event_id == event_id).limit(1)).mappings().first()
+    )
     return {
         "event_id": event_id,
-        "version": diagram.version,
-        "diagram": diagram.diagram,
-        "updated_at": diagram.updated_at,
+        "version": int(row.get(c_version.name) or 0),
+        "diagram": row.get(c_diagram.name) or {},
     }

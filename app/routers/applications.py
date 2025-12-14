@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+# app/routers/applications.py
+from __future__ import annotations
 
-from app import models, schemas
-from app.db import get_db
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 router = APIRouter(prefix="/applications", tags=["applications"])
-
 
 _APPLICATIONS: Dict[int, Dict[str, Any]] = {}
 _NEXT_ID: int = 1
@@ -16,58 +16,19 @@ class ApplicationCreate(BaseModel):
     model_config = ConfigDict(extra="allow")
     event_id: Optional[int] = None
     vendor_id: Optional[int] = None
-    price_cents: Optional[int] = Field(default=None, ge=0)
+    requested_slots: Optional[int] = Field(default=None, ge=0)
     notes: Optional[str] = None
+    status: Optional[str] = None
 
 
 class ApplicationPatch(BaseModel):
     model_config = ConfigDict(extra="allow")
     event_id: Optional[int] = None
     vendor_id: Optional[int] = None
-    price_cents: Optional[int] = Field(default=None, ge=0)
+    requested_slots: Optional[int] = Field(default=None, ge=0)
     notes: Optional[str] = None
     status: Optional[str] = None
-
-
-@router.get("/diag/ping")
-def applications_diag_ping():
-    return {"ping": "pong"}
-
-
-@router.get("")
-def list_applications(
-    event_id: Optional[int] = Query(None), vendor_id: Optional[int] = Query(None)
-):
-    items = list(_APPLICATIONS.values())
-    if event_id is not None:
-        items = [a for a in items if a.get("event_id") == event_id]
-    if vendor_id is not None:
-        items = [a for a in items if a.get("vendor_id") == vendor_id]
-    return items
-
-
-@router.post(
-    "",  # or "/"
-    response_model=schemas.ApplicationOut,  # whatever your output schema is
-    status_code=status.HTTP_201_CREATED,  # <-- key line
-)
-def create_application(
-    payload: schemas.ApplicationCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_vendor),
-):
-    # ... create the application ...
-    app_obj = models.Application(
-        vendor_id=current_user.id,
-        event_id=payload.event_id,
-        slot_id=payload.slot_id,
-        price_cents=payload.price_cents,
-        notes=payload.notes,
-    )
-    db.add(app_obj)
-    db.commit()
-    db.refresh(app_obj)
-    return app_obj
+    assigned_slot_id: Optional[int] = Field(default=None, ge=1)
 
 
 def _get_or_404(application_id: int) -> Dict[str, Any]:
@@ -77,24 +38,53 @@ def _get_or_404(application_id: int) -> Dict[str, Any]:
     return app
 
 
-@router.get("/id/{application_id:int}")
-def get_application(application_id: int):
+@router.get("/diag/ping")
+def applications_diag_ping():
+    return {"ping": "pong"}
+
+
+@router.get("")
+def list_applications(
+    event_id: Optional[int] = Query(None),
+    vendor_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    items = list(_APPLICATIONS.values())
+    if event_id is not None:
+        items = [a for a in items if a.get("event_id") == event_id]
+    if vendor_id is not None:
+        items = [a for a in items if a.get("vendor_id") == vendor_id]
+    return items[: int(limit)]
+
+
+@router.post("", status_code=201)
+def create_application(payload: ApplicationCreate):
+    global _NEXT_ID
+    app_id = _NEXT_ID
+    _NEXT_ID += 1
+    data = {"id": app_id, **payload.model_dump(exclude_none=True)}
+    _APPLICATIONS[app_id] = data
+    return data
+
+
+@router.get("/id/{application_id}")
+def get_application_by_id(application_id: int):
     return _get_or_404(application_id)
 
 
-@router.patch("/id/{application_id:int}")
-def update_application(application_id: int, patch: ApplicationPatch):
+@router.patch("/id/{application_id}")
+def patch_application_by_id(application_id: int, patch: ApplicationPatch):
     app = _get_or_404(application_id)
-    updates = {k: v for k, v in patch.__dict__.items() if v is not None}
+    updates = patch.model_dump(exclude_none=True)
     app.update(updates)
     return app
 
 
 @router.get("/{application_id}")
 def get_application_alias(application_id: int):
-    return get_application(application_id)
+    return get_application_by_id(application_id)
 
 
-@router.patch("/{application_id:int}")
-def update_application_alias(application_id: int, patch: ApplicationPatch):
-    return update_application(application_id, patch)
+@router.patch("/{application_id}")
+def patch_application_alias(application_id: int, patch: ApplicationPatch):
+    return patch_application_by_id(application_id, patch)
