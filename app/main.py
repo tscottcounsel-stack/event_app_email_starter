@@ -32,7 +32,7 @@ def _include(path: str):
         print(f"[main] Skipping {path} (import failed): {e}")
 
 
-# Core routers (based on your repo screenshots)
+# Core routers
 _include("app.routers.auth")
 _include("app.routers.auth_debug")
 _include("app.routers.public_events")
@@ -48,7 +48,7 @@ _include("app.routers.event_invites")
 _include("app.routers.organizer_events")
 _include("app.routers.organizer_event_update")
 _include("app.routers.organizer_applications")
-_include("app.routers.organizer_contacts")
+_include("app.routers.organizer_contacts")  # keep this (this is the correct include)
 _include("app.routers.organizer_profile")
 _include("app.routers.organizer_diagram")
 _include("app.routers.organizer_event_invites")

@@ -24,11 +24,6 @@ from app.database import get_db
 router = APIRouter(prefix="/organizer", tags=["organizer_contacts"])
 
 
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
-
-
 class OrganizerContactBase(BaseModel):
     name: str = Field(..., description="Person or company contact name")
     email: Optional[str] = None
@@ -48,8 +43,6 @@ class OrganizerContactBase(BaseModel):
 
 
 class OrganizerContactCreate(OrganizerContactBase):
-    """Payload for creating/importing a contact."""
-
     pass
 
 
@@ -59,14 +52,7 @@ class OrganizerContactOut(OrganizerContactBase):
 
 
 class OrganizerContactsImportRequest(BaseModel):
-    """Bulk import payload."""
-
     contacts: List[OrganizerContactCreate]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def normalize_tags(raw) -> list[str]:
@@ -92,48 +78,37 @@ def normalize_tags(raw) -> list[str]:
     return cleaned
 
 
-# ---------------------------------------------------------------------------
-# Shared INSERT with JSONB bindparam for tags
-# ---------------------------------------------------------------------------
-
 INSERT_CONTACT_SQL = text(
     """
-        INSERT INTO organizer_contacts (
-            organizer_id,
-            name,
-            email,
-            phone,
-            company,
-            notes,
-            tags
-        )
-        VALUES (
-            :organizer_id,
-            :name,
-            :email,
-            :phone,
-            :company,
-            :notes,
-            :tags
-        )
-        RETURNING
-            id,
-            organizer_id,
-            name,
-            email,
-            phone,
-            company,
-            notes,
-            COALESCE(tags, '[]'::jsonb) AS tags
-        """
-).bindparams(
-    bindparam("tags", type_=JSONB)  # tell SQLAlchemy/psycopg this is JSONB
-)
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+    INSERT INTO organizer_contacts (
+        organizer_id,
+        name,
+        email,
+        phone,
+        company,
+        notes,
+        tags
+    )
+    VALUES (
+        :organizer_id,
+        :name,
+        :email,
+        :phone,
+        :company,
+        :notes,
+        :tags
+    )
+    RETURNING
+        id,
+        organizer_id,
+        name,
+        email,
+        phone,
+        company,
+        notes,
+        COALESCE(tags, '[]'::jsonb) AS tags
+    """
+).bindparams(bindparam("tags", type_=JSONB))
 
 
 @router.get("/contacts")
@@ -141,15 +116,6 @@ def list_organizer_contacts(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    List contacts for the current organizer.
-
-    Response:
-    {
-      "value": [OrganizerContactOut, ...],
-      "Count": <int>
-    }
-    """
     sql = text(
         """
         SELECT
@@ -199,9 +165,6 @@ def create_organizer_contact(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Create a single contact for the current organizer.
-    """
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=400, detail="Name is required.")
 
@@ -214,7 +177,6 @@ def create_organizer_contact(
         "phone": payload.phone,
         "company": payload.company,
         "notes": payload.notes,
-        # JSONB bindparam will serialize this Python list correctly
         "tags": clean_tags,
     }
 
@@ -246,20 +208,6 @@ def import_organizer_contacts(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Bulk import multiple contacts for the current organizer.
-
-    Accepts:
-    {
-      "contacts": [ OrganizerContactCreate, ... ]
-    }
-
-    Returns:
-    {
-      "value": [OrganizerContactOut, ...created],
-      "Count": <int>
-    }
-    """
     if not payload.contacts:
         return {"value": [], "Count": 0}
 
@@ -268,7 +216,6 @@ def import_organizer_contacts(
     try:
         for contact in payload.contacts:
             if not contact.name or not contact.name.strip():
-                # Skip nameless contacts quietly in import
                 continue
 
             clean_tags = normalize_tags(contact.tags)
