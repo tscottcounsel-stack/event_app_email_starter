@@ -1,115 +1,145 @@
-// src/pages/VendorDiagramPage.tsx
-import React, { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
-import { getVendorDiagram } from "../api/vendorDiagram";
-import type { DiagramEnvelope } from "../api/diagramTypes";
 import EventDiagramCanvas from "../components/EventDiagramCanvas";
+import { getPublicEventDiagram, vendorGetEventDiagram, type EventDiagramResponse } from "../api";
+import type { DiagramJson, Booth } from "../api/diagramTypes";
 
-const VendorDiagramPage: React.FC = () => {
-  const { eventId } = useParams<{ eventId: string }>();
-  const [envelope, setEnvelope] = useState<DiagramEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+function getVendorToken(): string | null {
+  return (
+    localStorage.getItem("VENDOR_TOKEN") ||
+    localStorage.getItem("access_token") ||
+    localStorage.getItem("token")
+  );
+}
+
+export default function VendorDiagramPage() {
+  const nav = useNavigate();
+  const { eventId } = useParams();
+
+  const eid = Number(eventId);
+  const token = getVendorToken();
+
+  const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [resp, setResp] = useState<EventDiagramResponse | null>(null);
 
-  useEffect(() => {
-    if (!eventId) {
-      setError("Missing event id.");
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [selectedBooth, setSelectedBooth] = useState<Booth | null>(null);
+
+  const diagram = useMemo(() => {
+    return (resp as unknown as DiagramJson) || null;
+  }, [resp]);
+
+  const load = async () => {
+    if (!Number.isFinite(eid) || eid <= 0) {
+      setError("Invalid event id.");
+      setLoading(false);
       return;
     }
 
-    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setInfo(null);
 
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
+    try {
+      const data = token ? await vendorGetEventDiagram(eid, token) : await getPublicEventDiagram(eid);
+      setResp(data);
 
-        const id = Number(eventId);
-        console.log("[VendorDiagramPage] loading diagram for event", id);
-
-        const resp = await getVendorDiagram(id);
-        if (cancelled) return;
-
-        console.log("[VendorDiagramPage] got diagram", resp);
-        setEnvelope(resp);
-      } catch (err) {
-        if (!cancelled) {
-          console.error("[VendorDiagramPage] failed to load diagram", err);
-          setError("Could not load event map.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+      if (!token) {
+        setInfo("Public preview mode. Log in as a vendor for vendor-only access.");
       }
+    } catch (e: any) {
+      setError(e?.message || "Failed to load diagram.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eid]);
+
+  const onBoothClick = (code: string, booth: Booth) => {
+    setSelectedCode(code);
+    setSelectedBooth(booth);
+    setInfo(null);
+
+    if (!token) {
+      setInfo("Log in as a vendor to use vendor-only features.");
+      return;
     }
 
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [eventId]);
-
-  const diagram = envelope?.diagram ?? null;
+    const status = String((booth as any)?.status || "").toLowerCase();
+    if (status && status !== "available") {
+      setInfo("This booth is not currently available.");
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="p-6 space-y-4">
+      <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">
-            Event layout{" "}
-            <span className="text-sm font-normal">(read-only)</span>
-          </h1>
-          <p className="mt-1 text-sm text-slate-600">
-            This is a read-only view of the event map.
-          </p>
+          <h1 className="text-2xl font-bold">Vendor Map</h1>
+          <div className="text-sm text-slate-600">
+            Event {Number.isFinite(eid) ? eid : "—"} · Diagram v{resp?.version ?? "—"}
+          </div>
         </div>
 
-        <Link
-          to="/vendor/events"
-          className="inline-flex items-center rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-900"
-        >
-          Back
-        </Link>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="rounded border bg-white px-3 py-2 text-sm hover:bg-slate-50"
+            onClick={load}
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="rounded border bg-white px-3 py-2 text-sm hover:bg-slate-50"
+            onClick={() => nav("/vendor/events")}
+          >
+            Back
+          </button>
+        </div>
       </div>
 
-      {/* Legend */}
-      <div className="rounded-lg bg-slate-800 px-4 py-2 text-xs text-slate-100">
-        <span className="mr-4 font-semibold">Legend:</span>
-        <span className="mr-4 inline-flex items-center gap-1">
-          <span className="h-3 w-3 rounded-sm bg-emerald-500" /> Available
-        </span>
-        <span className="mr-4 inline-flex items-center gap-1">
-          <span className="h-3 w-3 rounded-sm bg-sky-500" /> Assigned / mine
-        </span>
-        <span className="mr-4 inline-flex items-center gap-1">
-          <span className="h-3 w-3 rounded-sm bg-amber-500" /> Pending
-        </span>
-        <span className="mr-4 inline-flex items-center gap-1">
-          <span className="h-3 w-3 rounded-sm bg-rose-500" /> Reserved / blocked
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <span className="h-3 w-3 rounded-sm bg-slate-500" /> Hidden
-        </span>
+      {info ? <div className="rounded border bg-sky-50 p-2 text-sm">{info}</div> : null}
+      {error ? <div className="rounded border bg-red-50 p-2 text-sm text-red-700">{error}</div> : null}
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <div className="lg:col-span-9 rounded-xl border bg-white p-3">
+          {loading ? (
+            <div className="p-6 text-sm text-slate-500">Loading…</div>
+          ) : diagram ? (
+            <EventDiagramCanvas diagram={diagram} viewMode="vendor" mineBoothCodes={[]} onBoothClick={onBoothClick} />
+          ) : (
+            <div className="p-6 text-sm text-slate-500">No diagram found.</div>
+          )}
+        </div>
+
+        <div className="lg:col-span-3 rounded-xl border bg-white p-3">
+          <div className="font-semibold">Booth details</div>
+
+          {!selectedCode ? (
+            <div className="mt-2 text-sm text-slate-600">Click a booth to see details.</div>
+          ) : (
+            <div className="mt-2 space-y-2 text-sm">
+              <div className="font-mono font-semibold">{selectedCode}</div>
+              <div>Status: {(selectedBooth as any)?.status ?? "—"}</div>
+              <div>
+                Size: {(selectedBooth as any)?.width ?? "—"}×{(selectedBooth as any)?.height ?? "—"}
+              </div>
+
+              <div className="rounded border bg-slate-50 p-2 text-slate-700">
+                Apply flow is disabled for now because there is no vendor applications endpoint in OpenAPI.
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-
-      {loading && !diagram && (
-        <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-600">
-          Loading event map…
-        </div>
-      )}
-
-      {error && !diagram && (
-        <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      {/* Shared renderer: in vendor view this should be read-only */}
-      <EventDiagramCanvas diagram={diagram} viewMode="vendor" />
     </div>
   );
-};
-
-export default VendorDiagramPage;
+}

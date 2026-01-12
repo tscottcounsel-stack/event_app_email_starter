@@ -1,69 +1,54 @@
-# app/models/application.py
+﻿# app/models/application.py
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import (
-    DateTime,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    UniqueConstraint,
-    func,
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
-# Use the project's shared Base (do NOT redefine it locally)
 from app.db import Base
 
 
 class Application(Base):
     __tablename__ = "applications"
-    __table_args__ = (
-        UniqueConstraint("event_id", "vendor_id", name="uq_applications_event_vendor"),
-    )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     event_id: Mapped[int] = mapped_column(
+        Integer,
         ForeignKey("events.id", ondelete="CASCADE"),
         nullable=False,
     )
-    vendor_id: Mapped[int] = mapped_column(
-        ForeignKey("vendors.id", ondelete="CASCADE"),
+
+    vendor_profile_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("vendor_profiles.id", ondelete="CASCADE"),
         nullable=False,
     )
 
-    # pricing / status
-    price_cents: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )  # <-- matches migration
     status: Mapped[str] = mapped_column(
-        String(50), nullable=False, server_default="submitted"
+        String(length=32), nullable=False, server_default="pending"
     )
-
-    # flow fields
-    desired_location: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    requested_slots: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    payment_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    paid_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+    total_due_cents: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    payment_status: Mapped[str] = mapped_column(
+        String(length=32), nullable=False, server_default="unpaid"
     )
 
-    # timestamps
+    assigned_slot_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("event_slots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.current_timestamp(),
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
-
-    # relationships (Event/Vendor must define back_populates="applications")
-    event = relationship("Event", back_populates="applications")
-    vendor = relationship("Vendor", back_populates="applications")

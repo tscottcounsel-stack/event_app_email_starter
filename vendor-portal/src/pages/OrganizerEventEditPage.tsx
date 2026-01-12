@@ -1,228 +1,249 @@
-// src/pages/OrganizerEventEditPage.tsx
-import React, { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import {
-  getOrganizerEvent,
-  updateOrganizerEvent,
-  type OrganizerEvent,
-} from "../api/organizerEvents";
+import React, { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { apiFetch } from "../api";
 
-const OrganizerEventEditPage: React.FC = () => {
-  const { eventId } = useParams<{ eventId: string }>();
-  const navigate = useNavigate();
+type EventOut = {
+  id: number;
+  title?: string | null;
+  description?: string | null;
+  date?: string | null;
+  city?: string | null;
+  location?: string | null;
 
-  const [event, setEvent] = useState<OrganizerEvent | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  // extra fields may exist on the server; we ignore them for PATCH (contract)
+  kind?: string | null;
+};
+
+function toDateInput(v?: string | null) {
+  if (!v) return "";
+  // handles: "2026-04-01", "2026-04-01T00:00:00", "2026-04-01T00:00:00-05:00"
+  return v.toString().slice(0, 10);
+}
+
+export default function OrganizerEventEditPage() {
+  const nav = useNavigate();
+  const params = useParams();
+
+  const eventId = useMemo(() => {
+    const raw = (params as any).eventId ?? (params as any).id; // support both route styles
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }, [params]);
+
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [date, setDate] = useState(""); // local "YYYY-MM-DD"
-  const [location, setLocation] = useState("");
-  const [city, setCity] = useState("");
-  const [kind, setKind] = useState("");
+  const [form, setForm] = useState<Required<Pick<EventOut, "id" | "title" | "description" | "date" | "city" | "location">>>({
+    id: 0,
+    title: "",
+    description: "",
+    date: "",
+    city: "",
+    location: "",
+  });
 
-  useEffect(() => {
-    if (!eventId) return;
-
-    let cancelled = false;
-
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-        const evt = await getOrganizerEvent(Number(eventId));
-        if (cancelled) return;
-
-        setEvent(evt);
-        setTitle(evt.title ?? "");
-        setDescription(evt.description ?? "");
-        setLocation(evt.location ?? "");
-        setCity(evt.city ?? "");
-        setKind(evt.kind ?? "");
-
-        if (evt.date) {
-          const d = new Date(evt.date);
-          const yyyy = d.getFullYear();
-          const mm = String(d.getMonth() + 1).padStart(2, "0");
-          const dd = String(d.getDate()).padStart(2, "0");
-          setDate(`${yyyy}-${mm}-${dd}`);
-        }
-      } catch (err: any) {
-        if (!cancelled) {
-          console.error("Failed to load event", err);
-          setError("Could not load event.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+  async function load() {
+    if (!eventId) {
+      setError("Invalid event id.");
+      setLoading(false);
+      return;
     }
 
+    setLoading(true);
+    setError(null);
+
+    // 1) Try detail endpoint first
+    try {
+      const data = (await apiFetch(`/organizer/events/${eventId}`, { method: "GET" })) as EventOut;
+
+      setForm({
+        id: data.id,
+        title: data.title ?? "",
+        description: data.description ?? "",
+        date: toDateInput(data.date),
+        city: data.city ?? "",
+        location: data.location ?? "",
+      });
+
+      setLoading(false);
+      return;
+    } catch (e1: any) {
+      // If server says 401, the apiFetch shim should already throw with status; show it.
+      const msg1 = e1?.message || "";
+      const status1 = e1?.status;
+
+      // 2) Fallback: list endpoint + find the event (handles 405/404 on detail)
+      try {
+        const list = (await apiFetch(`/organizer/events`, { method: "GET" })) as any;
+        const items: EventOut[] = Array.isArray(list) ? list : (list?.items || []);
+        const found = items.find((x) => x.id === eventId);
+
+        if (!found) {
+          setError(
+            `Could not find event ${eventId}. Detail endpoint failed (${status1 || "?"}). ${msg1}`.trim(),
+          );
+          setLoading(false);
+          return;
+        }
+
+        setForm({
+          id: found.id,
+          title: found.title ?? "",
+          description: found.description ?? "",
+          date: toDateInput(found.date),
+          city: found.city ?? "",
+          location: found.location ?? "",
+        });
+
+        setLoading(false);
+        return;
+      } catch (e2: any) {
+        const msg2 = e2?.message || "";
+        const status2 = e2?.status;
+
+        setError(
+          `Failed to load event. Detail error: ${status1 || "?"} ${msg1}. List error: ${status2 || "?"} ${msg2}`.trim(),
+        );
+        setLoading(false);
+        return;
+      }
+    }
+  }
+
+  useEffect(() => {
     load();
-    return () => {
-      cancelled = true;
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!eventId) return;
 
+    setError(null);
+
+    // ✅ CONTRACT-SAFE PATCH ONLY
+    const payload = {
+      title: form.title,
+      description: form.description,
+      date: form.date,
+      city: form.city,
+      location: form.location,
+    };
+
     try {
-      setSaving(true);
-      setError(null);
-
-      // Only send fields we actually care to update
-      const payload: any = {
-        title,
-        description: description || null,
-        location: location || null,
-        city: city || null,
-        kind: kind || null,
-      };
-
-      if (date) {
-        // Let backend store timezone; we just send an ISO date string
-        payload.date = date;
-      }
-
-      await updateOrganizerEvent(Number(eventId), payload);
-
-      // Navigate back to events list (or dashboard if you prefer)
-      navigate("/organizer/events");
-    } catch (err: any) {
-      console.error("Failed to update event", err);
-      setError("Failed to save changes.");
-    } finally {
-      setSaving(false);
+      await apiFetch(`/organizer/events/${eventId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      nav("/organizer/events", { replace: true });
+    } catch (e: any) {
+      const msg = e?.message || "Unknown error";
+      const status = e?.status || "?";
+      setError(`Failed to save (${status}). ${msg}`);
     }
   }
 
-  function handleCancel() {
-    navigate("/organizer/events");
-  }
-
-  if (loading || !event) {
-    return (
-      <div className="p-4">
-        {error ? (
-          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
-            {error}
-          </div>
-        ) : (
-          <p className="text-gray-600">Loading event…</p>
-        )}
-      </div>
-    );
+  if (loading) {
+    return <div className="p-8 text-slate-300">Loading…</div>;
   }
 
   return (
-    <div className="p-4 max-w-xl">
-      <h1 className="mb-4 text-xl font-semibold">Edit event</h1>
+    <div className="min-h-screen bg-gradient-to-b from-slate-950 to-slate-900 text-white">
+      <div className="mx-auto max-w-4xl px-6 py-10">
+        <div className="mb-6 flex items-center justify-between gap-4">
+          <Link to="/organizer/events" className="text-sm text-slate-200 hover:underline">
+            ← Back to events
+          </Link>
 
-      {error && (
-        <div className="mb-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">
-            Title
-          </label>
-          <input
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            required
-          />
+          {eventId && (
+            <button
+              onClick={() => nav(`/organizer/events/${eventId}/diagram/map-editor`)}
+              className="rounded-full border border-slate-400/60 bg-slate-950/40 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-950/70"
+            >
+              Open map editor
+            </button>
+          )}
         </div>
 
-        <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">
-            Description
-          </label>
-          <textarea
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </div>
+        <h1 className="text-3xl font-semibold">Edit event</h1>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {error && (
+          <div className="mt-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-200">
+            {error}{" "}
+            <button className="ml-2 underline" onClick={load}>
+              Retry
+            </button>
+          </div>
+        )}
+
+        <form onSubmit={onSubmit} className="mt-6 space-y-5 rounded-xl bg-white p-6 text-black">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              Date
-            </label>
+            <label className="block text-sm font-semibold">Title *</label>
+            <input
+              value={form.title}
+              onChange={(e) => update("title", e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold">Date</label>
             <input
               type="date"
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
+              value={form.date}
+              onChange={(e) => update("date", e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              City
-            </label>
+            <label className="block text-sm font-semibold">Location</label>
             <input
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={city}
-              onChange={(e) => setCity(e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              Location (venue)
-            </label>
-            <input
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              value={form.location}
+              onChange={(e) => update("location", e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              Kind (festival, expo, etc.)
-            </label>
+            <label className="block text-sm font-semibold">City</label>
             <input
-              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              value={kind}
-              onChange={(e) => setKind(e.target.value)}
+              value={form.city}
+              onChange={(e) => update("city", e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
             />
           </div>
-        </div>
 
-        <div className="mt-4 flex justify-end space-x-2">
-          <button
-            type="button"
-            onClick={handleCancel}
-            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            disabled={saving}
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="rounded-md border border-blue-600 bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
-            disabled={saving}
-          >
-            {saving ? "Saving…" : "Save changes"}
-          </button>
-        </div>
-      </form>
+          <div>
+            <label className="block text-sm font-semibold">Description</label>
+            <textarea
+              value={form.description}
+              onChange={(e) => update("description", e.target.value)}
+              className="mt-2 h-32 w-full rounded border px-3 py-2"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => nav("/organizer/events")}
+              className="rounded border px-5 py-2"
+            >
+              Cancel
+            </button>
+
+            <button type="submit" className="rounded bg-indigo-600 px-6 py-2 text-white">
+              Save changes
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
-};
-
-export default OrganizerEventEditPage;
+}

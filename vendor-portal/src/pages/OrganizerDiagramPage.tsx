@@ -1,468 +1,542 @@
-// src/pages/OrganizerApplicationsPage.tsx
+// src/pages/OrganizerDiagramPage.tsx
+//
+// Organizer Diagram — Assignment Wiring (CONTRACT LOCKED)
+//
+// ✅ GET   /organizer/events/{event_id}/diagram   (grid-based layout per DIAGRAM_CONTRACT)
+// ✅ GET   /organizer/events/{event_id}/applications
+// ✅ PATCH /organizer/events/{event_id}/applications/{app_id}
+//      body: { assigned_slot_id: db_slot_id }
+//
+// 🔒 assignment uses db_slot_id ONLY
+// 🔒 never send nulls
+// 🔒 no OpenAPI discovery
+// 🔒 no diagram geometry editing here (keeps rebuild stable)
 
-import React, { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { apiGet } from "../api/api";
+import React, { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { API_BASE } from "../api";
 
-type LoadStatus = "idle" | "loading" | "loaded" | "error";
+// ---- Types for normalized assignment diagram ----
 
-interface OrganizerApplication {
-  id: number;
-  vendor_name?: string;
-  business_name?: string;
-  vendorName?: string;
-  status: string;
-  payment_status?: string;
-  paymentStatus?: string;
-  assigned_slot_label?: string | null;
-  assigned_slot_code?: string | null;
-  total_due_cents?: number;
-  total_paid_cents?: number;
-  submitted_at?: string;
-}
+type Slot = {
+  id: string; // logical id for React key ("B1")
+  label: string;
+  x: number; // 1-based grid
+  y: number;
+  w: number; // width in grid cells
+  h: number; // height in grid cells
+  status?: string;
+  db_slot_id: number | null;
+};
 
-interface OrganizerEventApplicationsSummary {
+type Diagram = {
+  width: number; // in grid cells
+  height: number; // in grid cells
+  slots: Slot[];
+};
+
+// ---- Raw diagram response from /organizer/events/{id}/diagram ----
+// This matches the grid-based DIAGRAM_CONTRACT that the map editor is using.
+
+type RawSlot = {
+  id: number; // db slot id
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  status?: string | null;
+  kind?: string | null;
+  price_cents?: number | null;
+  category_id?: number | null;
+};
+
+type RawDiagramResponse = {
   event_id: number;
-  total_applications: number;
-  pending: number;
-  approved: number;
-  rejected: number;
-  total_due_cents: number;
-  total_paid_cents: number;
-}
+  version?: number;
+  grid_px?: number;
+  slots: RawSlot[];
+  meta?: Record<string, unknown>;
+};
 
-interface OrganizerEventApplicationsResponse {
-  summary: OrganizerEventApplicationsSummary;
-  items: OrganizerApplication[];
-}
+type DiagramResponse = RawDiagramResponse; // for clarity below
 
-interface VendorProfile {
-  id?: number | null;
+type Application = {
+  id: number;
+  event_id: number;
+  vendor_profile_id: number;
+  status: "pending" | "approved" | "rejected" | string;
+  assigned_slot_id?: number | null;
+  vendor_name?: string | null;
   business_name?: string | null;
-  contact_name?: string | null;
-  email?: string | null;
-  phone?: string | null;
-  city?: string | null;
-  state?: string | null;
-  website?: string | null;
-  description?: string | null;
+};
+
+type ApplicationsResponse = {
+  event_id: number;
+  items: Application[];
+};
+
+function getToken() {
+  return localStorage.getItem("access_token");
 }
 
-const OrganizerApplicationsPage: React.FC = () => {
+async function apiJson(path: string, init?: RequestInit) {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(txt || `HTTP ${res.status}`);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// ---- Helpers ----
+
+// Status → color classes. Keep aligned with Map Editor where possible.
+function statusClass(status?: string) {
+  const s = (status || "").toLowerCase();
+  if (s === "assigned") return "bg-emerald-600 text-white border-emerald-700";
+  if (s === "approved") return "bg-sky-600 text-white border-sky-700";
+  if (s === "pending") return "bg-amber-500 text-black border-amber-700";
+  if (s === "blocked") return "bg-slate-700 text-white border-slate-800";
+  return "bg-white text-slate-900 border-slate-300";
+}
+
+/**
+ * Normalize raw grid-based diagram into a simple width/height + slots
+ * structure for the assignment UI.
+ *
+ * 🔒 db_slot_id comes from rawSlot.id
+ * 🔒 geometry stays in grid coordinates (1-based)
+ */
+function normalizeDiagram(raw: RawDiagramResponse): Diagram {
+  const rawSlots = raw.slots || [];
+
+  const slots: Slot[] = rawSlots.map((s) => {
+    const x = s.x && s.x > 0 ? s.x : 1;
+    const y = s.y && s.y > 0 ? s.y : 1;
+    const w = s.w && s.w > 0 ? s.w : 1;
+    const h = s.h && s.h > 0 ? s.h : 1;
+
+    return {
+      id: s.label || `slot-${s.id}`,
+      label: s.label || `#${s.id}`,
+      x,
+      y,
+      w,
+      h,
+      status: s.status || undefined,
+      db_slot_id: typeof s.id === "number" ? s.id : null,
+    };
+  });
+
+  // Compute bounding box in grid cells
+  let maxX = 1;
+  let maxY = 1;
+  for (const s of slots) {
+    maxX = Math.max(maxX, s.x + s.w - 1);
+    maxY = Math.max(maxY, s.y + s.h - 1);
+  }
+
+  // Add one cell of padding so booths at the edge don't hug the border
+  const width = Math.max(10, maxX + 1);
+  const height = Math.max(6, maxY + 1);
+
+  return { width, height, slots };
+}
+
+// ---- Component ----
+
+export default function OrganizerDiagramPage() {
   const { eventId } = useParams<{ eventId: string }>();
-  const parsedEventId = eventId ? Number(eventId) : NaN;
+  const nav = useNavigate();
+  const eid = useMemo(() => Number(eventId), [eventId]);
 
-  const [status, setStatus] = useState<LoadStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  const [applications, setApplications] = useState<OrganizerApplication[]>([]);
-  const [summary, setSummary] =
-    useState<OrganizerEventApplicationsSummary | null>(null);
+  const [diagram, setDiagram] = useState<Diagram | null>(null);
+  const [version, setVersion] = useState<number | null>(null);
 
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | "pending" | "approved" | "rejected"
-  >("all");
-  const [paymentFilter, setPaymentFilter] = useState<
-    "all" | "unpaid" | "partial" | "paid"
-  >("all");
+  const [apps, setApps] = useState<Application[]>([]);
+  const [selectedAppId, setSelectedAppId] = useState<number | null>(null);
 
-  // Vendor modal state
-  const [vendorModalOpen, setVendorModalOpen] = useState(false);
-  const [vendorLoading, setVendorLoading] = useState(false);
-  const [vendorError, setVendorError] = useState<string | null>(null);
-  const [selectedVendor, setSelectedVendor] = useState<VendorProfile | null>(
-    null,
+  // Simple zoom (safe)
+  const [zoom, setZoom] = useState(1);
+
+  const selectedApp = useMemo(
+    () => apps.find((a) => a.id === selectedAppId) ?? null,
+    [apps, selectedAppId]
   );
 
+  const assignedSlotIds = useMemo(() => {
+    const set = new Set<number>();
+    for (const a of apps) {
+      if (a.assigned_slot_id) set.add(a.assigned_slot_id);
+    }
+    return set;
+  }, [apps]);
+
+  async function loadAll() {
+    setLoading(true);
+    setErr(null);
+
+    try {
+      const [d, a] = await Promise.all([
+        apiJson(`/organizer/events/${eid}/diagram`) as Promise<DiagramResponse>,
+        apiJson(`/organizer/events/${eid}/applications`) as Promise<ApplicationsResponse>,
+      ]);
+
+      const normalized = normalizeDiagram(d);
+      setDiagram(normalized);
+      setVersion(typeof d.version === "number" ? d.version : null);
+      setApps(a.items || []);
+
+      // If previously selected app is no longer eligible, clear it.
+      if (selectedAppId) {
+        const still = (a.items || []).find((x) => x.id === selectedAppId);
+        if (!still) setSelectedAppId(null);
+      }
+    } catch (e: any) {
+      setErr(e.message ?? "Failed to load diagram/applications.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    if (!parsedEventId || Number.isNaN(parsedEventId)) {
-      setStatus("error");
-      setError("Invalid event id.");
+    if (!Number.isFinite(eid) || eid <= 0) {
+      setErr("Invalid event id.");
+      return;
+    }
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eid]);
+
+  async function assignToSlot(slot: Slot) {
+    setErr(null);
+
+    if (!selectedApp) {
+      setErr("Select an approved application first, then click a booth.");
+      return;
+    }
+    if (selectedApp.status !== "approved") {
+      setErr("Only approved applications can be assigned to a booth.");
+      return;
+    }
+    if (selectedApp.assigned_slot_id) {
+      setErr(
+        "That application is already assigned. (Unassign/reassign is not enabled here.)"
+      );
+      return;
+    }
+    if (!slot.db_slot_id) {
+      setErr("This booth does not have a db_slot_id and cannot be assigned.");
+      return;
+    }
+    if (assignedSlotIds.has(slot.db_slot_id)) {
+      setErr("That booth is already assigned to another application.");
       return;
     }
 
-    let cancelled = false;
-
-    async function load() {
-      try {
-        setStatus("loading");
-        setError(null);
-
-        const resp = await apiGet<OrganizerEventApplicationsResponse>(
-          `/organizer/events/${parsedEventId}/applications?page=1&page_size=200`,
-        );
-
-        if (cancelled) return;
-
-        setApplications(resp.items ?? []);
-        setSummary(resp.summary ?? null);
-        setStatus("loaded");
-      } catch (err: any) {
-        console.error("[OrganizerApplicationsPage] failed to load applications", err);
-        if (cancelled) return;
-
-        setStatus("error");
-        setError(
-          err?.data?.detail ??
-            "Could not load applications for this event. Please try again.",
-        );
-      }
-    }
-
-    load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [parsedEventId]);
-
-  function formatCents(cents?: number) {
-    if (cents == null) return "—";
-    return `$${(cents / 100).toFixed(2)}`;
-  }
-
-  function getFilteredApplications(apps: OrganizerApplication[]): OrganizerApplication[] {
-    return apps.filter((app) => {
-      const s = (app.status || "").toLowerCase();
-      const p = (app.payment_status || app.paymentStatus || "").toLowerCase();
-
-      if (statusFilter !== "all" && s !== statusFilter) {
-        return false;
-      }
-
-      if (paymentFilter !== "all" && p !== paymentFilter) {
-        return false;
-      }
-
-      return true;
-    });
-  }
-
-  const filteredApplications = getFilteredApplications(applications);
-
-  async function handleViewVendor(appId: number) {
+    setSaving(true);
     try {
-      setVendorModalOpen(true);
-      setVendorLoading(true);
-      setVendorError(null);
-      setSelectedVendor(null);
+      // 🔒 Contracted assignment call — no nulls, no extra fields
+      await apiJson(`/organizer/events/${eid}/applications/${selectedApp.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assigned_slot_id: slot.db_slot_id }),
+      });
 
-      const profile = await apiGet<VendorProfile>(
-        `/organizer/applications/${appId}/vendor-profile`,
-      );
-
-      setSelectedVendor(profile);
-    } catch (err: any) {
-      console.error("[OrganizerApplicationsPage] failed to load vendor profile", err);
-      setVendorError("Could not load vendor profile.");
-      setSelectedVendor(null);
+      // Reload to reflect assignment + highlight
+      await loadAll();
+    } catch (e: any) {
+      setErr(e.message ?? "Assignment failed.");
     } finally {
-      setVendorLoading(false);
+      setSaving(false);
     }
   }
 
-  function closeVendorModal() {
-    setVendorModalOpen(false);
-    setVendorLoading(false);
-    setVendorError(null);
-    setSelectedVendor(null);
-  }
+  const eligibleApps = useMemo(
+    () => apps.filter((a) => a.status === "approved" && !a.assigned_slot_id),
+    [apps]
+  );
 
-  if (!eventId || Number.isNaN(parsedEventId)) {
-    return (
-      <div className="mx-auto max-w-3xl px-4 py-8">
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <p className="mb-1 font-semibold">Invalid event.</p>
-          <p className="mb-3">
-            The URL is missing a valid <code>eventId</code>. Go back to the
-            organizer dashboard and choose an event.
-          </p>
-          <Link
-            to="/organizer/events"
-            className="inline-flex rounded-full bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
-          >
-            Back to events
-          </Link>
-        </div>
-      </div>
-    );
-  }
+  const otherApps = useMemo(
+    () => apps.filter((a) => !(a.status === "approved" && !a.assigned_slot_id)),
+    [apps]
+  );
+
+  // Render params
+  const baseGridPx = 32;
+  const gridPx = baseGridPx * zoom;
+  const px = (n: number) => n * gridPx;
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 space-y-4">
-      {/* Header */}
+    <div className="p-5 space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="mb-1 text-xs text-slate-500">
-            <Link
-              to="/organizer/events"
-              className="text-emerald-600 hover:text-emerald-700 hover:underline"
-            >
-              ← Back to events
-            </Link>
-          </p>
-          <h1 className="text-lg font-semibold text-slate-900">
-            Applications for event #{parsedEventId}
-          </h1>
-          {summary && (
-            <p className="mt-1 text-xs text-slate-500">
-              {summary.total_applications} application
-              {summary.total_applications === 1 ? "" : "s"} ·{" "}
-              {summary.pending} pending · {summary.approved} approved ·{" "}
-              {summary.rejected} rejected
-            </p>
-          )}
+        <div className="flex items-center gap-3">
+          <Link
+            to="/organizer/events"
+            className="text-sm text-emerald-700 hover:underline"
+          >
+            ← Back to events
+          </Link>
+          <div className="text-xl font-extrabold">
+            Map Assignment — Event #{eid}
+            {version !== null ? (
+              <span className="ml-2 text-sm font-semibold text-slate-500">
+                v{version}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            className="rounded-lg border px-3 py-1 text-sm"
+            onClick={() =>
+              setZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))
+            }
+            disabled={loading || saving}
+          >
+            −
+          </button>
+          <div className="w-16 text-center text-sm font-semibold">
+            {Math.round(zoom * 100)}%
+          </div>
+          <button
+            className="rounded-lg border px-3 py-1 text-sm"
+            onClick={() =>
+              setZoom((z) => Math.min(2.0, Math.round((z + 0.1) * 10) / 10))
+            }
+            disabled={loading || saving}
+          >
+            +
+          </button>
+
+          <button
+            className="rounded-lg border px-3 py-1 text-sm"
+            onClick={() => loadAll()}
+            disabled={loading || saving}
+            title="Refresh diagram and applications"
+          >
+            Refresh
+          </button>
+
+          <button
+            className="rounded-lg bg-slate-900 px-3 py-1 text-sm text-white"
+            onClick={() => nav(`/organizer/events/${eid}/applications`)}
+            disabled={loading || saving}
+          >
+            Applications
+          </button>
         </div>
       </div>
 
-      {/* Summary cards */}
-      {summary && (
-        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4 text-xs">
-          <div className="rounded-lg bg-slate-900 text-slate-50 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Total due
-            </div>
-            <div className="mt-1 text-sm font-semibold">
-              {formatCents(summary.total_due_cents)}
-            </div>
-          </div>
-          <div className="rounded-lg bg-slate-900 text-slate-50 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Total paid
-            </div>
-            <div className="mt-1 text-sm font-semibold">
-              {formatCents(summary.total_paid_cents)}
-            </div>
-          </div>
-          <div className="rounded-lg bg-slate-900 text-slate-50 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Pending
-            </div>
-            <div className="mt-1 text-sm font-semibold">
-              {summary.pending}
-            </div>
-          </div>
-          <div className="rounded-lg bg-slate-900 text-slate-50 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-wide text-slate-400">
-              Approved
-            </div>
-            <div className="mt-1 text-sm font-semibold">
-              {summary.approved}
-            </div>
-          </div>
+      {err && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-rose-900">
+          {err}
         </div>
       )}
 
-      {/* Filters + table */}
-      <div className="rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
-          <div className="text-xs font-semibold text-slate-700">
-            Applications
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-slate-500">Filter:</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-              value={statusFilter}
-              onChange={(e) =>
-                setStatusFilter(e.target.value as typeof statusFilter)
-              }
-            >
-              <option value="all">All statuses</option>
-              <option value="pending">Pending</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-            </select>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-              value={paymentFilter}
-              onChange={(e) =>
-                setPaymentFilter(e.target.value as typeof paymentFilter)
-              }
-            >
-              <option value="all">All payments</option>
-              <option value="unpaid">Unpaid</option>
-              <option value="partial">Partial</option>
-              <option value="paid">Paid</option>
-            </select>
-          </div>
-        </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_380px]">
+        {/* Diagram */}
+        <div className="rounded-2xl border bg-white p-3 overflow-auto">
+          {loading ? (
+            <div className="p-4 text-slate-600">Loading…</div>
+          ) : !diagram ? (
+            <div className="p-4 text-slate-600">No diagram found.</div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-sm text-slate-600">
+                Tip: Select an <b>approved</b> app on the right, then click a
+                booth to assign.
+              </div>
 
-        {status === "loading" && (
-          <div className="px-4 py-6 text-xs text-slate-500">
-            Loading applications…
-          </div>
-        )}
-
-        {status === "error" && (
-          <div className="px-4 py-6 text-xs text-red-600">
-            {error ?? "Something went wrong loading applications."}
-          </div>
-        )}
-
-        {status === "loaded" && filteredApplications.length === 0 && (
-          <div className="px-4 py-6 text-xs text-slate-500">
-            No applications match the current filters.
-          </div>
-        )}
-
-        {status === "loaded" && filteredApplications.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="min-w-full border-t border-slate-200 text-xs">
-              <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
-                <tr>
-                  <th className="px-3 py-2 text-left">Vendor</th>
-                  <th className="px-3 py-2 text-left">Status</th>
-                  <th className="px-3 py-2 text-left">Payment</th>
-                  <th className="px-3 py-2 text-left">Booth</th>
-                  <th className="px-3 py-2 text-right">Due</th>
-                  <th className="px-3 py-2 text-right">Paid</th>
-                  <th className="px-3 py-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredApplications.map((app) => {
-                  const vendorLabel =
-                    app.vendor_name ||
-                    app.business_name ||
-                    app.vendorName ||
-                    `Application #${app.id}`;
-                  const paymentStatus =
-                    app.payment_status || app.paymentStatus || "unpaid";
-                  const assignedLabel =
-                    app.assigned_slot_label || app.assigned_slot_code;
+              <div
+                className="relative border rounded-xl bg-slate-50"
+                style={{
+                  width: px(diagram.width),
+                  height: px(diagram.height),
+                  minWidth: 400,
+                  minHeight: 260,
+                }}
+              >
+                {diagram.slots.map((s) => {
+                  const isAssignable =
+                    !!s.db_slot_id && !assignedSlotIds.has(s.db_slot_id);
+                  const isSelectedTarget =
+                    !!selectedApp &&
+                    isAssignable &&
+                    selectedApp.status === "approved" &&
+                    !selectedApp.assigned_slot_id;
 
                   return (
-                    <tr key={app.id} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 align-top">
-                        <div className="font-medium text-slate-800">
-                          {vendorLabel}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          App #{app.id}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] capitalize text-slate-700">
-                          {app.status}
+                    <button
+                      key={`${s.id}-${s.db_slot_id ?? "null"}`}
+                      type="button"
+                      onClick={() => assignToSlot(s)}
+                      disabled={
+                        saving || loading || !isAssignable || !isSelectedTarget
+                      }
+                      title={
+                        s.db_slot_id
+                          ? `Booth ${s.label} (db_slot_id=${s.db_slot_id})`
+                          : `Booth ${s.label} (not assignable: db_slot_id is null)`
+                      }
+                      className={[
+                        "absolute rounded-lg border text-xs font-extrabold",
+                        "flex items-center justify-center",
+                        statusClass(s.status),
+                        isAssignable && isSelectedTarget
+                          ? "hover:opacity-90 cursor-pointer"
+                          : "opacity-60 cursor-not-allowed",
+                      ].join(" ")}
+                      style={{
+                        left: px(s.x - 1),
+                        top: px(s.y - 1),
+                        width: px(s.w),
+                        height: px(s.h),
+                      }}
+                    >
+                      {s.label}
+                      {s.db_slot_id ? (
+                        <span className="ml-1 opacity-80">
+                          #{s.db_slot_id}
                         </span>
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] capitalize text-slate-700">
-                          {paymentStatus}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {assignedLabel ? (
-                          <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                            {assignedLabel}
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-slate-400">
-                            Not assigned
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 align-top text-right">
-                        {formatCents(app.total_due_cents)}
-                      </td>
-                      <td className="px-3 py-2 align-top text-right">
-                        {formatCents(app.total_paid_cents)}
-                      </td>
-                      <td className="px-3 py-2 align-top text-right">
-                        <div className="flex flex-wrap justify-end gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleViewVendor(app.id)}
-                            className="rounded-md bg-slate-800 px-2 py-1 text-[11px] font-medium text-white hover:bg-slate-700"
-                          >
-                            View vendor
-                          </button>
-                          {assignedLabel && (
-                            <Link
-                              to={`/organizer/events/${parsedEventId}/diagram/edit?slot=${encodeURIComponent(
-                                assignedLabel,
-                              )}`}
-                              className="rounded-md bg-sky-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-sky-500"
-                            >
-                              View on map
-                            </Link>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
+                      ) : null}
+                    </button>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Vendor profile modal */}
-      {vendorModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-md rounded-lg bg-white p-4 text-sm text-slate-900 shadow-lg">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-base font-semibold">Vendor profile</h2>
-              <button
-                onClick={closeVendorModal}
-                className="text-xs text-slate-500 hover:text-slate-800"
-              >
-                Close
-              </button>
+              </div>
             </div>
+          )}
+        </div>
 
-            {vendorLoading && (
-              <div className="py-4 text-xs text-slate-500">Loading…</div>
-            )}
-
-            {vendorError && (
-              <div className="mb-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                {vendorError}
+        {/* Applications panel */}
+        <div className="rounded-2xl border bg-white p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-lg font-extrabold">
+              Assign an approved application
+            </div>
+            {saving ? (
+              <div className="text-sm font-semibold text-slate-600">
+                Saving…
               </div>
-            )}
+            ) : null}
+          </div>
 
-            {selectedVendor && !vendorLoading && (
-              <div className="space-y-1 text-xs">
+          {/* Selected app */}
+          <div className="rounded-xl border bg-slate-50 p-3">
+            <div className="text-sm font-bold mb-1">Selected application</div>
+            {selectedApp ? (
+              <div className="text-sm">
                 <div>
-                  <span className="font-semibold">Business:</span>{" "}
-                  {selectedVendor.business_name || "—"}
+                  <b>#{selectedApp.id}</b> —{" "}
+                  {selectedApp.business_name ||
+                    selectedApp.vendor_name ||
+                    `Vendor ${selectedApp.vendor_profile_id}`}
                 </div>
-                <div>
-                  <span className="font-semibold">Contact:</span>{" "}
-                  {selectedVendor.contact_name || "—"}
-                </div>
-                <div>
-                  <span className="font-semibold">Email:</span>{" "}
-                  {selectedVendor.email || "—"}
-                </div>
-                <div>
-                  <span className="font-semibold">Phone:</span>{" "}
-                  {selectedVendor.phone || "—"}
-                </div>
-                <div>
-                  <span className="font-semibold">Location:</span>{" "}
-                  {selectedVendor.city || "—"},{" "}
-                  {selectedVendor.state || ""}
-                </div>
-                <div>
-                  <span className="font-semibold">Website:</span>{" "}
-                  {selectedVendor.website || "—"}
-                </div>
-                <div className="mt-2">
-                  <span className="font-semibold">About:</span>
-                  <p className="mt-1 whitespace-pre-wrap text-slate-700">
-                    {selectedVendor.description || "No description provided."}
-                  </p>
+                <div className="text-slate-600">
+                  status: <b>{selectedApp.status}</b>
+                  {selectedApp.assigned_slot_id ? (
+                    <>
+                      {" "}
+                      • assigned_slot_id:{" "}
+                      <b>{selectedApp.assigned_slot_id}</b>
+                    </>
+                  ) : (
+                    <> • not assigned</>
+                  )}
                 </div>
               </div>
+            ) : (
+              <div className="text-sm text-slate-600">
+                Pick an approved application below.
+              </div>
             )}
+          </div>
+
+          {/* Approved & unassigned */}
+          <div className="space-y-2">
+            <div className="text-sm font-bold">Approved & unassigned</div>
+            {eligibleApps.length === 0 ? (
+              <div className="text-sm text-slate-600">
+                No approved/unassigned applications right now.
+              </div>
+            ) : (
+              <div className="max-h-[280px] overflow-auto rounded-xl border">
+                {eligibleApps.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => setSelectedAppId(a.id)}
+                    className={[
+                      "w-full text-left p-3 border-b last:border-b-0",
+                      "hover:bg-slate-50",
+                      selectedAppId === a.id ? "bg-emerald-50" : "bg-white",
+                    ].join(" ")}
+                    disabled={saving || loading}
+                  >
+                    <div className="font-extrabold text-sm">#{a.id}</div>
+                    <div className="text-xs text-slate-600">
+                      {a.business_name ||
+                        a.vendor_name ||
+                        `Vendor ${a.vendor_profile_id}`}{" "}
+                      • status: {a.status}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Other apps */}
+          <div className="space-y-2">
+            <div className="text-sm font-bold text-slate-700">
+              Other applications
+            </div>
+            <div className="max-h-[220px] overflow-auto rounded-xl border">
+              {otherApps.length === 0 ? (
+                <div className="p-3 text-sm text-slate-600">None</div>
+              ) : (
+                otherApps.map((a) => (
+                  <div
+                    key={a.id}
+                    className="p-3 border-b last:border-b-0 bg-white"
+                  >
+                    <div className="font-bold text-sm">#{a.id}</div>
+                    <div className="text-xs text-slate-600">
+                      {a.business_name ||
+                        a.vendor_name ||
+                        `Vendor ${a.vendor_profile_id}`}{" "}
+                      • status: {a.status}
+                      {a.assigned_slot_id ? (
+                        <> • assigned_slot_id: {a.assigned_slot_id}</>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="text-xs text-slate-500">
+            Assignment uses <b>db_slot_id</b> from the diagram. Slots without
+            db_slot_id are not assignable.
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
-};
-
-export default OrganizerApplicationsPage;
+}

@@ -1,0 +1,199 @@
+[1mdiff --git a/vendor-portal/src/pages/OrganizerDiagramEditorPage.tsx b/vendor-portal/src/pages/OrganizerDiagramEditorPage.tsx[m
+[1mindex ce32d6e..d717ebe 100644[m
+[1m--- a/vendor-portal/src/pages/OrganizerDiagramEditorPage.tsx[m
+[1m+++ b/vendor-portal/src/pages/OrganizerDiagramEditorPage.tsx[m
+[36m@@ -1,524 +1,185 @@[m
+[31m-// vendor-portal/src/pages/OrganizerDiagramEditorPage.tsx[m
+[31m-import React, { useEffect, useState } from "react";[m
+[31m-import { useNavigate, useParams } from "react-router-dom";[m
+[31m-import {[m
+[31m-  BoothSlot,[m
+[31m-  DiagramPayload,[m
+[31m-  SlotStatus,[m
+[31m-  getOrganizerDiagram,[m
+[31m-  saveOrganizerDiagram,[m
+[31m-} from "../api/organizerDiagram";[m
+[32m+[m[32m// src/pages/OrganizerDiagramEditorPage.tsx[m
+[32m+[m[32m// Organizer Diagram Editor[m
+[32m+[m[32m// - Loads diagram + applications[m
+[32m+[m[32m// - Shows unassigned applications panel[m
+[32m+[m[32m// - Click app → click booth to assign[m
+[32m+[m[32m// - Sidebar scrolls independently of grid[m
+[32m+[m
+[32m+[m[32mimport React, { useEffect, useMemo, useState } from "react";[m
+[32m+[m[32mimport { useParams } from "react-router-dom";[m
+[32m+[m[32mimport DiagramEditor from "../components/DiagramEditor";[m
+[32m+[m[32mimport { apiGet, apiPatch } from "../api";[m
+[32m+[m
+[32m+[m[32m// ---- Types ----[m
+[32m+[m
+[32m+[m[32mtype DiagramSlot = {[m
+[32m+[m[32m  id: string;[m
+[32m+[m[32m  label: string;[m
+[32m+[m[32m  x: number;[m
+[32m+[m[32m  y: number;[m
+[32m+[m[32m  w: number;[m
+[32m+[m[32m  h: number;[m
+[32m+[m[32m  status?: string;[m
+[32m+[m[32m  db_slot_id?: number | null;[m
+[32m+[m[32m};[m
+ [m
+[31m-type DiagramState = {[m
+[32m+[m[32mtype DiagramData = {[m
+[32m+[m[32m  slots: DiagramSlot[];[m
+   width: number;[m
+   height: number;[m
+[31m-  slots: BoothSlot[];[m
+ };[m
+ [m
+[31m-// Backend width/height still exist, but the UI canvas[m
+[31m-// will always render using these logical dimensions:[m
+[31m-const DEFAULT_WIDTH = 32;[m
+[31m-const DEFAULT_HEIGHT = 16;[m
+[32m+[m[32mtype DiagramResponse = {[m
+[32m+[m[32m  event_id: number;[m
+[32m+[m[32m  version: number;[m
+[32m+[m[32m  diagram: DiagramData;[m
+[32m+[m[32m};[m
+ [m
+[31m-// Each grid cell is 16px in our internal coordinate system[m
+[31m-const CELL_SIZE = 16;[m
+[32m+[m[32mtype Application = {[m
+[32m+[m[32m  id: number;[m
+[32m+[m[32m  event_id: number;[m
+[32m+[m[32m  vendor_profile_id: number;[m
+[32m+[m[32m  status: string;[m
+[32m+[m[32m  assigned_slot_id: number | null;[m
+[32m+[m[32m  submitted_at: string;[m
+[32m+[m[32m};[m
+ [m
+[31m-// Max on-screen width of the map in pixels[m
+[31m-const MAX_CANVAS_PIXEL_WIDTH = 1100;[m
+[32m+[m[32m// ---- Page ----[m
+ [m
+[31m-const OrganizerDiagramEditorPage: React.FC = () => {[m
+[31m-  const { eventId } = useParams<{ eventId: string }>();[m
+[31m-  const navigate = useNavigate();[m
+[32m+[m[32mexport default function OrganizerDiagramEditorPage() {[m
+[32m+[m[32m  const { eventId } = useParams();[m
+[32m+[m[32m  const numericEventId = Number(eventId);[m
+ [m
+[31m-  const [diagram, setDiagram] = useState<DiagramState>({[m
+[31m-    width: DEFAULT_WIDTH,[m
+[31m-    height: DEFAULT_HEIGHT,[m
+[31m-    slots: [],[m
+[31m-  });[m
+[31m-  const [version, setVersion] = useState<number>(0);[m
+[31m-  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);[m
+[31m-  const [saving, setSaving] = useState(false);[m
+[31m-  const [loading, setLoading] = useState(false);[m
+[31m-  const [loadError, setLoadError] = useState<string | null>(null);[m
+[32m+[m[32m  const [diagram, setDiagram] = useState<DiagramData | null>(null);[m
+[32m+[m[32m  const [diagramVersion, setDiagramVersion] = useState<number>(0);[m
+[32m+[m[32m  const [applications, setApplications] = useState<Application[]>([]);[m
+[32m+[m[32m  const [selectedApp, setSelectedApp] = useState<Application | null>(null);[m
+[32m+[m[32m  const [loading, setLoading] = useState(true);[m
+ [m
+[31m-  // ---------------------------------------------------------------------------[m
+[31m-  // Load diagram from backend[m
+[31m-  // ---------------------------------------------------------------------------[m
+[31m-  useEffect(() => {[m
+[31m-    if (!eventId) return;[m
+[32m+[m[32m  // ---- Load diagram ----[m
+[32m+[m[32m  async function loadDiagram() {[m
+[32m+[m[32m    const res = await apiGet<DiagramResponse>(`/organizer/events/${numericEventId}/diagram`);[m
+[32m+[m[32m    setDiagram(res.diagram);[m
+[32m+[m[32m    setDiagramVersion(res.version);[m
+[32m+[m[32m  }[m
+ [m
+[31m-    let cancelled = false;[m
+[32m+[m[32m  // ---- Load applications ----[m
+[32m+[m[32m  async function loadApplications() {[m
+[32m+[m[32m    const res = await apiGet<{ event_id: number; items: Application[] }>([m
+[32m+[m[32m      `/organizer/events/${numericEventId}/applications?limit=200`[m
+[32m+[m[32m    );[m
+[32m+[m[32m    setApplications(res.items);[m
+[32m+[m[32m  }[m
+ [m
+[31m-    async function load() {[m
+[32m+[m[32m  useEffect(() => {[m
+[32m+[m[32m    let mounted = true;[m
+[32m+[m[32m    (async () => {[m
+[32m+[m[32m      setLoading(true);[m
+       try {[m
+[31m-        setLoading(true);[m
+[31m-        setLoadError(null);[m
+[31m-[m
+[31m-        const diag = await getOrganizerDiagram(eventId);[m
+[31m-        if (cancelled) return;[m
+[31m-[m
+[31m-        const safeWidth =[m
+[31m-          diag.width && diag.width > 0 ? diag.width : DEFAULT_WIDTH;[m
+[31m-        const safeHeight =[m
+[31m-          diag.height && diag.height > 0 ? diag.height : DEFAULT_HEIGHT;[m
+[31m-[m
+[31m-        console.log([m
+[31m-          "[OrganizerDiagramEditor] loaded diagram from API",[m
+[31m-          { width: safeWidth, height: safeHeight },[m
+[31m-          "slots:",[m
+[31m-          diag.slots?.length ?? 0[m
+[31m-        );[m
+[31m-[m
+[31m-        setDiagram({[m
+[31m-          width: safeWidth,[m
+[31m-          height: safeHeight,[m
+[31m-          slots: Array.isArray(diag.slots) ? diag.slots : [],[m
+[31m-        });[m
+[31m-        setVersion(diag.version ?? 0);[m
+[31m-        setSelectedSlotId(null);[m
+[31m-      } catch (err) {[m
+[31m-        console.error("[OrganizerDiagramEditor] load error", err);[m
+[31m-        if (!cancelled) {[m
+[31m-          setLoadError("Unable to load diagram.");[m
+[31m-        }[m
+[32m+[m[32m        await Promise.all([loadDiagram(), loadApplications()]);[m
+       } finally {[m
+[31m-        if (!cancelled) setLoading(false);[m
+[32m+[m[32m        if (mounted) setLoading(false);[m
+       }[m
+[31m-    }[m
+[31m-[m
+[31m-    load();[m
+[31m-[m
+[32m+[m[32m    })();[m
+     return () => {[m
+[31m-      cancelled = true;[m
+[32m+[m[32m      mounted = false;[m
+     };[m
+[31m-  }, [eventId]);[m
+[31m-[m
+[31m-  const selectedSlot =[m
+[31m-    selectedSlotId != null[m
+[31m-      ? diagram.slots.find((s) => s.id === selectedSlotId) ?? null[m
+[31m-      : null;[m
+[32m+[m[32m  }, [numericEventId]);[m
+ [m
+[31m-  // ---------------------------------------------------------------------------[m
+[31m-  // Local mutators[m
+[31m-  // ---------------------------------------------------------------------------[m
+[31m-  function handleAddBooth() {[m
+[31m-    const index = diagram.slots.length + 1;[m
+[31m-    const id = `B${index}`;[m
+[32m+[m[32m  // ---- Derived ----[m
+[32m+[m[32m  const unassignedApps = useMemo([m
+[32m+[m[32m    () => applications.filter(a => a.assigned_slot_id == null),[m
+[32m+[m[32m    [applications][m
+[32m+[m[32m  );[m
+ [m
+[31m-    const newSlot: BoothSlot = {[m
+[31m-      id,[m
+[31m-      label: id,[m
+[31m-      x: 1,[m
+[31m-      y: 1,[m
+[31m-      w: 2,[m
+[31m-      h: 2,[m
+[31m-    };[m
+[32m+[m[32m  const assignedBySlot = useMemo(() => {[m
+[32m+[m[32m    const map = new Map<number, Application>();[m
+[32m+[m[32m    applications.forEach(app => {[m
+

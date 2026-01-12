@@ -1,146 +1,69 @@
-// vendor-portal/src/pages/VendorEventsPage.tsx
+// src/pages/VendorEventsPage.tsx
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
+import { listPublicEvents, type PublicEventListItem } from "../api";
 
-export interface VendorEvent {
-  id: number;
-  name: string;
-  location: string;
-  date: string;
-  description: string;
-}
-
-const VendorEventsPage: React.FC = () => {
-  const navigate = useNavigate();
-  const [events, setEvents] = useState<VendorEvent[]>([]);
-  const [loading, setLoading] = useState(false);
+export default function VendorEventsPage() {
+  const [items, setItems] = useState<PublicEventListItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    console.log("[VendorEventsPage] RENDERING VENDOR EVENTS PAGE");
-
-    let cancelled = false;
-
-    async function load() {
+    const ac = new AbortController();
+    (async () => {
       try {
         setLoading(true);
         setError(null);
-
-        // TODO: replace with real API call
-        // For now, fake data so the page loads and we can debug routing.
-        const fakeEvents: VendorEvent[] = [
-          {
-            id: 52,
-            name: "Winter Party",
-            location: "home",
-            date: "2025-01-27",
-            description: "",
-          },
-          {
-            id: 49,
-            name: "Atlanta Fall Festival",
-            location: "Atlanta, GA",
-            date: "2025-11-10",
-            description: "Food, art, music.",
-          },
-        ];
-
-        if (!cancelled) {
-          setEvents(fakeEvents);
-        }
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) {
-          setError("Unable to load events.");
-        }
+        const res = await listPublicEvents(50, ac.signal);
+        setItems(res.items ?? []);
+      } catch (e: any) {
+        if (e?.name !== "AbortError") setError(e?.message ?? "Failed to load events");
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        setLoading(false);
       }
-    }
-
-    load();
-
-    return () => {
-      cancelled = true;
-    };
+    })();
+    return () => ac.abort();
   }, []);
 
-  function handleViewDiagram(eventId: number) {
-    navigate(`/vendor/events/${eventId}/diagram`);
-  }
-
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="w-full border-b border-slate-200 bg-white">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-emerald-600 flex items-center justify-center text-white font-bold text-sm">
-              EP
-            </div>
-            <span className="font-semibold text-slate-900">Event Portal</span>
-            <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-              Vendor view
-            </span>
-          </div>
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-2xl font-bold">Vendor Events</h1>
+        <div className="text-sm text-slate-600">
+          Events you can browse and open the vendor diagram for.
         </div>
-      </header>
+      </div>
 
-      <main className="max-w-5xl mx-auto px-4 py-6">
-        <h1 className="text-xl font-semibold mb-2">Events for you</h1>
-        <p className="text-sm text-slate-600 mb-4">
-          Browse events you can apply to. Once you've applied, they'll
-          eventually show up under "My events" with your application status.
-        </p>
+      {error && <div className="rounded border bg-red-50 p-3 text-sm text-red-800">{error}</div>}
 
-        {loading && <p className="text-sm text-slate-500">Loading events…</p>}
-        {error && (
-          <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
-            {error}
-          </p>
-        )}
-
-        <div className="space-y-4 mt-4">
-          {events.map((event) => (
-            <div
-              key={event.id}
-              className="rounded-2xl border border-emerald-400 bg-white shadow-sm p-4 cursor-pointer"
-              onClick={() => handleViewDiagram(event.id)}
-            >
-              <div className="text-xs text-slate-500 mb-1">
-                {new Date(event.date).toLocaleDateString()}
+      {loading ? (
+        <div className="rounded border p-4 text-sm text-slate-600">Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="rounded border p-4 text-sm text-slate-600">No events found.</div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3">
+          {items.map((e) => (
+            <div key={e.id} className="rounded border bg-white p-4 flex items-start justify-between gap-4">
+              <div>
+                <div className="font-semibold">{e.title}</div>
+                <div className="text-sm text-slate-600">
+                  {e.city} • {e.location}
+                </div>
+                <div className="text-xs text-slate-500 mt-1">{e.date}</div>
               </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-semibold text-slate-900">
-                    {event.name}
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    {event.location}
-                  </div>
-                  {event.description && (
-                    <div className="mt-1 text-xs text-slate-600">
-                      {event.description}
-                    </div>
-                  )}
-                </div>
-                <div className="text-sm text-emerald-600 font-medium">
-                  View map &amp; apply →
-                </div>
+
+              <div className="flex gap-2">
+                <Link
+                  to={`/vendor/events/${e.id}/diagram`}
+                  className="rounded border px-3 py-2 text-sm hover:bg-slate-50"
+                >
+                  Open Vendor Map
+                </Link>
               </div>
             </div>
           ))}
-
-          {!loading && !error && events.length === 0 && (
-            <p className="text-sm text-slate-500">
-              No events are available right now.
-            </p>
-          )}
         </div>
-      </main>
+      )}
     </div>
   );
-};
-
-export default VendorEventsPage;
+}

@@ -8,15 +8,9 @@ type DiagramAdminProps = {
 
 type LoginRole = "organizer" | "vendor";
 
-const DEV_DEFAULTS: Record<LoginRole, { username: string; password: string }> = {
-  organizer: {
-    username: "organizer@example.com",
-    password: "changeme123",
-  },
-  vendor: {
-    username: "vendor1@example.com",
-    password: "changeme123",
-  },
+const DEV_DEFAULTS: Record<LoginRole, { email: string; password: string }> = {
+  organizer: { email: "organizer@example.com", password: "changeme123" },
+  vendor: { email: "vendor@example.com", password: "changeme123" },
 };
 
 type LoginBarProps = {
@@ -30,7 +24,7 @@ const LoginBar: React.FC<LoginBarProps> = ({ currentRole, onAuthChange }) => {
   const [lastLogin, setLastLogin] = useState<string | null>(null);
 
   const baseUrl =
-    (import.meta as any).env?.VITE_API_BASE_URL ?? "http://127.0.0.1:8011";
+    (import.meta as any).env?.VITE_API_BASE_URL ?? "http://127.0.0.1:8001";
 
   async function handleLogin(role: LoginRole) {
     setLoadingRole(role);
@@ -39,11 +33,11 @@ const LoginBar: React.FC<LoginBarProps> = ({ currentRole, onAuthChange }) => {
     try {
       const creds = DEV_DEFAULTS[role];
 
-      const res = await fetch(`${baseUrl}/auth/login/json`, {
+      const res = await fetch(`${baseUrl}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: creds.username,
+          email: creds.email,
           password: creds.password,
         }),
       });
@@ -84,51 +78,43 @@ const LoginBar: React.FC<LoginBarProps> = ({ currentRole, onAuthChange }) => {
   return (
     <div className="flex flex-col items-end gap-1 text-xs">
       <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-slate-300">
+          Role:{" "}
+          <span className="font-semibold text-white">
+            {currentRole ?? "none"}
+          </span>
+        </span>
+
         <button
-          type="button"
+          className="rounded-md bg-slate-800 px-2 py-1 text-white hover:bg-slate-700 disabled:opacity-60"
+          disabled={isBusy}
           onClick={() => handleLogin("organizer")}
-          disabled={isBusy}
-          className="rounded-md border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] font-semibold hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+          title="Dev login as organizer"
         >
-          {loadingRole === "organizer" ? "Logging in…" : "Organizer login"}
+          {loadingRole === "organizer" ? "Logging in…" : "Login organizer"}
         </button>
 
         <button
-          type="button"
-          onClick={() => handleLogin("vendor")}
+          className="rounded-md bg-slate-800 px-2 py-1 text-white hover:bg-slate-700 disabled:opacity-60"
           disabled={isBusy}
-          className="rounded-md border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] font-semibold hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => handleLogin("vendor")}
+          title="Dev login as vendor"
         >
-          {loadingRole === "vendor" ? "Logging in…" : "Vendor login"}
+          {loadingRole === "vendor" ? "Logging in…" : "Login vendor"}
         </button>
 
-        {currentRole && (
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="rounded-md border border-red-500/60 bg-transparent px-2 py-1 text-[11px] font-semibold text-red-400 hover:bg-red-500/10"
-          >
-            Logout
-          </button>
-        )}
+        <button
+          className="rounded-md border border-slate-700 bg-transparent px-2 py-1 text-slate-200 hover:bg-slate-900 disabled:opacity-60"
+          disabled={isBusy}
+          onClick={handleLogout}
+        >
+          Logout
+        </button>
       </div>
 
-      {currentRole ? (
-        <div className="text-[11px] text-emerald-400">
-          Logged in as{" "}
-          <span className="font-semibold uppercase">{currentRole}</span>
-          {lastLogin && <> • {lastLogin}</>}
-        </div>
-      ) : (
-        <div className="text-[11px] text-slate-400">
-          Not logged in — using public API only
-        </div>
-      )}
-
+      {lastLogin && <div className="text-slate-400">Last: {lastLogin}</div>}
       {error && (
-        <div className="max-w-xs text-[11px] text-red-400">
-          {error.length > 160 ? `${error.slice(0, 160)}…` : error}
-        </div>
+        <div className="max-w-[520px] text-right text-red-300">{error}</div>
       )}
     </div>
   );
@@ -153,42 +139,34 @@ const DiagramAdmin: React.FC<DiagramAdminProps> = ({ eventId }) => {
     }
   });
 
-  const baseUrl =
-    (import.meta as any).env?.VITE_API_BASE_URL ?? "http://127.0.0.1:8011";
+  useEffect(() => {
+    try {
+      if (authToken) window.localStorage.setItem("apiToken", authToken);
+      else window.localStorage.removeItem("apiToken");
+    } catch {
+      // ignore
+    }
+  }, [authToken]);
 
   useEffect(() => {
     try {
-      if (authToken) {
-        window.localStorage.setItem("apiToken", authToken);
-      } else {
-        window.localStorage.removeItem("apiToken");
-      }
-
-      if (role) {
-        window.localStorage.setItem("apiRole", role);
-      } else {
-        window.localStorage.removeItem("apiRole");
-      }
+      if (role) window.localStorage.setItem("apiRole", role);
+      else window.localStorage.removeItem("apiRole");
     } catch {
-      // ignore storage issues in dev
+      // ignore
     }
-  }, [authToken, role]);
+  }, [role]);
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100">
-      {/* Top bar */}
-      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
+    <div className="min-h-screen bg-slate-950 text-white">
+      <header className="border-b border-slate-800 bg-slate-950/80">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 p-4">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">
-              Diagram Admin
-            </h1>
-            <p className="text-[11px] text-slate-400">
-              Event #{eventId}{" "}
-              {role && authToken
-                ? `— logged in as ${role}`
-                : "— login as organizer or vendor to test auth-protected APIs"}
-            </p>
+            <h1 className="text-lg font-semibold">Diagram Admin</h1>
+            <div className="text-xs text-slate-400">
+              Event #{eventId} · Token:{" "}
+              {authToken ? "present" : "(none — unauthenticated)"}
+            </div>
           </div>
 
           <LoginBar
@@ -199,42 +177,14 @@ const DiagramAdmin: React.FC<DiagramAdminProps> = ({ eventId }) => {
             }}
           />
         </div>
-
-        {/* tiny debug strip (E) */}
-        <div className="border-t border-slate-800 bg-slate-950/70">
-          <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-1.5 text-[10px] text-slate-400">
-            <div>
-              API base:{" "}
-              <span className="font-mono text-slate-300">{baseUrl}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span>
-                Role:{" "}
-                <span className="font-mono text-slate-200">
-                  {role ?? "none"}
-                </span>
-              </span>
-              <span>
-                Token:{" "}
-                <span className="font-mono text-slate-300">
-                  {authToken
-                    ? `…${authToken.slice(-12)}`
-                    : "(none — unauthenticated)"}
-                </span>
-              </span>
-            </div>
-          </div>
-        </div>
       </header>
 
-      {/* Main content */}
       <main className="mx-auto max-w-5xl p-4">
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          {/* Pass authToken + role to DiagramEditor */}
           <DiagramEditor
             eventId={eventId}
             authToken={authToken ?? undefined}
-            role={role}
+            role={role ?? undefined}
           />
         </div>
       </main>

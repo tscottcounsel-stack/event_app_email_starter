@@ -1,0 +1,1 @@
+psql -U postgres -h localhost -d eventdb < eventdb_map_editor_v1.sql

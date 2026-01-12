@@ -2,10 +2,10 @@
 """
 Compatibility shim.
 
-Some routers import `from app.database import get_db`.
-In this project, the DB utilities may live in `app.db`.
+Some modules import `from app.database import get_db` (and sometimes Base).
+In this project, DB utilities may live in `app.db`.
 
-This module bridges that gap so routers don't crash during import.
+This module bridges that gap so imports don't crash during import-time.
 """
 
 from __future__ import annotations
@@ -14,13 +14,13 @@ from typing import Generator
 
 try:
     # Preferred: use the project's existing db module if present
-    from app.db import SessionLocal, engine, get_db  # type: ignore
+    from app.db import Base, SessionLocal, engine, get_db  # type: ignore
 except Exception:
     # Fallback: minimal SQLAlchemy session setup
     import os
 
     from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session, sessionmaker
+    from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
     DATABASE_URL = os.getenv("DATABASE_URL", "")
     if not DATABASE_URL:
@@ -28,6 +28,8 @@ except Exception:
 
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    Base = declarative_base()
 
     def get_db() -> Generator[Session, None, None]:
         db: Session = SessionLocal()

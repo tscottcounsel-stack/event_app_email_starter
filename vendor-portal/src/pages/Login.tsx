@@ -1,66 +1,43 @@
-import { useState } from "react";
+// src/pages/Login.tsx
+import React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import Card from "@/components/Card";
-import { login } from "@/lib/auth";
 
 export default function Login() {
-  const [email, setEmail] = useState("");
-  const [pass, setPass] = useState("");
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
-  const nav = useNavigate();
+  const navigate = useNavigate();
   const [params] = useSearchParams();
-  const next = params.get("next") || "/vendor";
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setErr("");
-    setLoading(true);
-    try {
-      await login(email, pass);
-      nav(next, { replace: true });
-    } catch (e: any) {
-      setErr(e?.message || "Login failed");
-    } finally {
-      setLoading(false);
-    }
-  }
+  // Default to vendor login unless explicitly overridden
+  const next = params.get("next") || "/vendor/login";
 
   return (
-    <div className="mx-auto max-w-md">
-      <h1 className="mb-4 text-2xl font-bold">Login</h1>
-      <Card>
-        <form className="space-y-4" onSubmit={onSubmit}>
-          {err && <p className="rounded-md bg-red-50 p-2 text-red-700">{err}</p>}
-          <div>
-            <label className="mb-1 block text-sm">Email</label>
-            <input
-              type="email"
-              className="w-full rounded-lg border px-3 py-2 border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:border-gray-700 dark:bg-gray-950"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              autoFocus
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm">Password</label>
-            <input
-              type="password"
-              className="w-full rounded-lg border px-3 py-2 border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 dark:border-gray-700 dark:bg-gray-950"
-              value={pass}
-              onChange={(e) => setPass(e.target.value)}
-              required
-            />
-          </div>
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+      <div className="w-full max-w-md bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+        <h1 className="text-xl font-semibold text-slate-900">Login</h1>
+
+        <p className="text-sm text-slate-600">
+          Choose how you’d like to sign in.
+        </p>
+
+        <div className="flex flex-col gap-3">
           <button
-            disabled={loading}
-            className="w-full rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 active:scale-95 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-60"
+            onClick={() => navigate("/vendor/login")}
+            className="w-full rounded bg-emerald-600 text-white py-2 text-sm hover:bg-emerald-700"
           >
-            {loading ? "Signing in…" : "Sign in"}
+            Vendor login
           </button>
-        </form>
-      </Card>
+
+          <button
+            onClick={() => navigate("/organizer/login")}
+            className="w-full rounded border border-slate-300 bg-white py-2 text-sm hover:bg-slate-50"
+          >
+            Organizer login
+          </button>
+        </div>
+
+        <div className="text-xs text-slate-500">
+          Redirect target: <span className="font-mono">{next}</span>
+        </div>
+      </div>
     </div>
   );
 }

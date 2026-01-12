@@ -106,7 +106,7 @@ const OrganizerDashboard: React.FC = () => {
           const upcomingSorted = [...list]
             .map((ev) => ({ ev, d: parseEventDate(ev) }))
             .filter((x) => x.d && x.d >= now)
-            .sort((a, b) => (a.d!.getTime() - b.d!.getTime()));
+            .sort((a, b) => a.d!.getTime() - b.d!.getTime());
           if (upcomingSorted.length > 0) {
             initialId = upcomingSorted[0].ev.id;
           } else {
@@ -161,7 +161,10 @@ const OrganizerDashboard: React.FC = () => {
                 `Failed to load stats for event ${ev.id}`,
                 err
               );
-              return { id: ev.id, stats: null as OrganizerEventDashboardStats | null };
+              return {
+                id: ev.id,
+                stats: null as OrganizerEventDashboardStats | null,
+              };
             }
           })
         );
@@ -214,8 +217,7 @@ const OrganizerDashboard: React.FC = () => {
       const rejected = stats.rejected ?? 0;
       const due = stats.total_due_cents ?? 0;
       const paid = stats.total_paid_cents ?? 0;
-      const outstanding =
-        stats.outstanding_cents ?? (due - paid) ?? 0;
+      const outstanding = stats.outstanding_cents ?? due - paid ?? 0;
 
       acc.totalApplications += totalApps;
       acc.totalPending += pending;
@@ -234,7 +236,7 @@ const OrganizerDashboard: React.FC = () => {
     return [...events]
       .map((ev) => ({ ev, d: parseEventDate(ev) }))
       .filter((x) => x.d && x.d >= now)
-      .sort((a, b) => (a.d!.getTime() - b.d!.getTime()))
+      .sort((a, b) => a.d!.getTime() - b.d!.getTime())
       .slice(0, 3)
       .map((x) => x.ev);
   }, [events, now]);
@@ -245,6 +247,10 @@ const OrganizerDashboard: React.FC = () => {
 
   const handleManageEvents = () => {
     navigate("/organizer/events");
+  };
+
+  const handleCreateEvent = () => {
+    navigate("/organizer/events/new");
   };
 
   const handleViewApplications = (eventId: number) => {
@@ -290,6 +296,13 @@ const OrganizerDashboard: React.FC = () => {
             onClick={handleManageEvents}
           >
             Manage events
+          </button>
+          <button
+            type="button"
+            className="border px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm text-white"
+            onClick={handleCreateEvent}
+          >
+            Create event
           </button>
         </div>
       </header>
@@ -510,7 +523,7 @@ const OrganizerDashboard: React.FC = () => {
                 const due = stats?.total_due_cents ?? 0;
                 const paid = stats?.total_paid_cents ?? 0;
                 const outstanding =
-                  stats?.outstanding_cents ?? (due - paid) ?? 0;
+                  stats?.outstanding_cents ?? due - paid ?? 0;
 
                 const isFocused = focusedEventId === ev.id;
 

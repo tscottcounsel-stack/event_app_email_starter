@@ -1,212 +1,183 @@
-// src/pages/OrganizerCreateEventPage.tsx
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-  createOrganizerEvent,
-  type EventCreatePayload,
-} from "../api/organizerEvents";
+import { Link, useNavigate } from "react-router-dom";
+import { apiFetch } from "../api";
 
-const OrganizerCreateEventPage: React.FC = () => {
-  const navigate = useNavigate();
+type CreatePayload = {
+  title: string;
+  description?: string | null;
+  date: string;
+  location?: string | null;
+  city?: string | null;
 
-  const [form, setForm] = useState<EventCreatePayload>({
-    title: "",
-    description: "",
-    date: "",
-    location: "",
-    city: "",
-    kind: "",
-  });
+  // contract-safe defaults
+  kind?: string | null;
+  business_only?: boolean;
+  badge_required?: boolean;
+
+  // keep present but default to 0; capacity UI comes later under your contract
+  max_vendor_slots?: number;
+};
+
+export default function OrganizerCreateEventPage() {
+  const nav = useNavigate();
+
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState("");
+  const [location, setLocation] = useState("");
+  const [city, setCity] = useState("");
+  const [description, setDescription] = useState("");
 
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  function handleChange(
-    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
-  ) {
-    const { name, value } = e.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
+    setErr(null);
 
-    if (!form.title.trim()) {
-      setError("Title is required.");
+    if (!title.trim()) {
+      setErr("Title is required.");
+      return;
+    }
+    if (!date) {
+      setErr("Date is required.");
       return;
     }
 
+    const payload: CreatePayload = {
+      title: title.trim(),
+      date,
+      location: location.trim() || null,
+      city: city.trim() || null,
+      description: description.trim() || null,
+
+      // keep stable defaults
+      kind: "general",
+      business_only: false,
+      badge_required: false,
+      max_vendor_slots: 0,
+    };
+
     setSaving(true);
     try {
-      const payload: EventCreatePayload = {
-        title: form.title.trim(),
-        description: form.description?.trim() || undefined,
-        date: form.date || undefined, // "YYYY-MM-DD"
-        location: form.location?.trim() || undefined,
-        city: form.city?.trim() || undefined,
-        kind: form.kind?.trim() || undefined,
-      };
-
-      const created = await createOrganizerEvent(payload);
-
-      // ✅ After creation, jump straight to the map editor
-      navigate(`/organizer/events/${created.id}/diagram/edit`, {
-        replace: true,
+      const created = await apiFetch("/organizer/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       });
-    } catch (err) {
-      console.error("[OrganizerCreateEventPage] create failed", err);
-      setError("Could not create event. Please try again.");
+
+      const id = (created as any)?.id;
+      if (!id) {
+        setErr("Event created, but response did not include an id.");
+        setSaving(false);
+        return;
+      }
+
+      // Go straight into the workflow that matters
+      nav(`/organizer/events/${id}/diagram/map-editor`, { replace: true });
+    } catch (e2: any) {
+      const msg = e2?.message || "Unknown error";
+      const status = e2?.status || "?";
+      setErr(`Failed to create event (${status}). ${msg}`);
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900">
-            Create a new event
-          </h1>
-          <p className="text-sm text-slate-600">
-            Set up the basics now. After creating the event, you&apos;ll go
-            straight to the map editor to lay out your booths.
-          </p>
-        </div>
+    <div className="min-h-screen bg-gradient-to-b from-slate-950 to-slate-900 text-white">
+      <div className="mx-auto max-w-3xl px-6 py-10">
+        <Link to="/organizer/events" className="text-sm text-slate-200 hover:underline">
+          ← Back to events
+        </Link>
 
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-          onClick={() => navigate("/organizer/events")}
-        >
-          Back to events
-        </button>
-      </div>
+        <h1 className="mt-6 text-3xl font-semibold">Create a new event</h1>
+        <p className="mt-2 text-slate-300">
+          Start with the basics. After you create the event, you’ll be taken to the Map Editor.
+        </p>
 
-      <form
-        onSubmit={handleSubmit}
-        className="space-y-5 rounded-lg border bg-white p-5 shadow-sm"
-      >
-        {error && (
-          <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-            {error}
+        {err && (
+          <div className="mt-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-200">
+            {err}
           </div>
         )}
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-slate-700">
-              Title<span className="text-rose-500">*</span>
-            </label>
+        <form onSubmit={onSubmit} className="mt-6 space-y-5 rounded-xl bg-white p-6 text-black">
+          <div>
+            <label className="block text-sm font-semibold">Title *</label>
             <input
-              type="text"
-              name="title"
-              value={form.title}
-              onChange={handleChange}
-              className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-              placeholder="Test Festival"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
+              placeholder="e.g., Spring Festival"
               required
+              disabled={saving}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700">
-              Date
-            </label>
+            <label className="block text-sm font-semibold">Date *</label>
             <input
               type="date"
-              name="date"
-              value={form.date}
-              onChange={handleChange}
-              className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700">
-              City
-            </label>
-            <input
-              type="text"
-              name="city"
-              value={form.city}
-              onChange={handleChange}
-              className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-              placeholder="Atlanta"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700">
-              Location / venue
-            </label>
-            <input
-              type="text"
-              name="location"
-              value={form.location}
-              onChange={handleChange}
-              className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-              placeholder="Downtown Park"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-700">
-              Kind
-            </label>
-            <input
-              type="text"
-              name="kind"
-              value={form.kind}
-              onChange={handleChange}
-              className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-              placeholder="Festival, market, trade show…"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-slate-700">
-            Description
-          </label>
-          <textarea
-            name="description"
-            value={form.description}
-            onChange={handleChange}
-            rows={4}
-            className="mt-1 block w-full rounded-md border-slate-300 text-sm shadow-sm focus:border-emerald-500 focus:ring-emerald-500"
-            placeholder="Short description of your event…"
-          />
-        </div>
-
-        <div className="flex items-center justify-between gap-3 pt-2">
-          <p className="text-xs text-slate-500">
-            After you create this event, you&apos;ll immediately lay out booths
-            on the map.
-          </p>
-
-          <div className="flex gap-2">
-            <button
-              type="button"
-              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-              onClick={() => navigate("/organizer/events")}
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
+              required
               disabled={saving}
-            >
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold">Location</label>
+            <input
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
+              placeholder="e.g., Piedmont Park"
+              disabled={saving}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold">City</label>
+            <input
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              className="mt-2 w-full rounded border px-3 py-2"
+              placeholder="e.g., Atlanta"
+              disabled={saving}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-2 h-32 w-full rounded border px-3 py-2"
+              placeholder="Optional details…"
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex justify-end gap-3">
+            <Link to="/organizer/events" className="rounded border px-5 py-2">
               Cancel
-            </button>
+            </Link>
+
             <button
               type="submit"
-              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+              className="rounded bg-indigo-600 px-6 py-2 text-white disabled:opacity-60"
               disabled={saving}
             >
               {saving ? "Creating…" : "Create event"}
             </button>
           </div>
-        </div>
-      </form>
+
+          <div className="pt-2 text-xs text-slate-500">
+            Note: Capacity planning and category-by-category vendor counts come next (per your capacity contract).
+          </div>
+        </form>
+      </div>
     </div>
   );
-};
-
-export default OrganizerCreateEventPage;
+}

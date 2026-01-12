@@ -1,90 +1,128 @@
-# app/routers/applications.py
+﻿# app/routers/applications.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, field_validator
+from sqlalchemy import MetaData, Table, select, update
+from sqlalchemy.orm import Session
+
+from app.db import get_db
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
-_APPLICATIONS: Dict[int, Dict[str, Any]] = {}
-_NEXT_ID: int = 1
+
+def _reflect_applications(db: Session) -> Table:
+    md = MetaData()
+    return Table("applications", md, autoload_with=db.get_bind())
 
 
-class ApplicationCreate(BaseModel):
+def _col(t: Table, name: str):
+    return t.c.get(name)
+
+
+class ApplicationsListResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
-    event_id: Optional[int] = None
-    vendor_id: Optional[int] = None
-    requested_slots: Optional[int] = Field(default=None, ge=0)
-    notes: Optional[str] = None
-    status: Optional[str] = None
+    items: list[dict[str, Any]]
+    limit: int
+    offset: int
 
 
 class ApplicationPatch(BaseModel):
     model_config = ConfigDict(extra="allow")
-    event_id: Optional[int] = None
-    vendor_id: Optional[int] = None
-    requested_slots: Optional[int] = Field(default=None, ge=0)
-    notes: Optional[str] = None
+
     status: Optional[str] = None
-    assigned_slot_id: Optional[int] = Field(default=None, ge=1)
+    notes: Optional[str] = None
 
+    # Assign/reassign: int >= 1
+    # Unassign: null
+    assigned_slot_id: Optional[int] = None
 
-def _get_or_404(application_id: int) -> Dict[str, Any]:
-    app = _APPLICATIONS.get(application_id)
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
-    return app
+    @field_validator("assigned_slot_id")
+    @classmethod
+    def _validate_assigned_slot_id(cls, v: Optional[int]):
+        if v is None:
+            return v
+        if int(v) < 1:
+            raise ValueError("assigned_slot_id must be >= 1 or null")
+        return int(v)
 
 
 @router.get("/diag/ping")
-def applications_diag_ping():
+def ping():
     return {"ping": "pong"}
 
 
-@router.get("")
+@router.get("", response_model=ApplicationsListResponse)
 def list_applications(
-    event_id: Optional[int] = Query(None),
-    vendor_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
-    items = list(_APPLICATIONS.values())
-    if event_id is not None:
-        items = [a for a in items if a.get("event_id") == event_id]
-    if vendor_id is not None:
-        items = [a for a in items if a.get("vendor_id") == vendor_id]
-    return items[: int(limit)]
-
-
-@router.post("", status_code=201)
-def create_application(payload: ApplicationCreate):
-    global _NEXT_ID
-    app_id = _NEXT_ID
-    _NEXT_ID += 1
-    data = {"id": app_id, **payload.model_dump(exclude_none=True)}
-    _APPLICATIONS[app_id] = data
-    return data
-
-
-@router.get("/id/{application_id}")
-def get_application_by_id(application_id: int):
-    return _get_or_404(application_id)
+    t = _reflect_applications(db)
+    c_id = _col(t, "id")
+    stmt = (
+        select(t)
+        .order_by(c_id.desc() if c_id is not None else list(t.c)[0])
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = db.execute(stmt).mappings().all()
+    return {"items": [dict(r) for r in rows], "limit": limit, "offset": offset}
 
 
 @router.patch("/id/{application_id}")
-def patch_application_by_id(application_id: int, patch: ApplicationPatch):
-    app = _get_or_404(application_id)
-    updates = patch.model_dump(exclude_none=True)
-    app.update(updates)
-    return app
+def patch_application_by_id(
+    application_id: int,
+    payload: ApplicationPatch,
+    db: Session = Depends(get_db),
+):
+    t = _reflect_applications(db)
+    c_id = _col(t, "id")
+    if c_id is None:
+        raise HTTPException(500, "applications table missing id column")
 
+    values: dict[str, Any] = {}
 
-@router.get("/{application_id}")
-def get_application_alias(application_id: int):
-    return get_application_by_id(application_id)
+    if payload.status is not None and _col(t, "status") is not None:
+        values["status"] = str(payload.status)
+
+    if payload.notes is not None and _col(t, "notes") is not None:
+        values["notes"] = payload.notes
+
+    # IMPORTANT: allow explicit null for unassign
+    if "assigned_slot_id" in payload.model_fields_set:
+        if _col(t, "assigned_slot_id") is None:
+            raise HTTPException(
+                500, "applications table missing assigned_slot_id column"
+            )
+        values["assigned_slot_id"] = (
+            None if payload.assigned_slot_id is None else int(payload.assigned_slot_id)
+        )
+
+    if not values:
+        row = db.execute(select(t).where(c_id == application_id)).mappings().first()
+        if not row:
+            raise HTTPException(404, "Application not found")
+        return dict(row)
+
+    stmt = update(t).where(c_id == application_id).values(**values).returning(t)
+    try:
+        row = db.execute(stmt).mappings().first()
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        raise HTTPException(500, f"Update failed: {ex}")
+
+    if not row:
+        raise HTTPException(404, "Application not found")
+
+    return dict(row)
 
 
 @router.patch("/{application_id}")
-def patch_application_alias(application_id: int, patch: ApplicationPatch):
-    return patch_application_by_id(application_id, patch)
+def patch_application_alias(
+    application_id: int, payload: ApplicationPatch, db: Session = Depends(get_db)
+):
+    return patch_application_by_id(application_id, payload, db)

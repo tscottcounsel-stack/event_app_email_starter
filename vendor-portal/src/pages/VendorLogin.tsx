@@ -1,107 +1,81 @@
-// src/pages/VendorLoginPage.tsx
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { apiPost, setAuthTokens, clearAuthTokens } from "../api";
+import React from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { ApiError, login } from "../api";
 
-type LoginResponse = {
-  access_token: string;
-  token_type: string;
-};
-
-const VendorLoginPage: React.FC = () => {
+export default function VendorLogin() {
   const navigate = useNavigate();
+  const [email, setEmail] = React.useState("vendor@example.com");
+  const [password, setPassword] = React.useState("password");
+  const [error, setError] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSubmitting(true);
+    setBusy(true);
     setError(null);
-
     try {
-      // Backend expects "username" for email
-      const body = {
-        username: email.trim(),
-        password,
-      };
-
-      const res = await apiPost<LoginResponse>("/auth/login/json", body);
-
-      // Store token with role = "vendor"
-      setAuthTokens(res.access_token, "vendor");
-
-      // Go to vendor events list
-      navigate("/vendor/events");
+      await login(email, password);
+      navigate("/vendor/events", { replace: true });
     } catch (err: any) {
-      console.error("Vendor login failed", err);
-      clearAuthTokens();
-      setError(err?.message ?? "Login failed");
+      setError(err instanceof ApiError ? err.message : "Login failed.");
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-lg p-6 space-y-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Vendor Login</h1>
-          <p className="text-sm text-gray-600">
-            Sign in to view and apply for events.
-          </p>
-        </div>
+    <div className="min-h-[calc(100vh-64px)] p-6 flex items-center justify-center">
+      <div className="w-full max-w-md rounded-2xl border bg-white p-6">
+        <div className="text-xl font-semibold">Vendor Login</div>
+        <div className="mt-1 text-sm text-slate-600">Access events and public diagrams.</div>
 
         {error && (
-          <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-gray-700">
-              Email
-            </label>
+        <form onSubmit={onSubmit} className="mt-5 space-y-4">
+          <div>
+            <div className="text-sm font-medium">Email</div>
             <input
-              type="email"
-              autoComplete="username"
-              className="border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:border-blue-500"
+              className="mt-1 w-full rounded-lg border px-3 py-2"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="vendor@example.com"
-              required
+              autoComplete="email"
             />
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-gray-700">
-              Password
-            </label>
+          <div>
+            <div className="text-sm font-medium">Password</div>
             <input
-              type="password"
-              autoComplete="current-password"
-              className="border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:border-blue-500"
+              className="mt-1 w-full rounded-lg border px-3 py-2"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
+              type="password"
+              autoComplete="current-password"
             />
           </div>
 
           <button
-            type="submit"
-            disabled={submitting}
-            className="w-full mt-2 rounded-lg bg-blue-600 text-white text-sm font-medium py-2.5 hover:bg-blue-700 disabled:opacity-60"
+            className="w-full rounded-lg bg-blue-600 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+            disabled={busy}
           >
-            {submitting ? "Signing in…" : "Sign in as Vendor"}
+            {busy ? "Signing in..." : "Sign in"}
           </button>
         </form>
+
+        <div className="mt-4 flex items-center justify-between text-sm">
+          <Link to="/organizer/login" className="text-blue-700 hover:underline">
+            Organizer Login
+          </Link>
+          <Link to="/register" className="text-blue-700 hover:underline">
+            Create account
+          </Link>
+        </div>
+
+        <div className="mt-4 text-xs text-slate-500">Auth endpoint: POST /login</div>
       </div>
     </div>
   );
-};
-
-export default VendorLoginPage;
+}
