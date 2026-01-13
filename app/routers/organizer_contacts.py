@@ -1,9 +1,10 @@
 # app/routers/organizer_contacts.py
 #
 # Organizer Contacts CRM (v1)
-# - GET  /organizer/contacts           -> list contacts for current organizer
-# - POST /organizer/contacts           -> add a single contact
-# - POST /organizer/contacts/import    -> bulk import contacts
+# - GET   /organizer/contacts           -> list contacts for current organizer
+# - POST  /organizer/contacts           -> add a single contact
+# - POST  /organizer/contacts/import    -> bulk import contacts
+# - PATCH /organizer/contacts/{id}      -> update a contact (partial)
 #
 # Fields:
 #   name, email, phone, company, notes, tags (jsonb array of strings)
@@ -24,6 +25,9 @@ from app.database import get_db
 router = APIRouter(prefix="/organizer", tags=["organizer_contacts"])
 
 
+# -----------------------------
+# Models
+# -----------------------------
 class OrganizerContactBase(BaseModel):
     name: str = Field(..., description="Person or company contact name")
     email: Optional[str] = None
@@ -46,6 +50,17 @@ class OrganizerContactCreate(OrganizerContactBase):
     pass
 
 
+class OrganizerContactUpdate(BaseModel):
+    """PATCH payload. Omitted fields are unchanged; provided null clears."""
+
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
 class OrganizerContactOut(OrganizerContactBase):
     id: int
     organizer_id: int
@@ -55,6 +70,9 @@ class OrganizerContactsImportRequest(BaseModel):
     contacts: List[OrganizerContactCreate]
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def normalize_tags(raw) -> list[str]:
     """
     Accept either a list of strings or a comma-separated string.
@@ -78,6 +96,9 @@ def normalize_tags(raw) -> list[str]:
     return cleaned
 
 
+# -----------------------------
+# SQL Templates
+# -----------------------------
 INSERT_CONTACT_SQL = text(
     """
     INSERT INTO organizer_contacts (
@@ -111,50 +132,76 @@ INSERT_CONTACT_SQL = text(
 ).bindparams(bindparam("tags", type_=JSONB))
 
 
+SELECT_CONTACTS_SQL = text(
+    """
+    SELECT
+        id,
+        organizer_id,
+        name,
+        email,
+        phone,
+        company,
+        notes,
+        COALESCE(tags, '[]'::jsonb) AS tags
+    FROM organizer_contacts
+    WHERE organizer_id = :organizer_id
+    ORDER BY id DESC
+    """
+)
+
+SELECT_ONE_CONTACT_SQL = text(
+    """
+    SELECT
+        id,
+        organizer_id,
+        name,
+        email,
+        phone,
+        company,
+        notes,
+        COALESCE(tags, '[]'::jsonb) AS tags
+    FROM organizer_contacts
+    WHERE id = :id AND organizer_id = :organizer_id
+    """
+)
+
+
+# -----------------------------
+# Routes
+# -----------------------------
 @router.get("/contacts")
 def list_organizer_contacts(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    sql = text(
-        """
-        SELECT
-            id,
-            organizer_id,
-            name,
-            email,
-            phone,
-            company,
-            notes,
-            COALESCE(tags, '[]'::jsonb) AS tags
-        FROM organizer_contacts
-        WHERE organizer_id = :organizer_id
-        ORDER BY id DESC
-        """
-    )
-
     try:
-        rows = db.execute(sql, {"organizer_id": current_user.id}).mappings().all()
+        rows = (
+            db.execute(
+                SELECT_CONTACTS_SQL,
+                {"organizer_id": current_user.id},
+            )
+            .mappings()
+            .all()
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to load organizer contacts: {exc.__class__.__name__}",
         ) from exc
 
-    contacts: list[OrganizerContactOut] = []
-    for row in rows:
-        contacts.append(
-            OrganizerContactOut(
-                id=row["id"],
-                organizer_id=row["organizer_id"],
-                name=row["name"],
-                email=row["email"],
-                phone=row["phone"],
-                company=row["company"],
-                notes=row["notes"],
-                tags=row["tags"] or [],
-            )
+    contacts: list[OrganizerContactOut] = [
+        OrganizerContactOut(
+            id=row["id"],
+            organizer_id=row["organizer_id"],
+            name=row["name"],
+            email=row["email"],
+            phone=row["phone"],
+            company=row["company"],
+            notes=row["notes"],
+            tags=row["tags"] or [],
         )
+        for row in rows
+    ]
 
     return {"value": contacts, "Count": len(contacts)}
 
@@ -168,8 +215,6 @@ def create_organizer_contact(
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=400, detail="Name is required.")
 
-    clean_tags = normalize_tags(payload.tags)
-
     params = {
         "organizer_id": current_user.id,
         "name": payload.name.strip(),
@@ -177,7 +222,7 @@ def create_organizer_contact(
         "phone": payload.phone,
         "company": payload.company,
         "notes": payload.notes,
-        "tags": clean_tags,
+        "tags": normalize_tags(payload.tags),
     }
 
     try:
@@ -202,6 +247,111 @@ def create_organizer_contact(
     )
 
 
+@router.patch("/contacts/{contact_id}", response_model=OrganizerContactOut)
+def update_organizer_contact(
+    contact_id: int,
+    payload: OrganizerContactUpdate,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Pydantic v2 vs v1 compatibility
+    if hasattr(payload, "model_dump"):
+        data = payload.model_dump(exclude_unset=True)
+    else:
+        data = payload.dict(exclude_unset=True)
+
+    # If empty PATCH, just return current row (handy for UI refresh)
+    if not data:
+        row = (
+            db.execute(
+                SELECT_ONE_CONTACT_SQL,
+                {"id": contact_id, "organizer_id": current_user.id},
+            )
+            .mappings()
+            .first()
+        )
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Contact not found")
+
+        return OrganizerContactOut(
+            id=row["id"],
+            organizer_id=row["organizer_id"],
+            name=row["name"],
+            email=row["email"],
+            phone=row["phone"],
+            company=row["company"],
+            notes=row["notes"],
+            tags=row["tags"] or [],
+        )
+
+    # Validate name if provided
+    if "name" in data and (data["name"] is None or str(data["name"]).strip() == ""):
+        raise HTTPException(status_code=422, detail="name cannot be blank")
+
+    # Normalize tags if provided (allow clearing via null)
+    if "tags" in data:
+        raw = data["tags"]
+        data["tags"] = normalize_tags(raw)  # will return [] if None or empty
+
+    # Build dynamic SET clause
+    set_clauses: list[str] = []
+    params: dict = {"id": contact_id, "organizer_id": current_user.id}
+
+    for k, v in data.items():
+        set_clauses.append(f"{k} = :{k}")
+        params[k] = v
+
+    sql = text(
+        f"""
+        UPDATE organizer_contacts
+        SET {", ".join(set_clauses)}
+        WHERE id = :id AND organizer_id = :organizer_id
+        RETURNING
+            id,
+            organizer_id,
+            name,
+            email,
+            phone,
+            company,
+            notes,
+            COALESCE(tags, '[]'::jsonb) AS tags
+        """
+    )
+
+    # ✅ Critical: If tags is being updated, force JSONB binding to prevent psycopg2 ProgrammingError
+    if "tags" in params:
+        sql = sql.bindparams(bindparam("tags", type_=JSONB))
+
+    try:
+        row = db.execute(sql, params).mappings().first()
+        if not row:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Contact not found")
+        db.commit()
+
+        return OrganizerContactOut(
+            id=row["id"],
+            organizer_id=row["organizer_id"],
+            name=row["name"],
+            email=row["email"],
+            phone=row["phone"],
+            company=row["company"],
+            notes=row["notes"],
+            tags=row["tags"] or [],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        # keep the message stable for the UI while still indicating the class
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update organizer contact: {exc.__class__.__name__}",
+        ) from exc
+
+
 @router.post("/contacts/import")
 def import_organizer_contacts(
     payload: OrganizerContactsImportRequest,
@@ -218,8 +368,6 @@ def import_organizer_contacts(
             if not contact.name or not contact.name.strip():
                 continue
 
-            clean_tags = normalize_tags(contact.tags)
-
             params = {
                 "organizer_id": current_user.id,
                 "name": contact.name.strip(),
@@ -227,7 +375,7 @@ def import_organizer_contacts(
                 "phone": contact.phone,
                 "company": contact.company,
                 "notes": contact.notes,
-                "tags": clean_tags,
+                "tags": normalize_tags(contact.tags),
             }
 
             row = db.execute(INSERT_CONTACT_SQL, params).mappings().one()

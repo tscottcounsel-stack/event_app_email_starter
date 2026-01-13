@@ -225,6 +225,32 @@ export async function saveOrganizerProfile(payload: any, token?: string | null) 
   return apiPatch<any>(`/organizer/profile`, payload, token);
 }
 
+export async function updateOrganizerContact(
+  contactId: number,
+  payload: any,
+  token?: string | null
+) {
+  const safe = { ...(payload || {}) };
+  safe.name = String(safe.name || "").trim();
+  safe.email = safe.email ? String(safe.email).trim() : null;
+  safe.phone = safe.phone ? String(safe.phone).trim() : null;
+  safe.company = safe.company ? String(safe.company).trim() : null;
+  safe.notes = safe.notes ? String(safe.notes).trim() : null;
+
+  // normalize tags the same way create does
+  // if your file already has normalizeTags(), reuse it; if not, keep this inline:
+  const normalizeTags = (input: any): string[] => {
+    if (input == null) return [];
+    if (Array.isArray(input)) return input.map((x) => String(x).trim()).filter(Boolean);
+    return String(input).split(",").map((s) => s.trim()).filter(Boolean);
+  };
+
+  safe.tags = normalizeTags(safe.tags);
+
+  // PATCH is safest for partial updates; switch to apiPut if backend demands PUT.
+  return apiPatch<any>(`/organizer/contacts/${contactId}`, safe, token);
+}
+
 // --- vendor diagram helper ---
 export async function vendorGetEventDiagram(eventId: number, token?: string | null) {
   try {
