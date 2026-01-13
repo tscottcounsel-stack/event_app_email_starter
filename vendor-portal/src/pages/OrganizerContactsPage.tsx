@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ApiError,
@@ -36,8 +36,13 @@ function errText(e: any): string {
 export default function OrganizerContactsPage() {
   const [items, setItems] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const nameRef = useRef<HTMLInputElement | null>(null);
 
   const [form, setForm] = useState({
     name: "",
@@ -54,6 +59,7 @@ export default function OrganizerContactsPage() {
     setLoading(true);
     setError(null);
     setBanner(null);
+    // keep success visible unless user refreshes manually or saves again
 
     const token = getAccessToken();
     if (!token) {
@@ -82,6 +88,7 @@ export default function OrganizerContactsPage() {
   async function onCreate() {
     setError(null);
     setBanner(null);
+    setSuccess(null);
 
     const token = getAccessToken();
     if (!token) {
@@ -94,16 +101,24 @@ export default function OrganizerContactsPage() {
       email: form.email.trim() || null,
       phone: form.phone.trim() || null,
       company: form.company.trim() || null,
-      tags: form.tags, // api.ts will normalize to string[]
+      tags: form.tags, // api.ts normalizes this into string[]
       notes: form.notes.trim() || null,
     };
 
     try {
+      setSaving(true);
       await createOrganizerContact(payload, token);
+
       setForm({ name: "", email: "", phone: "", company: "", tags: "", notes: "" });
+      setSuccess("Contact saved.");
       await load();
+
+      // re-focus for rapid entry
+      setTimeout(() => nameRef.current?.focus(), 50);
     } catch (e: any) {
       setError(errText(e));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -136,6 +151,13 @@ export default function OrganizerContactsPage() {
         </div>
       )}
 
+      {success && (
+        <div className="mt-4 rounded-xl border border-green-300 bg-green-50 p-4">
+          <div className="font-semibold">Success</div>
+          <div className="text-sm">{success}</div>
+        </div>
+      )}
+
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Form */}
         <div className="rounded-2xl border p-4">
@@ -147,6 +169,7 @@ export default function OrganizerContactsPage() {
                 Name
               </label>
               <input
+                ref={nameRef}
                 id="contact_name"
                 name="name"
                 className="mt-1 w-full rounded-lg border px-3 py-2"
@@ -224,9 +247,9 @@ export default function OrganizerContactsPage() {
             <button
               className="mt-2 rounded-xl border px-4 py-2 font-medium disabled:opacity-50"
               onClick={onCreate}
-              disabled={!canSave || loading}
+              disabled={!canSave || saving}
             >
-              {loading ? "Saving..." : "Save contact"}
+              {saving ? "Saving..." : "Save contact"}
             </button>
           </div>
         </div>
@@ -235,8 +258,16 @@ export default function OrganizerContactsPage() {
         <div className="rounded-2xl border p-4">
           <div className="flex items-center justify-between">
             <div className="text-lg font-semibold">Contacts ({items.length})</div>
-            <button className="text-sm underline" onClick={load} disabled={loading}>
-              Refresh
+            <button
+              className="text-sm underline disabled:opacity-50"
+              onClick={() => {
+                setSuccess(null);
+                load();
+              }}
+              disabled={loading}
+              title={loading ? "Refreshing..." : "Refresh"}
+            >
+              {loading ? "Refreshing..." : "Refresh"}
             </button>
           </div>
 
@@ -246,13 +277,18 @@ export default function OrganizerContactsPage() {
             ) : (
               <ul className="space-y-3">
                 {items.map((c) => (
-                  <li key={c.id ?? `${c.name}-${c.email}-${Math.random()}`} className="rounded-xl border p-3">
+                  <li
+                    key={c.id ?? `${c.name || ""}-${c.email || ""}-${Math.random()}`}
+                    className="rounded-xl border p-3"
+                  >
                     <div className="font-semibold">{c.name || "(no name)"}</div>
                     <div className="text-sm opacity-80">
                       {c.email ? <div>{c.email}</div> : null}
                       {c.phone ? <div>{c.phone}</div> : null}
                       {c.company ? <div>{c.company}</div> : null}
-                      {c.tags && c.tags.length ? <div>Tags: {c.tags.join(", ")}</div> : null}
+                      {c.tags && c.tags.length ? (
+                        <div>Tags: {c.tags.join(", ")}</div>
+                      ) : null}
                       {c.notes ? <div className="mt-1">{c.notes}</div> : null}
                     </div>
                   </li>
