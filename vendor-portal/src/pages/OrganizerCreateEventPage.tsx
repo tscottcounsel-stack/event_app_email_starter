@@ -1,11 +1,12 @@
-import React, { useState } from "react";
+// src/pages/OrganizerCreateEventPage.tsx
+import React, { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiFetch } from "../api";
+import { apiPost } from "../api";
 
 type CreatePayload = {
   title: string;
   description?: string | null;
-  date: string;
+  date: string; // backend expects "date" today
   location?: string | null;
   city?: string | null;
 
@@ -13,44 +14,99 @@ type CreatePayload = {
   kind?: string | null;
   business_only?: boolean;
   badge_required?: boolean;
-
-  // keep present but default to 0; capacity UI comes later under your contract
   max_vendor_slots?: number;
 };
+
+type TemplateKey = "tech" | "art" | "food" | "music" | "custom";
+
+const TEMPLATES: Array<{
+  key: TemplateKey;
+  title: string;
+  subtitle: string;
+  meta: string;
+}> = [
+  { key: "tech", title: "Tech Conference", subtitle: "Technology exhibitions and trade shows", meta: "3 booth types • 2 required docs" },
+  { key: "art", title: "Art Fair", subtitle: "Art shows, craft fairs, and maker markets", meta: "2 booth types • 2 required docs" },
+  { key: "food", title: "Food Festival", subtitle: "Food festivals with health & safety requirements", meta: "2 booth types • 2 required docs" },
+  { key: "music", title: "Music Festival", subtitle: "Festivals with merchandise and food vendors", meta: "2 booth types • 2 required docs" },
+];
+
+function StepPill(props: { n: number; label: string; active: boolean; done: boolean }) {
+  const { n, label, active, done } = props;
+  return (
+    <div className="flex items-center gap-3">
+      <div
+        className={[
+          "h-8 w-8 rounded-full flex items-center justify-center text-sm font-semibold",
+          done ? "bg-indigo-600 text-white" : active ? "bg-indigo-600 text-white" : "bg-slate-200 text-slate-700",
+        ].join(" ")}
+      >
+        {n}
+      </div>
+      <div className={active ? "font-semibold text-slate-900" : "text-slate-600"}>{label}</div>
+    </div>
+  );
+}
+
+function InputLabel(props: { label: string; required?: boolean }) {
+  return (
+    <div className="text-sm font-semibold text-slate-800">
+      {props.label} {props.required ? <span className="text-red-500">*</span> : null}
+    </div>
+  );
+}
 
 export default function OrganizerCreateEventPage() {
   const nav = useNavigate();
 
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+
+  // Step 1 fields (matches your backend contract today)
   const [title, setTitle] = useState("");
-  const [date, setDate] = useState("");
-  const [location, setLocation] = useState("");
-  const [city, setCity] = useState("");
   const [description, setDescription] = useState("");
+  const [dateStart, setDateStart] = useState("");
+  const [dateEnd, setDateEnd] = useState(""); // UI-only for now
+  const [category, setCategory] = useState(""); // UI-only for now
+
+  const [venueName, setVenueName] = useState(""); // UI-only
+  const [street, setStreet] = useState(""); // UI-only
+  const [city, setCity] = useState("");
+  const [stateProv, setStateProv] = useState(""); // UI-only
+  const [zip, setZip] = useState(""); // UI-only
+
+  const [expectedAttendees, setExpectedAttendees] = useState(""); // UI-only
+  const [setupTime, setSetupTime] = useState(""); // UI-only
+  const [notes, setNotes] = useState(""); // UI-only
+
+  const [template, setTemplate] = useState<TemplateKey>("tech");
 
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  const [createdEventId, setCreatedEventId] = useState<number | null>(null);
+
+  const venueDisplay = useMemo(() => {
+    const pieces = [venueName.trim(), street.trim()].filter(Boolean);
+    return pieces.length ? pieces.join(", ") : "";
+  }, [venueName, street]);
+
+  async function createEventAndContinue() {
     setErr(null);
 
-    if (!title.trim()) {
-      setErr("Title is required.");
-      return;
-    }
-    if (!date) {
-      setErr("Date is required.");
-      return;
-    }
+    const t = title.trim();
+    if (!t) return setErr("Event name is required.");
+    if (!dateStart) return setErr("Start date is required.");
 
+    // backend only takes one "date" currently — use start date.
+    // keep location/city stable with your working list display.
     const payload: CreatePayload = {
-      title: title.trim(),
-      date,
-      location: location.trim() || null,
-      city: city.trim() || null,
+      title: t,
       description: description.trim() || null,
+      date: dateStart,
+      location: (venueDisplay || "").trim() || null,
+      city: city.trim() || null,
 
-      // keep stable defaults
+      // contract-safe defaults
       kind: "general",
       business_only: false,
       badge_required: false,
@@ -59,125 +115,400 @@ export default function OrganizerCreateEventPage() {
 
     setSaving(true);
     try {
-      const created = await apiFetch("/organizer/events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      const id = (created as any)?.id;
-      if (!id) {
+      const created = await apiPost<any>("/organizer/events", payload);
+      const id = Number(created?.id);
+      if (!Number.isFinite(id)) {
         setErr("Event created, but response did not include an id.");
-        setSaving(false);
         return;
       }
-
-      // Go straight into the workflow that matters
-      nav(`/organizer/events/${id}/diagram/map-editor`, { replace: true });
-    } catch (e2: any) {
-      const msg = e2?.message || "Unknown error";
-      const status = e2?.status || "?";
-      setErr(`Failed to create event (${status}). ${msg}`);
+      setCreatedEventId(id);
+      setStep(2);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to create event.");
     } finally {
       setSaving(false);
     }
   }
 
+  function goToMapEditor() {
+    if (!createdEventId) return;
+    nav(`/organizer/events/${createdEventId}/map`);
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 to-slate-900 text-white">
-      <div className="mx-auto max-w-3xl px-6 py-10">
-        <Link to="/organizer/events" className="text-sm text-slate-200 hover:underline">
-          ← Back to events
+    <div className="space-y-6">
+      {/* Top row */}
+      <div className="flex items-center justify-between gap-3">
+        <Link
+          to="/organizer/dashboard"
+          className="inline-flex items-center gap-2 rounded-full border bg-white px-4 py-2 text-sm hover:bg-slate-50"
+        >
+          ← Back to Dashboard
         </Link>
 
-        <h1 className="mt-6 text-3xl font-semibold">Create a new event</h1>
-        <p className="mt-2 text-slate-300">
-          Start with the basics. After you create the event, you’ll be taken to the Map Editor.
-        </p>
+        <div className="text-xl font-semibold tracking-tight inline-flex items-center gap-2">
+          <span className="text-indigo-600">📅</span> Create New Event
+        </div>
+
+        <div className="w-[160px]" />
+      </div>
+
+      {/* Stepper */}
+      <div className="rounded-2xl border bg-white p-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-4 sm:flex-row sm:gap-8">
+            <StepPill n={1} label="Event Details" active={step === 1} done={step > 1} />
+            <div className="hidden sm:block h-px w-10 bg-slate-200 self-center" />
+            <StepPill n={2} label="Booth Layout" active={step === 2} done={step > 2} />
+            <div className="hidden sm:block h-px w-10 bg-slate-200 self-center" />
+            <StepPill n={3} label="Review & Publish" active={step === 3} done={false} />
+          </div>
+
+          <div className="flex items-center gap-2">
+            {step !== 1 && (
+              <button
+                className="rounded-full border bg-white px-4 py-2 text-sm hover:bg-slate-50"
+                onClick={() => setStep((s) => (s === 3 ? 2 : 1))}
+              >
+                Back
+              </button>
+            )}
+
+            {step === 1 ? (
+              <button
+                className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                onClick={createEventAndContinue}
+                disabled={saving}
+              >
+                {saving ? "Creating…" : "Continue"}
+              </button>
+            ) : step === 2 ? (
+              <button
+                className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                onClick={() => setStep(3)}
+                disabled={!createdEventId}
+              >
+                Continue
+              </button>
+            ) : (
+              <button
+                className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                onClick={() => createdEventId && nav(`/organizer/events/${createdEventId}`)}
+                disabled={!createdEventId}
+              >
+                Go to Event
+              </button>
+            )}
+          </div>
+        </div>
 
         {err && (
-          <div className="mt-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-200">
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
             {err}
           </div>
         )}
+      </div>
 
-        <form onSubmit={onSubmit} className="mt-6 space-y-5 rounded-xl bg-white p-6 text-black">
-          <div>
-            <label className="block text-sm font-semibold">Title *</label>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="mt-2 w-full rounded border px-3 py-2"
-              placeholder="e.g., Spring Festival"
-              required
-              disabled={saving}
-            />
+      {/* Step content */}
+      {step === 1 && (
+        <div className="space-y-6">
+          {/* Event Information */}
+          <div className="rounded-2xl border bg-white p-6">
+            <div className="text-2xl font-semibold">Event Information</div>
+            <div className="mt-1 text-sm text-slate-600">Fill in the details about your event. You'll set up the booth layout next.</div>
+
+            <div className="mt-6 rounded-2xl border p-5">
+              <div className="text-lg font-semibold">Basic Information</div>
+
+              <div className="mt-4 space-y-4">
+                <div>
+                  <InputLabel label="Event Name" required />
+                  <input
+                    className="mt-2 w-full rounded-xl border px-4 py-3"
+                    placeholder="e.g., Tech Summit 2025"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    disabled={saving}
+                  />
+                </div>
+
+                <div>
+                  <InputLabel label="Event Description" />
+                  <textarea
+                    className="mt-2 w-full rounded-xl border px-4 py-3 min-h-[120px]"
+                    placeholder="Describe your event, target audience, and what vendors can expect…"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    disabled={saving}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <InputLabel label="Start Date" required />
+                    <input
+                      type="date"
+                      className="mt-2 w-full rounded-xl border px-4 py-3"
+                      value={dateStart}
+                      onChange={(e) => setDateStart(e.target.value)}
+                      disabled={saving}
+                    />
+                  </div>
+                  <div>
+                    <InputLabel label="End Date" />
+                    <input
+                      type="date"
+                      className="mt-2 w-full rounded-xl border px-4 py-3"
+                      value={dateEnd}
+                      onChange={(e) => setDateEnd(e.target.value)}
+                      disabled={saving}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <InputLabel label="Event Category" />
+                  <select
+                    className="mt-2 w-full rounded-xl border px-4 py-3 bg-white"
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    disabled={saving}
+                  >
+                    <option value="">Select a category</option>
+                    <option value="festival">Festival</option>
+                    <option value="market">Market</option>
+                    <option value="conference">Conference</option>
+                    <option value="community">Community</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-semibold">Date *</label>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="mt-2 w-full rounded border px-3 py-2"
-              required
-              disabled={saving}
-            />
+          {/* Event Location */}
+          <div className="rounded-2xl border bg-white p-6">
+            <div className="text-xl font-semibold">Event Location</div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <InputLabel label="Venue Name" />
+                <input
+                  className="mt-2 w-full rounded-xl border px-4 py-3"
+                  placeholder="Convention Center, Park, Stadium…"
+                  value={venueName}
+                  onChange={(e) => setVenueName(e.target.value)}
+                  disabled={saving}
+                />
+              </div>
+
+              <div>
+                <InputLabel label="Street Address" />
+                <input
+                  className="mt-2 w-full rounded-xl border px-4 py-3"
+                  placeholder="123 Main Street"
+                  value={street}
+                  onChange={(e) => setStreet(e.target.value)}
+                  disabled={saving}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <div>
+                  <InputLabel label="City" required />
+                  <input
+                    className="mt-2 w-full rounded-xl border px-4 py-3"
+                    placeholder="Atlanta"
+                    value={city}
+                    onChange={(e) => setCity(e.target.value)}
+                    disabled={saving}
+                  />
+                </div>
+                <div>
+                  <InputLabel label="State" />
+                  <input
+                    className="mt-2 w-full rounded-xl border px-4 py-3"
+                    placeholder="GA"
+                    value={stateProv}
+                    onChange={(e) => setStateProv(e.target.value)}
+                    disabled={saving}
+                  />
+                </div>
+                <div>
+                  <InputLabel label="ZIP Code" />
+                  <input
+                    className="mt-2 w-full rounded-xl border px-4 py-3"
+                    placeholder="30303"
+                    value={zip}
+                    onChange={(e) => setZip(e.target.value)}
+                    disabled={saving}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-semibold">Location</label>
-            <input
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              className="mt-2 w-full rounded border px-3 py-2"
-              placeholder="e.g., Piedmont Park"
-              disabled={saving}
-            />
+          {/* Event Details */}
+          <div className="rounded-2xl border bg-white p-6">
+            <div className="text-xl font-semibold">Event Details</div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <InputLabel label="Expected Attendees" />
+                <input
+                  className="mt-2 w-full rounded-xl border px-4 py-3"
+                  placeholder="5000"
+                  value={expectedAttendees}
+                  onChange={(e) => setExpectedAttendees(e.target.value)}
+                  disabled={saving}
+                />
+              </div>
+
+              <div>
+                <InputLabel label="Setup Time" />
+                <input
+                  className="mt-2 w-full rounded-xl border px-4 py-3"
+                  placeholder="e.g., Day before, 6am on event day"
+                  value={setupTime}
+                  onChange={(e) => setSetupTime(e.target.value)}
+                  disabled={saving}
+                />
+              </div>
+
+              <div>
+                <InputLabel label="Additional Notes" />
+                <textarea
+                  className="mt-2 w-full rounded-xl border px-4 py-3 min-h-[110px]"
+                  placeholder="Any additional information for vendors (parking, load-in instructions, special requirements...)"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  disabled={saving}
+                />
+              </div>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-semibold">City</label>
-            <input
-              value={city}
-              onChange={(e) => setCity(e.target.value)}
-              className="mt-2 w-full rounded border px-3 py-2"
-              placeholder="e.g., Atlanta"
-              disabled={saving}
-            />
-          </div>
+          {/* Vendor Application Requirements (UI-only for now, matches Figma section) */}
+          <div className="rounded-2xl border bg-indigo-50 p-6">
+            <div className="flex items-start gap-3">
+              <div className="h-10 w-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center">⚙️</div>
+              <div>
+                <div className="text-lg font-semibold">Vendor Application Requirements</div>
+                <div className="text-sm text-slate-600">
+                  Configure booth categories, restrictions, and compliance requirements (UI-only for now).
+                </div>
+              </div>
+            </div>
 
-          <div>
-            <label className="block text-sm font-semibold">Description</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="mt-2 h-32 w-full rounded border px-3 py-2"
-              placeholder="Optional details…"
-              disabled={saving}
-            />
-          </div>
+            <div className="mt-5 text-sm font-semibold">Quick Start: Choose a Template</div>
 
-          <div className="flex justify-end gap-3">
-            <Link to="/organizer/events" className="rounded border px-5 py-2">
-              Cancel
-            </Link>
+            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+              {TEMPLATES.map((t) => {
+                const active = template === t.key;
+                return (
+                  <button
+                    key={t.key}
+                    type="button"
+                    onClick={() => setTemplate(t.key)}
+                    className={[
+                      "text-left rounded-2xl border bg-white p-5 hover:bg-slate-50 transition",
+                      active ? "border-indigo-500 ring-2 ring-indigo-200" : "border-slate-200",
+                    ].join(" ")}
+                  >
+                    <div className="text-base font-semibold">{t.title}</div>
+                    <div className="mt-1 text-sm text-slate-600">{t.subtitle}</div>
+                    <div className="mt-3 text-xs text-slate-500">{t.meta}</div>
+                    <div className="mt-3 text-sm font-semibold text-indigo-700">✓ Select Template</div>
+                  </button>
+                );
+              })}
+            </div>
 
             <button
-              type="submit"
-              className="rounded bg-indigo-600 px-6 py-2 text-white disabled:opacity-60"
-              disabled={saving}
+              type="button"
+              className="mt-5 w-full rounded-2xl border-2 border-dashed border-indigo-200 bg-white px-4 py-4 text-sm font-semibold text-indigo-700 hover:bg-indigo-50"
+              onClick={() => setTemplate("custom")}
             >
-              {saving ? "Creating…" : "Create event"}
+              ✳️ Create Custom Configuration
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="rounded-2xl border bg-white p-6">
+          <div className="text-xl font-semibold">Booth Layout</div>
+          <div className="mt-1 text-sm text-slate-600">
+            Your event is created. Next, open the Map Editor to build the booth layout.
+          </div>
+
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+            <button
+              className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              onClick={goToMapEditor}
+              disabled={!createdEventId}
+            >
+              Open Map Editor
+            </button>
+
+            <button
+              className="rounded-full border bg-white px-5 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
+              onClick={() => createdEventId && nav(`/organizer/events/${createdEventId}`)}
+              disabled={!createdEventId}
+            >
+              Open Event Detail
             </button>
           </div>
 
-          <div className="pt-2 text-xs text-slate-500">
-            Note: Capacity planning and category-by-category vendor counts come next (per your capacity contract).
+          <div className="mt-6 rounded-xl border bg-slate-50 p-4 text-sm text-slate-600">
+            Note: This step is intentionally “thin” until we wire the full Booth Layout UX into the real map editor
+            (you already have that working and stable).
           </div>
-        </form>
-      </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="rounded-2xl border bg-white p-6">
+          <div className="text-xl font-semibold">Review & Publish</div>
+          <div className="mt-1 text-sm text-slate-600">Quick review before you publish (UI-only for now).</div>
+
+          <div className="mt-5 rounded-xl border p-4">
+            <div className="text-sm font-semibold text-slate-700">Summary</div>
+            <div className="mt-2 text-sm text-slate-700">
+              <div>
+                <span className="font-semibold">Event:</span> {title || "—"}
+              </div>
+              <div>
+                <span className="font-semibold">Start:</span> {dateStart || "—"}{" "}
+                <span className="font-semibold ml-2">End:</span> {dateEnd || "—"}
+              </div>
+              <div>
+                <span className="font-semibold">Location:</span> {venueDisplay || "—"} {city ? `• ${city}` : ""}
+              </div>
+              <div>
+                <span className="font-semibold">Template:</span> {template}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+            <button
+              className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              onClick={() => createdEventId && nav(`/organizer/events/${createdEventId}`)}
+              disabled={!createdEventId}
+            >
+              Go to Event
+            </button>
+
+            <button
+              className="rounded-full border bg-white px-5 py-2 text-sm hover:bg-slate-50 disabled:opacity-50"
+              onClick={goToMapEditor}
+              disabled={!createdEventId}
+            >
+              Open Map Editor
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

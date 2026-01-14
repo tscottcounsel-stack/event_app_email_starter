@@ -1,5 +1,6 @@
 // vendor-portal/src/pages/OrganizerContactsPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiGet, apiPost, createOrganizerContact, fetchOrganizerContacts } from "../api";
 
 type Contact = {
@@ -66,11 +67,6 @@ type BulkMessageRecipientOut = {
 type BulkMessageListResponse = {
   items: BulkMessageSummary[];
   count: number;
-};
-
-type BulkMessageDetailResponse = {
-  message: BulkMessageSummary;
-  recipients: BulkMessageRecipientOut[];
 };
 
 function normalizeTags(input: string): string[] {
@@ -239,6 +235,8 @@ function ModalShell(props: {
 }
 
 export default function OrganizerContactsPage() {
+  const navigate = useNavigate();
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -274,9 +272,9 @@ export default function OrganizerContactsPage() {
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
   const [campaigns, setCampaigns] = useState<BulkMessageSummary[]>([]);
-  const [campaignDetailOpen, setCampaignDetailOpen] = useState(false);
-  const [campaignDetailLoading, setCampaignDetailLoading] = useState(false);
-  const [campaignDetail, setCampaignDetail] = useState<BulkMessageDetailResponse | null>(null);
+
+  // Collapsible UI (default collapsed)
+  const [campaignsOpen, setCampaignsOpen] = useState(false);
 
   const composeFirstFocusRef = useRef<HTMLButtonElement | null>(null);
 
@@ -324,22 +322,6 @@ export default function OrganizerContactsPage() {
       setCampaignsError(e?.message || "Failed to load queued campaigns");
     } finally {
       setCampaignsLoading(false);
-    }
-  }
-
-  async function openCampaignDetail(id: number) {
-    setCampaignsError(null);
-    setCampaignDetailLoading(true);
-    setCampaignDetail(null);
-    setCampaignDetailOpen(true);
-    try {
-      const res = await apiGet<BulkMessageDetailResponse>(`/organizer/messages/${id}`);
-      setCampaignDetail(res);
-    } catch (e: any) {
-      setCampaignsError(e?.message || "Failed to load campaign details");
-      setCampaignDetailOpen(false);
-    } finally {
-      setCampaignDetailLoading(false);
     }
   }
 
@@ -532,25 +514,19 @@ export default function OrganizerContactsPage() {
   }
 
   function exportRecipientsCsvFromModal() {
-    const use = dryRun ? [...(dryRun.eligible || []), ...(dryRun.skipped || [])] : selectedContacts.map((c) => ({
-      contact_id: c.id,
-      name: c.name,
-      company: c.company,
-      email: c.email,
-      phone: c.phone,
-      rendered_text: renderTemplate(body ?? "", c),
-      reason_skipped: null,
-    }));
+    const use = dryRun
+      ? [...(dryRun.eligible || []), ...(dryRun.skipped || [])]
+      : selectedContacts.map((c) => ({
+          contact_id: c.id,
+          name: c.name,
+          company: c.company,
+          email: c.email,
+          phone: c.phone,
+          rendered_text: renderTemplate(body ?? "", c),
+          reason_skipped: null,
+        }));
 
-    const header = [
-      "contact_id",
-      "name",
-      "company",
-      "email",
-      "phone",
-      "rendered_text",
-      "reason_skipped",
-    ].join(",");
+    const header = ["contact_id", "name", "company", "email", "phone", "rendered_text", "reason_skipped"].join(",");
 
     const lines = use.map((r: any) =>
       [
@@ -747,10 +723,23 @@ export default function OrganizerContactsPage() {
         {/* Queued Campaigns (Phase 2) */}
         <div className="rounded-2xl border bg-white shadow-sm p-6 mb-6">
           <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-lg font-semibold">Queued Campaigns</div>
-              <div className="text-sm text-gray-500 mt-1">Saved campaigns (no provider sending yet).</div>
-            </div>
+            <button
+              className="text-left"
+              onClick={() => setCampaignsOpen((v) => !v)}
+              title={campaignsOpen ? "Collapse" : "Expand"}
+            >
+              <div className="flex items-center gap-2">
+                <div className="text-lg font-semibold">Queued Campaigns</div>
+                <span className="text-xs rounded-full border bg-white px-2 py-0.5 text-gray-700">
+                  {campaigns.length}
+                </span>
+                <span className="text-gray-400">{campaignsOpen ? "▾" : "▸"}</span>
+              </div>
+              <div className="text-sm text-gray-500 mt-1">
+                Saved campaigns (no provider sending yet).
+                {!campaignsOpen && <span className="text-gray-400"> (collapsed)</span>}
+              </div>
+            </button>
 
             <button
               className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
@@ -767,57 +756,65 @@ export default function OrganizerContactsPage() {
             </div>
           )}
 
-          {campaignsLoading ? (
-            <div className="mt-4 text-sm text-gray-600">Loading queued campaigns…</div>
-          ) : campaigns.length === 0 ? (
-            <div className="mt-6 text-sm text-gray-600">
-              No queued campaigns yet. Select contacts → Compose → Queue campaign.
-            </div>
-          ) : (
-            <div className="mt-4 overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50 text-gray-600">
-                  <tr>
-                    <th className="text-left px-4 py-3 w-20">ID</th>
-                    <th className="text-left px-4 py-3 w-28">Channel</th>
-                    <th className="text-left px-4 py-3">Subject</th>
-                    <th className="text-left px-4 py-3 w-28">Status</th>
-                    <th className="text-left px-4 py-3 w-40">Queued</th>
-                    <th className="text-left px-4 py-3 w-24">Eligible</th>
-                    <th className="text-left px-4 py-3 w-24">Skipped</th>
-                    <th className="text-left px-4 py-3 w-28">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {campaigns.map((m) => (
-                    <tr key={m.id} className="border-t hover:bg-gray-50">
-                      <td className="px-4 py-3 font-medium">#{m.id}</td>
-                      <td className="px-4 py-3 uppercase text-xs tracking-wide">{m.channel}</td>
-                      <td className="px-4 py-3">{m.subject || <span className="text-gray-400">—</span>}</td>
-                      <td className="px-4 py-3">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs">
-                          {m.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        {m.queued_at || m.created_at || <span className="text-gray-400">—</span>}
-                      </td>
-                      <td className="px-4 py-3">{m.eligible_count ?? <span className="text-gray-400">—</span>}</td>
-                      <td className="px-4 py-3">{m.skipped_count ?? <span className="text-gray-400">—</span>}</td>
-                      <td className="px-4 py-3">
-                        <button
-                          className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
-                          onClick={() => openCampaignDetail(m.id)}
-                          title="View recipients"
-                        >
-                          View
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          {campaignsOpen && (
+            <>
+              {campaignsLoading ? (
+                <div className="mt-4 text-sm text-gray-600">Loading queued campaigns…</div>
+              ) : campaigns.length === 0 ? (
+                <div className="mt-6 text-sm text-gray-600">
+                  No queued campaigns yet. Select contacts → Compose → Queue campaign.
+                </div>
+              ) : (
+                <div className="mt-4 max-h-[260px] overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600 sticky top-0">
+                      <tr>
+                        <th className="text-left px-4 py-3 w-20">ID</th>
+                        <th className="text-left px-4 py-3 w-28">Channel</th>
+                        <th className="text-left px-4 py-3">Subject</th>
+                        <th className="text-left px-4 py-3 w-28">Status</th>
+                        <th className="text-left px-4 py-3 w-40">Queued</th>
+                        <th className="text-left px-4 py-3 w-24">Eligible</th>
+                        <th className="text-left px-4 py-3 w-24">Skipped</th>
+                        <th className="text-left px-4 py-3 w-28">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {campaigns.map((m) => (
+                        <tr key={m.id} className="border-t hover:bg-gray-50">
+                          <td className="px-4 py-3 font-medium">#{m.id}</td>
+                          <td className="px-4 py-3 uppercase text-xs tracking-wide">{m.channel}</td>
+                          <td className="px-4 py-3">{m.subject || <span className="text-gray-400">—</span>}</td>
+                          <td className="px-4 py-3">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs">
+                              {m.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            {m.queued_at || m.created_at || <span className="text-gray-400">—</span>}
+                          </td>
+                          <td className="px-4 py-3">
+                            {m.eligible_count ?? <span className="text-gray-400">—</span>}
+                          </td>
+                          <td className="px-4 py-3">
+                            {m.skipped_count ?? <span className="text-gray-400">—</span>}
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
+                              onClick={() => navigate(`/organizer/campaigns/${m.id}`)}
+                              title="View campaign page"
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -934,122 +931,13 @@ export default function OrganizerContactsPage() {
                 <button className="px-4 py-2 rounded-lg border hover:bg-gray-50" onClick={() => setAddOpen(false)}>
                   Cancel
                 </button>
-                <button className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700" onClick={saveContact}>
+                <button
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
+                  onClick={saveContact}
+                >
                   Save
                 </button>
               </div>
-            </div>
-          </ModalShell>
-        )}
-
-        {/* Campaign Detail Modal */}
-        {campaignDetailOpen && (
-          <ModalShell
-            title={campaignDetail?.message ? `Campaign #${campaignDetail.message.id}` : "Campaign"}
-            subtitle="Recipients snapshot for this queued campaign."
-            onClose={() => {
-              setCampaignDetailOpen(false);
-              setCampaignDetail(null);
-            }}
-            maxWidthClass="max-w-5xl"
-          >
-            <div className="p-5">
-              {campaignDetailLoading ? (
-                <div className="text-sm text-gray-600">Loading details…</div>
-              ) : !campaignDetail ? (
-                <div className="text-sm text-gray-600">No details loaded.</div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="rounded-xl border bg-white p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm text-gray-500">Channel</div>
-                        <div className="font-medium uppercase">{campaignDetail.message.channel}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">Status</div>
-                        <div className="font-medium">{campaignDetail.message.status}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">Eligible</div>
-                        <div className="font-medium">{campaignDetail.message.eligible_count ?? "—"}</div>
-                      </div>
-                      <div>
-                        <div className="text-sm text-gray-500">Skipped</div>
-                        <div className="font-medium">{campaignDetail.message.skipped_count ?? "—"}</div>
-                      </div>
-                    </div>
-
-                    {campaignDetail.message.subject !== null && (
-                      <div className="mt-3">
-                        <div className="text-sm text-gray-500">Subject</div>
-                        <div className="text-sm">
-                          {campaignDetail.message.subject || <span className="text-gray-400">—</span>}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="mt-3">
-                      <div className="text-sm text-gray-500">Body</div>
-                      <pre className="mt-1 whitespace-pre-wrap rounded-lg border bg-gray-50 p-3 text-xs">
-                        {campaignDetail.message.body}
-                      </pre>
-                    </div>
-
-                    <div className="mt-3">
-                      <button
-                        className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
-                        onClick={async () => {
-                          const ok = await copyToClipboard(campaignDetail.message.body || "");
-                          setToast(ok ? "Campaign body copied." : "Copy failed.");
-                        }}
-                      >
-                        Copy body
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border bg-white shadow-sm overflow-auto">
-                    <div className="px-5 py-4 border-b">
-                      <div className="text-lg font-semibold">Recipients</div>
-                      <div className="text-sm text-gray-500 mt-1">{campaignDetail.recipients.length} total</div>
-                    </div>
-
-                    {campaignDetail.recipients.length === 0 ? (
-                      <div className="p-6 text-sm text-gray-600">No recipients stored.</div>
-                    ) : (
-                      <table className="min-w-full text-sm">
-                        <thead className="bg-gray-50 text-gray-600">
-                          <tr>
-                            <th className="text-left px-5 py-3 w-24">ID</th>
-                            <th className="text-left px-5 py-3">Name</th>
-                            <th className="text-left px-5 py-3">Email</th>
-                            <th className="text-left px-5 py-3">Phone</th>
-                            <th className="text-left px-5 py-3 w-28">Status</th>
-                            <th className="text-left px-5 py-3">Reason</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {campaignDetail.recipients.map((r, idx) => (
-                            <tr key={`${r.contact_id}-${idx}`} className="border-t">
-                              <td className="px-5 py-3 font-medium">{r.contact_id}</td>
-                              <td className="px-5 py-3">{r.name || <span className="text-gray-400">—</span>}</td>
-                              <td className="px-5 py-3">{r.email || <span className="text-gray-400">—</span>}</td>
-                              <td className="px-5 py-3">{r.phone || <span className="text-gray-400">—</span>}</td>
-                              <td className="px-5 py-3">
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs">
-                                  {r.status}
-                                </span>
-                              </td>
-                              <td className="px-5 py-3">{r.reason_skipped || <span className="text-gray-400">—</span>}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           </ModalShell>
         )}
@@ -1104,7 +992,9 @@ export default function OrganizerContactsPage() {
                     <span className="text-sm text-gray-600">Channel</span>
                     <div className="inline-flex rounded-lg border overflow-hidden">
                       <button
-                        className={`px-3 py-2 text-sm ${channel === "email" ? "bg-black text-white" : "bg-white hover:bg-gray-50"}`}
+                        className={`px-3 py-2 text-sm ${
+                          channel === "email" ? "bg-black text-white" : "bg-white hover:bg-gray-50"
+                        }`}
                         onClick={() => {
                           setChannel("email");
                           setDryRun(null);
@@ -1113,7 +1003,9 @@ export default function OrganizerContactsPage() {
                         Email
                       </button>
                       <button
-                        className={`px-3 py-2 text-sm ${channel === "sms" ? "bg-black text-white" : "bg-white hover:bg-gray-50"}`}
+                        className={`px-3 py-2 text-sm ${
+                          channel === "sms" ? "bg-black text-white" : "bg-white hover:bg-gray-50"
+                        }`}
                         onClick={() => {
                           setChannel("sms");
                           setDryRun(null);
@@ -1152,7 +1044,10 @@ export default function OrganizerContactsPage() {
                       <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{name}")}>
                         {"{name}"}
                       </button>
-                      <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{company}")}>
+                      <button
+                        className="px-2 py-1 rounded border hover:bg-gray-50"
+                        onClick={() => insertVar("{company}")}
+                      >
                         {"{company}"}
                       </button>
                       <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{email}")}>
@@ -1200,9 +1095,7 @@ export default function OrganizerContactsPage() {
                 <div className="flex items-center justify-between">
                   <div>
                     <div className="text-lg font-semibold">Preview</div>
-                    <div className="text-sm text-gray-500 mt-1">
-                      Showing first 3 recipients. (From dry-run)
-                    </div>
+                    <div className="text-sm text-gray-500 mt-1">Showing first 3 recipients. (From dry-run)</div>
                   </div>
 
                   <div className="text-sm text-gray-600">
@@ -1214,7 +1107,8 @@ export default function OrganizerContactsPage() {
 
                 {!dryRun ? (
                   <div className="mt-6 text-sm text-gray-600">
-                    Run <span className="font-medium">Dry-run</span> to see eligible/skipped recipients and rendered message text.
+                    Run <span className="font-medium">Dry-run</span> to see eligible/skipped recipients and rendered
+                    message text.
                   </div>
                 ) : (
                   <div className="mt-4 space-y-3">

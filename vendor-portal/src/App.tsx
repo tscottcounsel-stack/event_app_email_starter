@@ -1,4 +1,4 @@
-// vendor-portal/src/App.tsx
+// src/App.tsx
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import ComingSoon from "./pages/ComingSoon";
@@ -13,11 +13,13 @@ import RoleSelection from "./pages/RoleSelection";
 import OrganizerLoginPage from "./pages/OrganizerLoginPage";
 import OrganizerDashboardPage from "./pages/OrganizerDashboardPage";
 import OrganizerEventsPage from "./pages/OrganizerEventsPage";
+import OrganizerEventDetailPage from "./pages/OrganizerEventDetailPage"; // ✅ ADD
 import OrganizerMapEditorPage from "./pages/OrganizerMapEditorPage";
 import OrganizerContactsPage from "./pages/OrganizerContactsPage";
 import OrganizerApplicationsPage from "./pages/OrganizerApplicationsPage";
 import OrganizerProfilePage from "./pages/OrganizerProfilePage";
-import OrganizerCampaignDetailPage from "./pages/OrganizerCampaignDetailPage"; // ✅ NEW
+import OrganizerCampaignDetailPage from "./pages/OrganizerCampaignDetailPage";
+import OrganizerCreateEventPage from "./pages/OrganizerCreateEventPage"; // ✅ ADD
 
 // Vendor
 import VendorLogin from "./pages/VendorLogin";
@@ -46,12 +48,14 @@ export default function App() {
         <Route path="/organizer" element={<Navigate to="/organizer/dashboard" replace />} />
         <Route path="/organizer/dashboard" element={<OrganizerDashboardPage />} />
         <Route path="/organizer/events" element={<OrganizerEventsPage />} />
+        <Route path="/organizer/events/new" element={<OrganizerCreateEventPage />} />
+        <Route path="/organizer/events/:eventId" element={<OrganizerEventDetailPage />} /> {/* ✅ ADD */}
         <Route path="/organizer/events/:eventId/map" element={<OrganizerMapEditorPage />} />
         <Route path="/organizer/contacts" element={<OrganizerContactsPage />} />
         <Route path="/organizer/applications" element={<OrganizerApplicationsPage />} />
         <Route path="/organizer/profile" element={<OrganizerProfilePage />} />
 
-        {/* ✅ Campaign detail page */}
+        {/* Campaign detail */}
         <Route path="/organizer/campaigns/:id" element={<OrganizerCampaignDetailPage />} />
 
         {/* Keep this as-is for now */}

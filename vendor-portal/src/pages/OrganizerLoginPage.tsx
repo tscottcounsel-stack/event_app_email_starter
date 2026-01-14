@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ApiError, login } from "../api";
+import { ApiError, login, setUserRole } from "../api";
 
 export default function OrganizerLoginPage() {
   const navigate = useNavigate();
@@ -14,20 +14,27 @@ export default function OrganizerLoginPage() {
     setBusy(true);
     setError(null);
     try {
-  await login(email, password);
-  // mark role for Layout/router
-  localStorage.setItem("user_role", "organizer");
-  navigate("/organizer/events", { replace: true });
-} catch (err: any) {
-  setError(err instanceof ApiError ? err.message : "Login failed.");
-}
+      await login(email, password);
+
+      // mark role for Layout/router
+      setUserRole("organizer");
+
+      // ✅ go to dashboard, not events
+      navigate("/organizer/dashboard", { replace: true });
+    } catch (err: any) {
+      setError(err instanceof ApiError ? err.message : "Login failed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <div className="min-h-[calc(100vh-64px)] p-6 flex items-center justify-center">
       <div className="w-full max-w-md rounded-2xl border bg-white p-6">
         <div className="text-xl font-semibold">Organizer Login</div>
-        <div className="mt-1 text-sm text-slate-600">Manage events, layouts, and vendor applications.</div>
+        <div className="mt-1 text-sm text-slate-600">
+          Manage events, layouts, and vendor applications.
+        </div>
 
         {error && (
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -74,7 +81,9 @@ export default function OrganizerLoginPage() {
           </Link>
         </div>
 
-        <div className="mt-4 text-xs text-slate-500">Auth endpoint: POST /login</div>
+        <div className="mt-4 text-xs text-slate-500">
+          Auth endpoint: POST /login
+        </div>
       </div>
     </div>
   );

@@ -1,111 +1,137 @@
-// vendor-portal/src/pages/OrganizerEventsPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
+// src/pages/OrganizerEventsPage.tsx
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE, fetchOrganizerEvents, getAccessToken, type OrganizerEventListItem } from "../api";
+import { API_BASE, apiGet } from "../api";
+
+type OrganizerEvent = {
+  id: number;
+  title?: string;
+  date?: string;
+  city?: string;
+  location?: string;
+};
+
+function formatDate(d?: string) {
+  if (!d) return "—";
+  return String(d).slice(0, 10);
+}
 
 export default function OrganizerEventsPage() {
   const nav = useNavigate();
 
-  const token = useMemo(() => getAccessToken(), []);
-  const [items, setItems] = useState<OrganizerEventListItem[]>([]);
+  const [events, setEvents] = useState<OrganizerEvent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  async function load(signal?: AbortSignal) {
-    if (!token) {
-      setError("Not logged in as organizer.");
-      setLoading(false);
-      return;
-    }
+  const sorted = useMemo(() => {
+    const copy = [...events];
+    copy.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    return copy;
+  }, [events]);
 
+  async function load() {
+    setLoading(true);
+    setErr(null);
     try {
-      setLoading(true);
-      setError(null);
-      const res = await fetchOrganizerEvents(token, 50, signal);
-      setItems(res?.items ?? []);
+      const res: any = await apiGet<any>("/organizer/events");
+      const list: OrganizerEvent[] = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.items)
+        ? res.items
+        : Array.isArray(res?.events)
+        ? res.events
+        : [];
+      setEvents(list);
     } catch (e: any) {
-      setError(e?.message ?? "Failed to load organizer events");
+      setErr(e?.message || "Failed to load organizer events.");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    const ac = new AbortController();
-    load(ac.signal);
-    return () => ac.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+    void load();
+  }, []);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+    <div className="mx-auto w-full max-w-6xl p-6">
+      <div className="mb-6 flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Organizer Events</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-2xl font-semibold">Organizer Events</h1>
+          <p className="mt-1 text-sm text-slate-600">
             Manage events and jump into applications or the map editor.
           </p>
         </div>
 
         <button
-          className="rounded-md border px-3 py-2 text-sm hover:bg-slate-50"
+          className="rounded-md border border-gray-200 bg-white px-4 py-2 text-sm hover:bg-gray-50"
           onClick={() => load()}
-          disabled={loading}
         >
           Refresh
         </button>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {error}
+      {err && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {err}
         </div>
       )}
 
       {loading ? (
         <div className="text-sm text-slate-500">Loading…</div>
-      ) : items.length === 0 ? (
-        <div className="text-sm text-slate-500">No events found.</div>
+      ) : sorted.length === 0 ? (
+        <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center">
+          <div className="text-sm text-slate-600">No events found.</div>
+        </div>
       ) : (
         <div className="space-y-4">
-          {items.map((e) => (
-            <div key={e.id} className="rounded-xl border bg-white p-4">
-              <div className="font-semibold">{e.title}</div>
-              <div className="mt-1 text-sm text-slate-600">
-                {e.date ? <span>{String(e.date).slice(0, 10)}</span> : <span>—</span>}
-                <span className="mx-2">•</span>
-                <span>
-                  {e.location ? e.location : "Location TBD"}
-                  {e.city ? ` • ${e.city}` : ""}
-                </span>
-              </div>
+          {sorted.map((e) => (
+            <div key={e.id} className="rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="font-semibold">{e.title || `Event #${e.id}`}</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    <span>{formatDate(e.date)}</span>
+                    <span className="mx-2">•</span>
+                    <span>{e.location || "—"}</span>
+                    <span className="mx-2">•</span>
+                    <span>{e.city || "—"}</span>
+                  </div>
+                </div>
 
-              <div className="mt-3 flex flex-wrap gap-3 text-sm">
-                {/* ✅ Uses your existing route */}
-                <button
-                  className="rounded-md border px-3 py-2 hover:bg-slate-50"
-                  onClick={() => nav(`/organizer/applications?eventId=${e.id}`)}
-                >
-                  Applications
-                </button>
+                <div className="mt-3 flex flex-wrap gap-3 text-sm sm:mt-0">
+                  {/* ✅ Open = Event Detail page */}
+                  <button
+                    className="rounded-full bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700"
+                    onClick={() => nav(`/organizer/events/${e.id}`)}
+                  >
+                    Open
+                  </button>
 
-                {/* ✅ Uses your existing route */}
-                <button
-                  className="rounded-md border px-3 py-2 hover:bg-slate-50"
-                  onClick={() => nav(`/organizer/events/${e.id}/map`)}
-                >
-                  Map Editor
-                </button>
+                  {/* ✅ Uses your existing route */}
+                  <button
+                    className="rounded-full border border-gray-200 bg-white px-4 py-2 hover:bg-gray-50"
+                    onClick={() => nav(`/organizer/applications?eventId=${e.id}`)}
+                  >
+                    Applications
+                  </button>
 
-                {/* ✅ Opens the backend JSON since the frontend route isn't defined */}
-                <a
-                  className="rounded-md border px-3 py-2 hover:bg-slate-50"
-                  href={`${API_BASE}/public/events/${e.id}/diagram`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Public Diagram (JSON)
-                </a>
+                  <button
+                    className="rounded-full border border-gray-200 bg-white px-4 py-2 hover:bg-gray-50"
+                    onClick={() => nav(`/organizer/events/${e.id}/map`)}
+                  >
+                    Map Editor
+                  </button>
+
+                  <a
+                    className="rounded-full border border-gray-200 bg-white px-4 py-2 hover:bg-gray-50"
+                    href={`${API_BASE}/public/events/${e.id}/diagram`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Public Diagram (JSON)
+                  </a>
+                </div>
               </div>
             </div>
           ))}
