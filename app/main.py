@@ -4,13 +4,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="VendorConnect API", version="0.1.0")
 
-# CORS (adjust origins as needed)
+DEV_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=DEV_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +51,8 @@ _include("app.routers.event_invites")
 _include("app.routers.organizer_events")
 _include("app.routers.organizer_event_update")
 _include("app.routers.organizer_applications")
-_include("app.routers.organizer_contacts")  # keep this (this is the correct include)
+_include("app.routers.organizer_contacts")  # ✅ contacts CRM
+_include("app.routers.organizer_messages")  # ✅ bulk messaging (dry-run + queue)
 _include("app.routers.organizer_profile")
 _include("app.routers.organizer_diagram")
 _include("app.routers.organizer_event_invites")
@@ -62,3 +66,10 @@ _include("app.routers.users")
 _include("app.routers.slots")
 _include("app.routers.stats")
 _include("app.routers.seed")
+
+# DEBUG: print registered routes (keep for now)
+for r in app.routes:
+    methods = ",".join(sorted(getattr(r, "methods", []) or []))
+    p = getattr(r, "path", "")
+    if "organizer" in p or "messages" in p:
+        print(f"[ROUTE] {methods:15s} {p}")
