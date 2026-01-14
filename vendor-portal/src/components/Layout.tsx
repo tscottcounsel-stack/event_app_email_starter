@@ -24,10 +24,11 @@ export default function Layout() {
   const isVendor = role === "vendor" || loc.pathname.startsWith("/vendor");
 
   return (
-    <div className="min-h-screen bg-white">
-      <div className="flex">
+    // ✅ Make the whole app a full-height flex layout
+    <div className="h-screen bg-white overflow-hidden">
+      <div className="h-full flex">
         {/* left nav */}
-        <aside className="w-64 border-r bg-white px-4 py-4">
+        <aside className="w-64 border-r bg-white px-4 py-4 overflow-y-auto">
           <div className="mb-6">
             <div className="text-lg font-semibold">VendorConnect</div>
             <div className="text-xs text-slate-500">Verified vendors &amp; organizers</div>
@@ -112,8 +113,9 @@ export default function Layout() {
         </aside>
 
         {/* main */}
-        <main className="flex-1">
-          <div className="border-b px-6 py-4">
+        <main className="flex-1 min-w-0 flex flex-col">
+          {/* header */}
+          <div className="border-b px-6 py-4 shrink-0">
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-sm font-semibold">
@@ -139,8 +141,11 @@ export default function Layout() {
             </div>
           </div>
 
-          <div className="px-6 py-6">
-            <Outlet />
+          {/* ✅ scrollable content area */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-6 py-6">
+              <Outlet />
+            </div>
           </div>
         </main>
       </div>

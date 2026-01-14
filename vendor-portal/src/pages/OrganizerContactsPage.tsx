@@ -1,27 +1,82 @@
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  ApiError,
-  createOrganizerContact,
-  fetchOrganizerContacts,
-  updateOrganizerContact,
-} from "../api";
+// vendor-portal/src/pages/OrganizerContactsPage.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { apiGet, apiPost, createOrganizerContact, fetchOrganizerContacts } from "../api";
 
 type Contact = {
   id: number;
-  organizer_id: number;
-  name: string;
-  email?: string | null;
-  phone?: string | null;
-  company?: string | null;
-  notes?: string | null;
+  name: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
   tags: string[];
+  created_at?: string;
+  updated_at?: string;
 };
 
-function parseTags(input: string): string[] {
-  if (!input) return [];
+type OrganizerContactsList = {
+  items: Contact[];
+  count: number;
+  value?: Contact[]; // legacy
+  Count?: number; // legacy
+};
+
+type DryRunRecipient = {
+  contact_id: number;
+  name: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  rendered_text: string;
+  reason_skipped?: string | null;
+};
+
+type DryRunResponse = {
+  channel: "email" | "sms";
+  subject?: string | null;
+  body: string;
+  eligible: DryRunRecipient[];
+  skipped: DryRunRecipient[];
+};
+
+type BulkMessageSummary = {
+  id: number;
+  channel: "email" | "sms";
+  subject: string | null;
+  body: string;
+  status: string;
+  created_at?: string | null;
+  queued_at?: string | null;
+  sent_at?: string | null;
+  eligible_count?: number | null;
+  skipped_count?: number | null;
+};
+
+type BulkMessageRecipientOut = {
+  id?: number;
+  contact_id: number;
+  name?: string | null;
+  company?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  status: "eligible" | "skipped" | "queued" | "sent" | "failed" | string;
+  reason_skipped?: string | null;
+  rendered_text?: string | null;
+};
+
+type BulkMessageListResponse = {
+  items: BulkMessageSummary[];
+  count: number;
+};
+
+type BulkMessageDetailResponse = {
+  message: BulkMessageSummary;
+  recipients: BulkMessageRecipientOut[];
+};
+
+function normalizeTags(input: string): string[] {
   const raw = input
     .split(",")
-    .map((t) => t.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   const seen = new Set<string>();
@@ -36,798 +91,1149 @@ function parseTags(input: string): string[] {
   return out;
 }
 
-function tagsToString(tags: string[]): string {
-  return (tags ?? []).join(", ");
+function renderTemplate(
+  template: string,
+  c: Pick<Contact, "name" | "company" | "email" | "phone">
+) {
+  const name = c.name ?? "";
+  const company = c.company ?? "";
+  const email = c.email ?? "";
+  const phone = c.phone ?? "";
+  return (template ?? "")
+    .replaceAll("{name}", name)
+    .replaceAll("{company}", company)
+    .replaceAll("{email}", email)
+    .replaceAll("{phone}", phone);
 }
 
-function appendTagToInput(existing: string, tag: string): string {
-  const current = parseTags(existing);
-  const t = (tag ?? "").trim();
-  if (!t) return existing;
-  const exists = current.some((x) => x.toLowerCase() === t.toLowerCase());
-  if (exists) return tagsToString(current);
-  return tagsToString([...current, t]);
+function escapeCsvValue(v: string): string {
+  const needsQuotes = /[",\n\r]/.test(v);
+  const safe = v.replace(/"/g, '""');
+  return needsQuotes ? `"${safe}"` : safe;
 }
 
-function apiErrorToMessage(err: unknown): string {
-  if (err instanceof ApiError) return err.message;
-  if (typeof err === "object" && err && "message" in err) {
-    return String((err as any).message);
+function downloadTextFile(filename: string, content: string, mime = "text/plain") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
   }
-  return "Something went wrong.";
 }
 
-function normalize(s: unknown): string {
-  return (s ?? "").toString().toLowerCase();
+function nowStamp() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function ButtonPill(props: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  variant?: "primary" | "soft" | "ghost";
+  className?: string;
+  title?: string;
+}) {
+  const { children, onClick, disabled, variant = "soft", className = "", title } = props;
+  const base =
+    "inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed";
+  const styles =
+    variant === "primary"
+      ? "bg-emerald-600 text-white hover:bg-emerald-700"
+      : variant === "ghost"
+      ? "bg-white border hover:bg-gray-50"
+      : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200";
+  return (
+    <button
+      className={`${base} ${styles} ${className}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+    >
+      {children}
+    </button>
+  );
 }
 
-function highlightText(text: string, query: string): React.ReactNode {
-  const t = (text ?? "").toString();
-  const q = (query ?? "").trim();
-  if (!t || !q) return t;
+function ModalShell(props: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  maxWidthClass?: string;
+  headerRight?: React.ReactNode;
+  firstFocusRef?: React.RefObject<HTMLButtonElement>;
+}) {
+  const { title, subtitle, onClose, children, maxWidthClass = "max-w-3xl", headerRight, firstFocusRef } = props;
 
-  // Keep it safe + simple: literal substring highlighting, case-insensitive
-  const re = new RegExp(`(${escapeRegExp(q)})`, "ig");
-  const parts = t.split(re);
+  // Esc closes
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
-  if (parts.length <= 1) return t;
+  useEffect(() => {
+    const t = setTimeout(() => firstFocusRef?.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [firstFocusRef]);
 
   return (
-    <>
-      {parts.map((p, i) => {
-        const isMatch = p.toLowerCase() === q.toLowerCase();
-        return isMatch ? (
-          <mark key={i} className="rounded px-1">
-            {p}
-          </mark>
-        ) : (
-          <React.Fragment key={i}>{p}</React.Fragment>
-        );
-      })}
-    </>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className={`w-full ${maxWidthClass} max-h-[85vh] rounded-2xl bg-white shadow-xl border flex flex-col`}>
+        <div className="px-5 py-4 border-b flex items-start justify-between gap-4">
+          <div>
+            <div className="text-lg font-semibold">{title}</div>
+            {subtitle && <div className="text-sm text-gray-500 mt-1">{subtitle}</div>}
+          </div>
+          <div className="flex items-center gap-2">
+            {headerRight}
+            <button
+              className="px-3 py-2 rounded-lg bg-black text-white hover:opacity-90"
+              onClick={onClose}
+              title="Close (Esc)"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-auto">{children}</div>
+      </div>
+    </div>
   );
 }
 
 export default function OrganizerContactsPage() {
-  const [items, setItems] = useState<Contact[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [savingNew, setSavingNew] = useState(false);
-  const [savingId, setSavingId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
-  // New contact form
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [company, setCompany] = useState("");
-  const [tagsInput, setTagsInput] = useState("");
-  const [notes, setNotes] = useState("");
-  const [nameTouched, setNameTouched] = useState(false);
+  // Filters
+  const [search, setSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
 
-  // Inline edit state
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editDraft, setEditDraft] = useState<Partial<Contact> | null>(null);
-  const [editTagsInput, setEditTagsInput] = useState("");
+  // UI-only event dropdown
+  const [eventFilter, setEventFilter] = useState<string>("all");
 
-  // Search + filters
-  const [query, setQuery] = useState("");
-  const [tagFilter, setTagFilter] = useState<string | null>(null);
-  const [sortMode, setSortMode] = useState<"name_asc" | "newest" | "oldest">(
-    "name_asc"
-  );
+  // Add Contact modal
+  const [addOpen, setAddOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newCompany, setNewCompany] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [newTags, setNewTags] = useState("");
 
-  const qNorm = useMemo(() => (query ?? "").trim(), [query]);
+  // Compose modal
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [channel, setChannel] = useState<"email" | "sms">("email");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [dryRun, setDryRun] = useState<DryRunResponse | null>(null);
 
-  async function load() {
+  // Queued campaigns (Phase 2 — persistence)
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsError, setCampaignsError] = useState<string | null>(null);
+  const [campaigns, setCampaigns] = useState<BulkMessageSummary[]>([]);
+  const [campaignDetailOpen, setCampaignDetailOpen] = useState(false);
+  const [campaignDetailLoading, setCampaignDetailLoading] = useState(false);
+  const [campaignDetail, setCampaignDetail] = useState<BulkMessageDetailResponse | null>(null);
+
+  const composeFirstFocusRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2200);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  async function loadContacts() {
+    setError(null);
     setLoading(true);
-    setErrorMsg(null);
     try {
-      const res = await fetchOrganizerContacts();
-      const list = (res?.value ?? []) as Contact[];
-      setItems(list);
-    } catch (e) {
-      setErrorMsg(apiErrorToMessage(e));
+      const res = (await fetchOrganizerContacts()) as OrganizerContactsList;
+      setContacts(res.items || []);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load contacts");
     } finally {
       setLoading(false);
     }
   }
 
+  async function refreshContacts() {
+    setError(null);
+    setRefreshing(true);
+    try {
+      const res = (await fetchOrganizerContacts()) as OrganizerContactsList;
+      setContacts(res.items || []);
+      setToast("Contacts refreshed.");
+    } catch (e: any) {
+      setError(e?.message || "Failed to refresh contacts");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function loadCampaigns() {
+    setCampaignsError(null);
+    setCampaignsLoading(true);
+    try {
+      const res = await apiGet<BulkMessageListResponse>("/organizer/messages");
+      setCampaigns(res.items || []);
+    } catch (e: any) {
+      // campaigns are optional: don’t destabilize the page
+      setCampaignsError(e?.message || "Failed to load queued campaigns");
+    } finally {
+      setCampaignsLoading(false);
+    }
+  }
+
+  async function openCampaignDetail(id: number) {
+    setCampaignsError(null);
+    setCampaignDetailLoading(true);
+    setCampaignDetail(null);
+    setCampaignDetailOpen(true);
+    try {
+      const res = await apiGet<BulkMessageDetailResponse>(`/organizer/messages/${id}`);
+      setCampaignDetail(res);
+    } catch (e: any) {
+      setCampaignsError(e?.message || "Failed to load campaign details");
+      setCampaignDetailOpen(false);
+    } finally {
+      setCampaignDetailLoading(false);
+    }
+  }
+
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadContacts();
+    loadCampaigns();
   }, []);
 
-  useEffect(() => {
-    if (!successMsg) return;
-    const t = setTimeout(() => setSuccessMsg(null), 2500);
-    return () => clearTimeout(t);
-  }, [successMsg]);
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of contacts) for (const t of c.tags || []) s.add(t);
+    return Array.from(s).sort((a, b) => a.localeCompare(b));
+  }, [contacts]);
 
-  const nameError = useMemo(() => {
-    if (!nameTouched) return null;
-    if (!name.trim()) return "Name is required.";
-    return null;
-  }, [nameTouched, name]);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const tf = tagFilter.trim();
+    return contacts.filter((c) => {
+      const matchesSearch =
+        !q ||
+        (c.name || "").toLowerCase().includes(q) ||
+        (c.company || "").toLowerCase().includes(q) ||
+        (c.email || "").toLowerCase().includes(q) ||
+        (c.phone || "").toLowerCase().includes(q);
 
-  const newContactCanSubmit = useMemo(() => {
-    return !!name.trim() && !savingNew && savingId === null;
-  }, [name, savingNew, savingId]);
+      const matchesTag = !tf || (c.tags || []).includes(tf);
+      return matchesSearch && matchesTag;
+    });
+  }, [contacts, search, tagFilter]);
 
-  async function onCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setNameTouched(true);
-    setSuccessMsg(null);
-    setErrorMsg(null);
+  const selectedContacts = useMemo(() => {
+    const m = new Map<number, Contact>();
+    for (const c of contacts) m.set(c.id, c);
+    return Array.from(selectedIds).map((id) => m.get(id)).filter(Boolean) as Contact[];
+  }, [contacts, selectedIds]);
 
-    if (!name.trim()) return;
+  const emailEligibleCount = useMemo(() => selectedContacts.filter((c) => !!c.email).length, [selectedContacts]);
+  const smsEligibleCount = useMemo(() => selectedContacts.filter((c) => !!c.phone).length, [selectedContacts]);
 
-    setSavingNew(true);
+  function toggleSelect(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllFiltered() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const c of filtered) next.add(c.id);
+      return next;
+    });
+    setToast(filtered.length ? `Selected ${filtered.length} (filtered) contacts.` : "No contacts to select.");
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setToast("Selection cleared.");
+  }
+
+  async function saveContact() {
+    setError(null);
+
+    const name = newName.trim();
+    if (!name) {
+      setError("Name is required.");
+      return;
+    }
+
     try {
       await createOrganizerContact({
-        name: name.trim(),
-        email: email.trim() || null,
-        phone: phone.trim() || null,
-        company: company.trim() || null,
-        notes: notes.trim() || null,
-        tags: parseTags(tagsInput),
+        name,
+        company: newCompany.trim() || null,
+        email: newEmail.trim() || null,
+        phone: newPhone.trim() || null,
+        tags: normalizeTags(newTags),
       });
 
-      setSuccessMsg("Contact saved.");
-      setName("");
-      setEmail("");
-      setPhone("");
-      setCompany("");
-      setTagsInput("");
-      setNotes("");
-      setNameTouched(false);
+      setToast("Contact saved.");
+      setAddOpen(false);
+      setNewName("");
+      setNewCompany("");
+      setNewEmail("");
+      setNewPhone("");
+      setNewTags("");
 
-      await load();
-    } catch (e2) {
-      setErrorMsg(apiErrorToMessage(e2));
-    } finally {
-      setSavingNew(false);
+      await refreshContacts();
+    } catch (e: any) {
+      setError(e?.message || "Failed to save contact");
     }
   }
 
-  function startEdit(c: Contact) {
-    setSuccessMsg(null);
-    setErrorMsg(null);
-    setEditingId(c.id);
-    setEditDraft({
-      id: c.id,
-      name: c.name ?? "",
-      email: c.email ?? "",
-      phone: c.phone ?? "",
-      company: c.company ?? "",
-      notes: c.notes ?? "",
-      tags: c.tags ?? [],
-    });
-    setEditTagsInput((c.tags ?? []).join(", "));
+  function openCompose(ch: "email" | "sms") {
+    setChannel(ch);
+    setComposeOpen(true);
+    setDryRun(null);
   }
 
-  function cancelEdit() {
-    setEditingId(null);
-    setEditDraft(null);
-    setEditTagsInput("");
+  function closeCompose() {
+    setComposeOpen(false);
+    setDryRun(null);
   }
 
-  async function saveEdit() {
-    if (!editingId || !editDraft) return;
+  function insertVar(v: string) {
+    const el = document.getElementById("compose-body") as HTMLTextAreaElement | null;
+    if (!el) {
+      setBody((prev) => (prev || "") + v);
+      return;
+    }
+    const start = el.selectionStart ?? (el.value || "").length;
+    const end = el.selectionEnd ?? start;
+    const before = (body || "").slice(0, start);
+    const after = (body || "").slice(end);
+    const next = `${before}${v}${after}`;
+    setBody(next);
 
-    const draftName = (editDraft.name ?? "").toString().trim();
-    if (!draftName) {
-      setErrorMsg("Name is required to save changes.");
+    setTimeout(() => {
+      el.focus();
+      const pos = start + v.length;
+      el.setSelectionRange(pos, pos);
+    }, 0);
+  }
+
+  async function runDryRun() {
+    setError(null);
+    setDryRunLoading(true);
+    try {
+      const payload = {
+        channel,
+        subject: channel === "email" ? (subject.trim() || null) : null,
+        body: body ?? "",
+        contact_ids: Array.from(selectedIds),
+      };
+      const res = await apiPost<DryRunResponse>("/organizer/messages/dry-run", payload);
+      setDryRun(res);
+      setToast("Dry-run complete.");
+    } catch (e: any) {
+      setError(e?.message || "Dry-run failed");
+    } finally {
+      setDryRunLoading(false);
+    }
+  }
+
+  async function queueCampaign() {
+    setError(null);
+
+    if (selectedIds.size === 0) {
+      setToast("Select at least one contact.");
       return;
     }
 
-    setSavingId(editingId);
-    setSuccessMsg(null);
-    setErrorMsg(null);
+    const payload = {
+      channel,
+      subject: channel === "email" ? (subject.trim() || null) : null,
+      body: body ?? "",
+      contact_ids: Array.from(selectedIds),
+    };
 
     try {
-      await updateOrganizerContact(editingId, {
-        name: draftName,
-        email: (editDraft.email ?? "").toString().trim() || null,
-        phone: (editDraft.phone ?? "").toString().trim() || null,
-        company: (editDraft.company ?? "").toString().trim() || null,
-        notes: (editDraft.notes ?? "").toString().trim() || null,
-        tags: parseTags(editTagsInput),
-      });
+      const res = await apiPost<any>("/organizer/messages/queue", payload);
+      const id = (res && (res.bulk_message_id ?? res.id)) as number | undefined;
+      setToast(id ? `Queued campaign #${id}.` : "Queued campaign.");
 
-      setSuccessMsg("Changes saved.");
-      cancelEdit();
-      await load();
-    } catch (e) {
-      setErrorMsg(apiErrorToMessage(e));
-    } finally {
-      setSavingId(null);
+      await loadCampaigns();
+      setDryRun(null); // avoid preview confusion after queue
+    } catch (e: any) {
+      setError(e?.message || "Failed to queue campaign");
     }
   }
 
-  // Tag cloud
-  const allTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const c of items) {
-      for (const t of c.tags ?? []) {
-        const key = t.trim();
-        if (!key) continue;
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => {
-        const dc = b[1] - a[1];
-        if (dc !== 0) return dc;
-        return a[0].localeCompare(b[0]);
-      })
-      .map(([tag, count]) => ({ tag, count }));
-  }, [items]);
+  function exportContactsCsvTop() {
+    const rows = filtered;
+    const header = ["id", "name", "company", "email", "phone", "tags"].join(",");
+    const lines = rows.map((c) => {
+      const tags = (c.tags || []).join("|");
+      return [
+        String(c.id),
+        escapeCsvValue(c.name || ""),
+        escapeCsvValue(c.company || ""),
+        escapeCsvValue(c.email || ""),
+        escapeCsvValue(c.phone || ""),
+        escapeCsvValue(tags),
+      ].join(",");
+    });
+    const csv = [header, ...lines].join("\n");
+    downloadTextFile(`contacts_${nowStamp()}.csv`, csv, "text/csv");
+    setToast("Exported CSV.");
+  }
 
-  // Filter + sort
-  const filtered = useMemo(() => {
-    const q = normalize(query).trim();
+  function exportRecipientsCsvFromModal() {
+    const use = dryRun ? [...(dryRun.eligible || []), ...(dryRun.skipped || [])] : selectedContacts.map((c) => ({
+      contact_id: c.id,
+      name: c.name,
+      company: c.company,
+      email: c.email,
+      phone: c.phone,
+      rendered_text: renderTemplate(body ?? "", c),
+      reason_skipped: null,
+    }));
 
-    let list = items.slice();
+    const header = [
+      "contact_id",
+      "name",
+      "company",
+      "email",
+      "phone",
+      "rendered_text",
+      "reason_skipped",
+    ].join(",");
 
-    if (tagFilter) {
-      const tf = tagFilter.toLowerCase();
-      list = list.filter((c) =>
-        (c.tags ?? []).some((t) => t.toLowerCase() === tf)
-      );
-    }
+    const lines = use.map((r: any) =>
+      [
+        String(r.contact_id),
+        escapeCsvValue(r.name || ""),
+        escapeCsvValue(r.company || ""),
+        escapeCsvValue(r.email || ""),
+        escapeCsvValue(r.phone || ""),
+        escapeCsvValue(r.rendered_text || ""),
+        escapeCsvValue(r.reason_skipped || ""),
+      ].join(",")
+    );
 
-    if (q) {
-      list = list.filter((c) => {
-        const hay = [
-          c.name,
-          c.email,
-          c.phone,
-          c.company,
-          c.notes,
-          ...(c.tags ?? []),
-        ]
-          .map(normalize)
-          .join(" | ");
-        return hay.includes(q);
-      });
-    }
+    const csv = [header, ...lines].join("\n");
+    downloadTextFile(`recipients_${channel}_${nowStamp()}.csv`, csv, "text/csv");
+    setToast("Recipients CSV exported.");
+  }
 
-    if (sortMode === "name_asc") {
-      list.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-    } else if (sortMode === "newest") {
-      list.sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
-    } else if (sortMode === "oldest") {
-      list.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
-    }
+  async function copyRecipientList() {
+    const list =
+      dryRun?.eligible?.length
+        ? dryRun.eligible
+            .map((r) => (channel === "email" ? r.email : r.phone))
+            .filter(Boolean)
+            .join("\n")
+        : selectedContacts
+            .map((c) => (channel === "email" ? c.email : c.phone))
+            .filter(Boolean)
+            .join("\n");
 
-    return list;
-  }, [items, query, tagFilter, sortMode]);
-
-  const showingText = useMemo(() => {
-    const total = items.length;
-    const shown = filtered.length;
-    if (total === shown) return `${shown}`;
-    return `${shown} of ${total}`;
-  }, [items.length, filtered.length]);
-
-  const busy = loading || savingNew || savingId !== null;
-
-  function handleTagClick(tag: string) {
-    // If editing, quick-add to the edit tags input.
-    if (editingId !== null) {
-      setEditTagsInput((prev) => appendTagToInput(prev, tag));
+    if (!list.trim()) {
+      setToast("No recipients to copy.");
       return;
     }
-    // Otherwise filter.
-    setTagFilter((prev) =>
-      prev?.toLowerCase() === tag.toLowerCase() ? null : tag
-    );
+
+    const ok = await copyToClipboard(list);
+    setToast(ok ? "Recipients copied." : "Copy failed.");
   }
 
-  const highlightOn = editingId === null && qNorm.length > 0;
+  async function copyRenderedMessage() {
+    const first =
+      dryRun?.eligible?.[0] ||
+      (selectedContacts[0]
+        ? ({
+            rendered_text: renderTemplate(body ?? "", selectedContacts[0]),
+          } as any)
+        : null);
+
+    if (!first?.rendered_text) {
+      setToast("Nothing to copy yet.");
+      return;
+    }
+
+    const ok = await copyToClipboard(String(first.rendered_text));
+    setToast(ok ? "Rendered message copied." : "Copy failed.");
+  }
 
   return (
     <div className="p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Organizer Contacts</h1>
-          <p className="text-sm opacity-70">
-            Upload/import later. For now this is a stable form + list wiring.
-          </p>
-        </div>
+      <div className="max-w-5xl mx-auto">
+        <h1 className="text-2xl font-semibold mb-6">Contact Management</h1>
 
-        <a className="text-sm underline" href="/organizer/profile">
-          ← Back to Profile
-        </a>
-      </div>
-
-      <div className="mt-4 space-y-3">
-        {successMsg && (
-          <div className="rounded-xl border border-green-300 bg-green-50 p-3 text-sm">
-            <div className="font-semibold">Success</div>
-            <div>{successMsg}</div>
+        {toast && <div className="mb-4 rounded-lg border bg-white px-4 py-3 text-sm">{toast}</div>}
+        {error && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            {error}
           </div>
         )}
 
-        {errorMsg && (
-          <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-sm">
-            <div className="font-semibold">Error</div>
-            <div>{errorMsg}</div>
-          </div>
-        )}
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Create form */}
-        <div className="rounded-2xl border p-5">
-          <h2 className="text-lg font-semibold">Add a contact</h2>
-
-          <form className="mt-4 space-y-4" onSubmit={onCreate}>
+        {/* Top control card */}
+        <div className="rounded-2xl border bg-white shadow-sm p-6 mb-6">
+          <div className="flex items-start justify-between gap-4">
             <div>
-              <label className="text-sm font-medium" htmlFor="contact_name">
-                Name <span className="text-red-600">*</span>
-              </label>
-              <input
-                id="contact_name"
-                name="name"
-                autoComplete="name"
-                className={`mt-1 w-full rounded-xl border p-2 ${
-                  nameError ? "border-red-400" : ""
-                }`}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                onBlur={() => setNameTouched(true)}
-                placeholder="Jane Vendor"
-              />
-              {nameError && (
-                <div className="mt-1 text-xs text-red-600">{nameError}</div>
-              )}
-            </div>
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="contact_email">
-                Email
-              </label>
-              <input
-                id="contact_email"
-                name="email"
-                autoComplete="email"
-                className="mt-1 w-full rounded-xl border p-2"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="jane@vendor.com"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="contact_phone">
-                Phone
-              </label>
-              <input
-                id="contact_phone"
-                name="phone"
-                autoComplete="tel"
-                className="mt-1 w-full rounded-xl border p-2"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="404-555-5555"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="contact_company">
-                Company
-              </label>
-              <input
-                id="contact_company"
-                name="company"
-                autoComplete="organization"
-                className="mt-1 w-full rounded-xl border p-2"
-                value={company}
-                onChange={(e) => setCompany(e.target.value)}
-                placeholder="Peanuts Co"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="contact_tags">
-                Tags (comma-separated)
-              </label>
-              <input
-                id="contact_tags"
-                name="tags"
-                autoComplete="off"
-                className="mt-1 w-full rounded-xl border p-2"
-                value={tagsInput}
-                onChange={(e) => setTagsInput(e.target.value)}
-                placeholder="food truck, VIP, sponsor"
-              />
-              <div className="mt-1 text-xs opacity-70">
-                We’ll auto-trim and de-dupe tags.
+              <div className="text-lg font-semibold">Contact Management</div>
+              <div className="text-sm text-gray-500 mt-1">
+                {loading ? "Loading…" : `${contacts.length} total contacts`} • {selectedIds.size} selected
               </div>
             </div>
 
-            <div>
-              <label className="text-sm font-medium" htmlFor="contact_notes">
-                Notes
-              </label>
-              <textarea
-                id="contact_notes"
-                name="notes"
-                className="mt-1 w-full rounded-xl border p-2"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Met at Holiday Bazaar. Great response time."
-                rows={4}
-              />
-            </div>
+            <div className="flex items-center gap-3 flex-wrap justify-end">
+              <ButtonPill variant="primary" onClick={() => setAddOpen(true)}>
+                + Add Contact
+              </ButtonPill>
 
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-black px-4 py-2 text-white disabled:opacity-50"
-              disabled={!newContactCanSubmit}
-            >
-              {savingNew ? "Saving…" : "Save contact"}
-            </button>
-          </form>
-        </div>
-
-        {/* List + search */}
-        <div className="rounded-2xl border p-5">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-lg font-semibold">Contacts ({showingText})</div>
-            <button
-              className="text-sm underline disabled:opacity-50"
-              onClick={load}
-              disabled={busy}
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
-          </div>
-
-          {/* Search + sort */}
-          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex-1">
-              <label className="sr-only" htmlFor="contacts_search">
-                Search contacts
-              </label>
-              <input
-                id="contacts_search"
-                name="contacts_search"
-                autoComplete="off"
-                className="w-full rounded-xl border p-2"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search name, email, phone, company, notes, tags…"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <label className="text-sm opacity-70" htmlFor="contacts_sort">
-                Sort
-              </label>
-              <select
-                id="contacts_sort"
-                className="rounded-xl border p-2 text-sm"
-                value={sortMode}
-                onChange={(e) =>
-                  setSortMode(e.target.value as "name_asc" | "newest" | "oldest")
-                }
+              <ButtonPill
+                variant="primary"
+                onClick={() => setToast("Import CSV is UI-only for Phase 1 (safe).")}
+                title="UI-only (safe)"
               >
-                <option value="name_asc">Name (A→Z)</option>
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-              </select>
+                ⬆ Import CSV
+              </ButtonPill>
+
+              <ButtonPill
+                variant="primary"
+                onClick={exportContactsCsvTop}
+                disabled={filtered.length === 0}
+                title="Exports current filtered contacts list"
+              >
+                ⬇ Export CSV
+              </ButtonPill>
             </div>
           </div>
 
-          {/* Tag filter chips */}
-          {allTags.length > 0 && (
-            <div className="mt-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-medium">
-                  Tags{" "}
-                  {editingId !== null ? (
-                    <span className="ml-2 text-xs font-normal opacity-60">
-                      (click to add to edit tags)
-                    </span>
-                  ) : null}
-                </div>
-                {(tagFilter || query) && (
-                  <button
-                    className="text-sm underline"
-                    onClick={() => {
-                      setTagFilter(null);
-                      setQuery("");
-                    }}
-                  >
-                    Clear filters
-                  </button>
-                )}
-              </div>
+          <div className="mt-6 flex items-center gap-4 flex-wrap">
+            <select
+              className="w-full sm:w-[360px] rounded-xl border px-4 py-3 text-sm bg-white"
+              value={eventFilter}
+              onChange={(e) => setEventFilter(e.target.value)}
+              title="UI-only for now"
+            >
+              <option value="all">All Events</option>
+            </select>
 
-              <div className="mt-2 flex flex-wrap gap-2">
-                {allTags.slice(0, 16).map(({ tag, count }) => {
-                  const active =
-                    tagFilter?.toLowerCase() === tag.toLowerCase() &&
-                    editingId === null;
+            <ButtonPill
+              variant="soft"
+              onClick={selectAllFiltered}
+              disabled={filtered.length === 0}
+              className="bg-emerald-200 text-emerald-900 hover:bg-emerald-300"
+            >
+              ✓ Select All
+            </ButtonPill>
 
-                  return (
-                    <button
-                      key={`tag-${tag}`}
-                      type="button"
-                      className={`rounded-full border px-3 py-1 text-xs ${
-                        active ? "bg-black text-white" : ""
-                      }`}
-                      onClick={() => handleTagClick(tag)}
-                      title={
-                        editingId !== null
-                          ? `Add "${tag}" to edit tags`
-                          : `Filter by ${tag}`
-                      }
-                    >
-                      {highlightOn ? highlightText(tag, qNorm) : tag}{" "}
-                      <span className="opacity-70">({count})</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <ButtonPill
+              variant="soft"
+              onClick={() => openCompose("email")}
+              disabled={selectedIds.size === 0}
+              className="bg-indigo-200 text-indigo-900 hover:bg-indigo-300"
+              title="Opens compose modal"
+            >
+              ✉ Email ({emailEligibleCount})
+            </ButtonPill>
 
-              {allTags.length > 16 && (
-                <div className="mt-1 text-xs opacity-60">
-                  Showing top 16 tags.
-                </div>
-              )}
+            <ButtonPill
+              variant="soft"
+              onClick={() => openCompose("sms")}
+              disabled={selectedIds.size === 0}
+              className="bg-violet-200 text-violet-900 hover:bg-violet-300"
+              title="Opens compose modal"
+            >
+              💬 Text ({smsEligibleCount})
+            </ButtonPill>
+
+            <button
+              className="ml-auto text-sm text-gray-500 hover:text-gray-800"
+              onClick={clearSelection}
+              disabled={selectedIds.size === 0}
+              title="Clear selection"
+            >
+              Clear selection
+            </button>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3 flex-wrap">
+            <input
+              className="w-full sm:w-[360px] rounded-xl border px-4 py-3 text-sm"
+              placeholder="Search contacts…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+
+            <select
+              className="rounded-xl border px-4 py-3 text-sm bg-white"
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+            >
+              <option value="">All tags</option>
+              {allTags.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="text-sm text-gray-500 hover:text-gray-800"
+              onClick={() => {
+                setSearch("");
+                setTagFilter("");
+              }}
+            >
+              Clear filters
+            </button>
+
+            <button
+              className="text-sm text-gray-500 hover:text-gray-800"
+              onClick={refreshContacts}
+              disabled={refreshing}
+            >
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {/* Queued Campaigns (Phase 2) */}
+        <div className="rounded-2xl border bg-white shadow-sm p-6 mb-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-lg font-semibold">Queued Campaigns</div>
+              <div className="text-sm text-gray-500 mt-1">Saved campaigns (no provider sending yet).</div>
+            </div>
+
+            <button
+              className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
+              onClick={loadCampaigns}
+              disabled={campaignsLoading}
+            >
+              {campaignsLoading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+
+          {campaignsError && (
+            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {campaignsError}
             </div>
           )}
 
-          <div className="mt-4">
-            {filtered.length === 0 ? (
-              <div className="text-sm opacity-70">
-                {items.length === 0
-                  ? "No contacts yet."
-                  : "No matches. Try clearing filters."}
-              </div>
-            ) : (
-              <ul className="space-y-3">
-                {filtered.map((c) => {
-                  const isEditing = editingId === c.id;
-                  const isSavingThis = savingId === c.id;
-
-                  const showName = c.name || "(no name)";
-                  const showEmail = c.email || "";
-                  const showPhone = c.phone || "";
-                  const showCompany = c.company || "";
-                  const showNotes = c.notes || "";
-
-                  return (
-                    <li key={c.id} className="rounded-2xl border p-4">
-                      {!isEditing ? (
-                        <>
-                          <div className="flex items-start justify-between gap-4">
-                            <div>
-                              <div className="font-semibold">
-                                {highlightOn
-                                  ? highlightText(showName, qNorm)
-                                  : showName}
-                              </div>
-
-                              <div className="mt-1 text-sm opacity-80">
-                                {showEmail ? (
-                                  <div>
-                                    {highlightOn
-                                      ? highlightText(showEmail, qNorm)
-                                      : showEmail}
-                                  </div>
-                                ) : null}
-                                {showPhone ? (
-                                  <div>
-                                    {highlightOn
-                                      ? highlightText(showPhone, qNorm)
-                                      : showPhone}
-                                  </div>
-                                ) : null}
-                                {showCompany ? (
-                                  <div>
-                                    {highlightOn
-                                      ? highlightText(showCompany, qNorm)
-                                      : showCompany}
-                                  </div>
-                                ) : null}
-                              </div>
-
-                              {c.tags?.length ? (
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {c.tags.map((t) => (
-                                    <button
-                                      key={`${c.id}-tag-${t}`}
-                                      type="button"
-                                      className="rounded-full border px-2 py-0.5 text-xs"
-                                      onClick={() => handleTagClick(t)}
-                                      title="Filter by this tag"
-                                    >
-                                      {highlightOn
-                                        ? highlightText(t, qNorm)
-                                        : t}
-                                    </button>
-                                  ))}
-                                </div>
-                              ) : null}
-
-                              {showNotes ? (
-                                <div className="mt-2 text-sm opacity-80">
-                                  {highlightOn
-                                    ? highlightText(showNotes, qNorm)
-                                    : showNotes}
-                                </div>
-                              ) : null}
-                            </div>
-
-                            <button
-                              className="text-sm underline"
-                              onClick={() => startEdit(c)}
-                            >
-                              Edit
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="font-semibold">Edit contact</div>
-                            <button
-                              className="text-sm underline disabled:opacity-50"
-                              onClick={cancelEdit}
-                              disabled={isSavingThis}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-
-                          <div className="mt-3 grid grid-cols-1 gap-3">
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_name_${c.id}`}
-                              >
-                                Name <span className="text-red-600">*</span>
-                              </label>
-                              <input
-                                id={`edit_name_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                value={(editDraft?.name ?? "") as string}
-                                onChange={(e) =>
-                                  setEditDraft((prev) => ({
-                                    ...(prev ?? {}),
-                                    name: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_email_${c.id}`}
-                              >
-                                Email
-                              </label>
-                              <input
-                                id={`edit_email_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                value={(editDraft?.email ?? "") as string}
-                                onChange={(e) =>
-                                  setEditDraft((prev) => ({
-                                    ...(prev ?? {}),
-                                    email: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_phone_${c.id}`}
-                              >
-                                Phone
-                              </label>
-                              <input
-                                id={`edit_phone_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                value={(editDraft?.phone ?? "") as string}
-                                onChange={(e) =>
-                                  setEditDraft((prev) => ({
-                                    ...(prev ?? {}),
-                                    phone: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_company_${c.id}`}
-                              >
-                                Company
-                              </label>
-                              <input
-                                id={`edit_company_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                value={(editDraft?.company ?? "") as string}
-                                onChange={(e) =>
-                                  setEditDraft((prev) => ({
-                                    ...(prev ?? {}),
-                                    company: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_tags_${c.id}`}
-                              >
-                                Tags (comma-separated)
-                              </label>
-                              <input
-                                id={`edit_tags_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                value={editTagsInput}
-                                onChange={(e) => setEditTagsInput(e.target.value)}
-                              />
-                              <div className="mt-1 text-xs opacity-70">
-                                Tip: while editing, click any tag chip to add it
-                                here.
-                              </div>
-                            </div>
-
-                            <div>
-                              <label
-                                className="text-sm font-medium"
-                                htmlFor={`edit_notes_${c.id}`}
-                              >
-                                Notes
-                              </label>
-                              <textarea
-                                id={`edit_notes_${c.id}`}
-                                className="mt-1 w-full rounded-xl border p-2"
-                                rows={3}
-                                value={(editDraft?.notes ?? "") as string}
-                                onChange={(e) =>
-                                  setEditDraft((prev) => ({
-                                    ...(prev ?? {}),
-                                    notes: e.target.value,
-                                  }))
-                                }
-                              />
-                            </div>
-
-                            <button
-                              className="w-full rounded-xl bg-black px-4 py-2 text-white disabled:opacity-50"
-                              onClick={saveEdit}
-                              disabled={savingId !== null || savingNew}
-                            >
-                              {isSavingThis ? "Saving…" : "Save changes"}
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+          {campaignsLoading ? (
+            <div className="mt-4 text-sm text-gray-600">Loading queued campaigns…</div>
+          ) : campaigns.length === 0 ? (
+            <div className="mt-6 text-sm text-gray-600">
+              No queued campaigns yet. Select contacts → Compose → Queue campaign.
+            </div>
+          ) : (
+            <div className="mt-4 overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 text-gray-600">
+                  <tr>
+                    <th className="text-left px-4 py-3 w-20">ID</th>
+                    <th className="text-left px-4 py-3 w-28">Channel</th>
+                    <th className="text-left px-4 py-3">Subject</th>
+                    <th className="text-left px-4 py-3 w-28">Status</th>
+                    <th className="text-left px-4 py-3 w-40">Queued</th>
+                    <th className="text-left px-4 py-3 w-24">Eligible</th>
+                    <th className="text-left px-4 py-3 w-24">Skipped</th>
+                    <th className="text-left px-4 py-3 w-28">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {campaigns.map((m) => (
+                    <tr key={m.id} className="border-t hover:bg-gray-50">
+                      <td className="px-4 py-3 font-medium">#{m.id}</td>
+                      <td className="px-4 py-3 uppercase text-xs tracking-wide">{m.channel}</td>
+                      <td className="px-4 py-3">{m.subject || <span className="text-gray-400">—</span>}</td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs">
+                          {m.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {m.queued_at || m.created_at || <span className="text-gray-400">—</span>}
+                      </td>
+                      <td className="px-4 py-3">{m.eligible_count ?? <span className="text-gray-400">—</span>}</td>
+                      <td className="px-4 py-3">{m.skipped_count ?? <span className="text-gray-400">—</span>}</td>
+                      <td className="px-4 py-3">
+                        <button
+                          className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
+                          onClick={() => openCampaignDetail(m.id)}
+                          title="View recipients"
+                        >
+                          View
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
+
+        {/* Contacts panel */}
+        <div className="rounded-2xl border bg-white shadow-sm">
+          <div className="px-6 py-5 border-b">
+            <div className="text-lg font-semibold">Contacts</div>
+          </div>
+
+          {loading ? (
+            <div className="p-10 text-sm text-gray-600">Loading contacts…</div>
+          ) : filtered.length === 0 ? (
+            <div className="p-14 text-center">
+              <div className="mx-auto mb-4 h-14 w-14 rounded-full bg-gray-100 flex items-center justify-center text-gray-400">
+                <span className="text-2xl">👥</span>
+              </div>
+              <div className="text-lg font-medium text-gray-700">No contacts found</div>
+              <div className="text-sm text-gray-500 mt-1">Add contacts manually or import from CSV</div>
+            </div>
+          ) : (
+            <div className="overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 text-gray-600">
+                  <tr>
+                    <th className="text-left px-6 py-3 w-12"></th>
+                    <th className="text-left px-6 py-3">Name</th>
+                    <th className="text-left px-6 py-3">Company</th>
+                    <th className="text-left px-6 py-3">Email</th>
+                    <th className="text-left px-6 py-3">Phone</th>
+                    <th className="text-left px-6 py-3">Tags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((c) => {
+                    const checked = selectedIds.has(c.id);
+                    return (
+                      <tr key={c.id} className="border-t hover:bg-gray-50">
+                        <td className="px-6 py-3">
+                          <input type="checkbox" checked={checked} onChange={() => toggleSelect(c.id)} />
+                        </td>
+                        <td className="px-6 py-3 font-medium">{c.name || <span className="text-gray-400">—</span>}</td>
+                        <td className="px-6 py-3">{c.company || <span className="text-gray-400">—</span>}</td>
+                        <td className="px-6 py-3">{c.email || <span className="text-gray-400">—</span>}</td>
+                        <td className="px-6 py-3">{c.phone || <span className="text-gray-400">—</span>}</td>
+                        <td className="px-6 py-3">
+                          <div className="flex flex-wrap gap-1">
+                            {(c.tags || []).length === 0 ? (
+                              <span className="text-gray-400">—</span>
+                            ) : (
+                              c.tags.map((t) => (
+                                <span
+                                  key={t}
+                                  className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs"
+                                >
+                                  {t}
+                                </span>
+                              ))
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Add Contact Modal */}
+        {addOpen && (
+          <ModalShell
+            title="Add Contact"
+            subtitle="Create a new organizer contact."
+            onClose={() => setAddOpen(false)}
+            maxWidthClass="max-w-2xl"
+          >
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input
+                  className="rounded-xl border px-4 py-3 text-sm"
+                  placeholder="Name"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                />
+                <input
+                  className="rounded-xl border px-4 py-3 text-sm"
+                  placeholder="Company"
+                  value={newCompany}
+                  onChange={(e) => setNewCompany(e.target.value)}
+                />
+                <input
+                  className="rounded-xl border px-4 py-3 text-sm"
+                  placeholder="Email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                />
+                <input
+                  className="rounded-xl border px-4 py-3 text-sm"
+                  placeholder="Phone"
+                  value={newPhone}
+                  onChange={(e) => setNewPhone(e.target.value)}
+                />
+              </div>
+
+              <input
+                className="rounded-xl border px-4 py-3 text-sm w-full"
+                placeholder="Tags (comma-separated, e.g., vip, sponsor)"
+                value={newTags}
+                onChange={(e) => setNewTags(e.target.value)}
+              />
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button className="px-4 py-2 rounded-lg border hover:bg-gray-50" onClick={() => setAddOpen(false)}>
+                  Cancel
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700" onClick={saveContact}>
+                  Save
+                </button>
+              </div>
+            </div>
+          </ModalShell>
+        )}
+
+        {/* Campaign Detail Modal */}
+        {campaignDetailOpen && (
+          <ModalShell
+            title={campaignDetail?.message ? `Campaign #${campaignDetail.message.id}` : "Campaign"}
+            subtitle="Recipients snapshot for this queued campaign."
+            onClose={() => {
+              setCampaignDetailOpen(false);
+              setCampaignDetail(null);
+            }}
+            maxWidthClass="max-w-5xl"
+          >
+            <div className="p-5">
+              {campaignDetailLoading ? (
+                <div className="text-sm text-gray-600">Loading details…</div>
+              ) : !campaignDetail ? (
+                <div className="text-sm text-gray-600">No details loaded.</div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm text-gray-500">Channel</div>
+                        <div className="font-medium uppercase">{campaignDetail.message.channel}</div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-500">Status</div>
+                        <div className="font-medium">{campaignDetail.message.status}</div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-500">Eligible</div>
+                        <div className="font-medium">{campaignDetail.message.eligible_count ?? "—"}</div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-500">Skipped</div>
+                        <div className="font-medium">{campaignDetail.message.skipped_count ?? "—"}</div>
+                      </div>
+                    </div>
+
+                    {campaignDetail.message.subject !== null && (
+                      <div className="mt-3">
+                        <div className="text-sm text-gray-500">Subject</div>
+                        <div className="text-sm">
+                          {campaignDetail.message.subject || <span className="text-gray-400">—</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mt-3">
+                      <div className="text-sm text-gray-500">Body</div>
+                      <pre className="mt-1 whitespace-pre-wrap rounded-lg border bg-gray-50 p-3 text-xs">
+                        {campaignDetail.message.body}
+                      </pre>
+                    </div>
+
+                    <div className="mt-3">
+                      <button
+                        className="px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm"
+                        onClick={async () => {
+                          const ok = await copyToClipboard(campaignDetail.message.body || "");
+                          setToast(ok ? "Campaign body copied." : "Copy failed.");
+                        }}
+                      >
+                        Copy body
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border bg-white shadow-sm overflow-auto">
+                    <div className="px-5 py-4 border-b">
+                      <div className="text-lg font-semibold">Recipients</div>
+                      <div className="text-sm text-gray-500 mt-1">{campaignDetail.recipients.length} total</div>
+                    </div>
+
+                    {campaignDetail.recipients.length === 0 ? (
+                      <div className="p-6 text-sm text-gray-600">No recipients stored.</div>
+                    ) : (
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-gray-50 text-gray-600">
+                          <tr>
+                            <th className="text-left px-5 py-3 w-24">ID</th>
+                            <th className="text-left px-5 py-3">Name</th>
+                            <th className="text-left px-5 py-3">Email</th>
+                            <th className="text-left px-5 py-3">Phone</th>
+                            <th className="text-left px-5 py-3 w-28">Status</th>
+                            <th className="text-left px-5 py-3">Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {campaignDetail.recipients.map((r, idx) => (
+                            <tr key={`${r.contact_id}-${idx}`} className="border-t">
+                              <td className="px-5 py-3 font-medium">{r.contact_id}</td>
+                              <td className="px-5 py-3">{r.name || <span className="text-gray-400">—</span>}</td>
+                              <td className="px-5 py-3">{r.email || <span className="text-gray-400">—</span>}</td>
+                              <td className="px-5 py-3">{r.phone || <span className="text-gray-400">—</span>}</td>
+                              <td className="px-5 py-3">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full border bg-white text-xs">
+                                  {r.status}
+                                </span>
+                              </td>
+                              <td className="px-5 py-3">{r.reason_skipped || <span className="text-gray-400">—</span>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </ModalShell>
+        )}
+
+        {/* Compose Modal */}
+        {composeOpen && (
+          <ModalShell
+            title="Compose"
+            subtitle="Preview-only. No sending. Use dry-run for eligible/skipped + rendered text."
+            onClose={closeCompose}
+            maxWidthClass="max-w-5xl"
+            firstFocusRef={composeFirstFocusRef}
+            headerRight={
+              <div className="flex items-center gap-2">
+                <button
+                  ref={composeFirstFocusRef}
+                  className="px-3 py-2 rounded-lg border hover:bg-gray-50"
+                  onClick={exportRecipientsCsvFromModal}
+                  title={dryRun ? "Export eligible/skipped with rendered text" : "Export selected"}
+                >
+                  Export recipients CSV
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg border hover:bg-gray-50"
+                  onClick={copyRecipientList}
+                  title="Copy eligible recipient addresses (or selected if no dry-run yet)"
+                >
+                  Copy recipients
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg border hover:bg-gray-50"
+                  onClick={copyRenderedMessage}
+                  title="Copy rendered message for the first eligible preview"
+                >
+                  Copy rendered message
+                </button>
+                <button
+                  className="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                  onClick={queueCampaign}
+                  disabled={selectedIds.size === 0 || (channel === "email" ? emailEligibleCount : smsEligibleCount) === 0}
+                  title="Persist as queued (no real sending yet)"
+                >
+                  Queue campaign
+                </button>
+              </div>
+            }
+          >
+            <div className="grid grid-cols-1 lg:grid-cols-2 h-full">
+              <div className="p-5 border-b lg:border-b-0 lg:border-r">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-600">Channel</span>
+                    <div className="inline-flex rounded-lg border overflow-hidden">
+                      <button
+                        className={`px-3 py-2 text-sm ${channel === "email" ? "bg-black text-white" : "bg-white hover:bg-gray-50"}`}
+                        onClick={() => {
+                          setChannel("email");
+                          setDryRun(null);
+                        }}
+                      >
+                        Email
+                      </button>
+                      <button
+                        className={`px-3 py-2 text-sm ${channel === "sms" ? "bg-black text-white" : "bg-white hover:bg-gray-50"}`}
+                        onClick={() => {
+                          setChannel("sms");
+                          setDryRun(null);
+                        }}
+                      >
+                        SMS
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-gray-600">
+                    Selected: <span className="font-medium">{selectedIds.size}</span>
+                    <span className="text-gray-400"> • </span>
+                    Eligible:{" "}
+                    <span className="font-medium">{channel === "email" ? emailEligibleCount : smsEligibleCount}</span>
+                  </div>
+                </div>
+
+                {channel === "email" && (
+                  <div className="mt-4">
+                    <label className="text-sm font-medium">Subject</label>
+                    <input
+                      className="mt-1 w-full rounded-xl border px-4 py-3 text-sm"
+                      placeholder="Subject (optional)"
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <div className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">Message</label>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-gray-500">Insert:</span>
+                      <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{name}")}>
+                        {"{name}"}
+                      </button>
+                      <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{company}")}>
+                        {"{company}"}
+                      </button>
+                      <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{email}")}>
+                        {"{email}"}
+                      </button>
+                      <button className="px-2 py-1 rounded border hover:bg-gray-50" onClick={() => insertVar("{phone}")}>
+                        {"{phone}"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <textarea
+                    id="compose-body"
+                    className="mt-1 w-full rounded-xl border px-4 py-3 text-sm min-h-[220px]"
+                    placeholder={`Write your ${channel.toUpperCase()} message… (preview only)`}
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                  />
+                  <div className="mt-2 text-xs text-gray-500">
+                    Variables: <span className="font-mono">{`{name} {company} {email} {phone}`}</span>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex items-center gap-2">
+                  <button
+                    className="px-4 py-2 rounded-lg bg-black text-white hover:opacity-90 disabled:opacity-50"
+                    onClick={runDryRun}
+                    disabled={dryRunLoading || selectedIds.size === 0}
+                  >
+                    {dryRunLoading ? "Running…" : "Dry-run"}
+                  </button>
+                  <button
+                    className="px-4 py-2 rounded-lg border hover:bg-gray-50"
+                    onClick={() => {
+                      setDryRun(null);
+                      setToast("Preview reset.");
+                    }}
+                  >
+                    Reset preview
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-lg font-semibold">Preview</div>
+                    <div className="text-sm text-gray-500 mt-1">
+                      Showing first 3 recipients. (From dry-run)
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-gray-600">
+                    Eligible: <span className="font-medium">{dryRun?.eligible?.length ?? 0}</span>
+                    <span className="text-gray-400"> • </span>
+                    Skipped: <span className="font-medium">{dryRun?.skipped?.length ?? 0}</span>
+                  </div>
+                </div>
+
+                {!dryRun ? (
+                  <div className="mt-6 text-sm text-gray-600">
+                    Run <span className="font-medium">Dry-run</span> to see eligible/skipped recipients and rendered message text.
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    {(dryRun.eligible || []).slice(0, 3).map((r) => (
+                      <div key={r.contact_id} className="rounded-xl border bg-white p-4">
+                        <div className="font-medium">{r.name || "—"}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {r.company ? `${r.company} • ` : ""}
+                          {channel === "email" ? r.email : r.phone}
+                        </div>
+                        <div className="mt-3 text-sm whitespace-pre-wrap">{r.rendered_text}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </ModalShell>
+        )}
       </div>
     </div>
   );

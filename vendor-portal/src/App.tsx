@@ -17,6 +17,7 @@ import OrganizerMapEditorPage from "./pages/OrganizerMapEditorPage";
 import OrganizerContactsPage from "./pages/OrganizerContactsPage";
 import OrganizerApplicationsPage from "./pages/OrganizerApplicationsPage";
 import OrganizerProfilePage from "./pages/OrganizerProfilePage";
+import OrganizerCampaignDetailPage from "./pages/OrganizerCampaignDetailPage"; // ✅ NEW
 
 // Vendor
 import VendorLogin from "./pages/VendorLogin";
@@ -49,6 +50,11 @@ export default function App() {
         <Route path="/organizer/contacts" element={<OrganizerContactsPage />} />
         <Route path="/organizer/applications" element={<OrganizerApplicationsPage />} />
         <Route path="/organizer/profile" element={<OrganizerProfilePage />} />
+
+        {/* ✅ Campaign detail page */}
+        <Route path="/organizer/campaigns/:id" element={<OrganizerCampaignDetailPage />} />
+
+        {/* Keep this as-is for now */}
         <Route path="/organizer/messages" element={<ComingSoon title="Messaging" />} />
         <Route path="/organizer/billing" element={<ComingSoon title="Billing" />} />
         <Route path="/organizer/settings" element={<ComingSoon title="Settings" />} />
