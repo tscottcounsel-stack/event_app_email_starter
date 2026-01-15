@@ -1,6 +1,12 @@
 # app/main.py
-from fastapi import FastAPI
+from __future__ import annotations
+
+import importlib
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.auth import require_organizer
 
 app = FastAPI(title="VendorConnect API", version="0.1.0")
 
@@ -20,56 +26,47 @@ app.add_middleware(
 )
 
 
-# Import + include routers.
-# If one import fails, we still want the server to boot so you can see what broke.
-def _include(path: str):
+def _include(module_path: str) -> None:
+    """
+    Import module and include its `router` if present.
+    Never crash the app if one router file is broken — just log and skip.
+    """
     try:
-        mod = __import__(path, fromlist=["router"])
+        mod = importlib.import_module(module_path)
         router = getattr(mod, "router", None)
-        if router is not None:
-            app.include_router(router)
-            print(f"[main] Included router from {path}")
-        else:
-            print(f"[main] Skipping {path} (no router attr)")
+        if router is None:
+            print(f"[ROUTER] SKIP {module_path} (no router)")
+            return
+        app.include_router(router)
+        print(f"[ROUTER] OK   {module_path}")
     except Exception as e:
-        print(f"[main] Skipping {path} (import failed): {e}")
+        print(f"[ROUTER] FAIL {module_path}: {repr(e)}")
 
 
-# Core routers
-_include("app.routers.auth")
-_include("app.routers.auth_debug")
-_include("app.routers.public_events")
-_include("app.routers.public_diagram")
-_include("app.routers.public_organizers")
-_include("app.routers.public_vendors")
-_include("app.routers.public_vendor_categories")
-
-_include("app.routers.events")
-_include("app.routers.applications")
-_include("app.routers.event_invites")
-
+# Core routers (add more as needed)
 _include("app.routers.organizer_events")
-_include("app.routers.organizer_event_update")
-_include("app.routers.organizer_applications")
-_include("app.routers.organizer_contacts")  # ✅ contacts CRM
-_include("app.routers.organizer_messages")  # ✅ bulk messaging (dry-run + queue)
-_include("app.routers.organizer_profile")
 _include("app.routers.organizer_diagram")
-_include("app.routers.organizer_event_invites")
+_include("app.routers.organizer_profile")
+_include("app.routers.organizer_contacts")
+_include("app.routers.organizer_messages")
+_include("app.routers.organizer_applications")
 
-_include("app.routers.vendor_diagram")
 _include("app.routers.vendor_profile")
-_include("app.routers.vendors")
-_include("app.routers.vendors_v2")
+_include("app.routers.vendor_diagram")
+_include("app.routers.public_events")
 
-_include("app.routers.users")
-_include("app.routers.slots")
-_include("app.routers.stats")
-_include("app.routers.seed")
 
-# DEBUG: print registered routes (keep for now)
-for r in app.routes:
-    methods = ",".join(sorted(getattr(r, "methods", []) or []))
-    p = getattr(r, "path", "")
-    if "organizer" in p or "messages" in p:
-        print(f"[ROUTE] {methods:15s} {p}")
+@app.get("/organizer/whoami")
+def organizer_whoami(organizer=Depends(require_organizer)):
+    # safe debug endpoint
+    return {
+        "id": getattr(organizer, "id", None),
+        "user_id": getattr(organizer, "user_id", None),
+        "email": getattr(organizer, "email", None),
+        "role": getattr(organizer, "role", None),
+    }
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}

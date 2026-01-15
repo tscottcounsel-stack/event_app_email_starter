@@ -1,53 +1,68 @@
 # app/auth.py
-#
-# Minimal auth stubs JUST for the vendor/organizer profile APIs.
-# They pretend you're always logged in as a known dev user so that
-# we can satisfy the users(id) foreign key constraints.
+from __future__ import annotations
 
 from typing import Optional
 
-# ✅ MISSING IMPORTS (this is what was breaking router loading)
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 
 class AuthUser:
-    def __init__(self, id: int, role: str, vendor_id: Optional[int] = None):
+    def __init__(
+        self,
+        id: int,
+        role: str,
+        organizer_id: Optional[int] = None,
+        vendor_id: Optional[int] = None,
+    ):
         self.id = id
         self.role = role
+        self.organizer_id = organizer_id
         self.vendor_id = vendor_id
 
 
-def get_current_user() -> AuthUser:
+# DEV DEFAULTS (matches your DB screenshot)
+DEV_ORGANIZER_USER_ID = 13
+DEV_ORGANIZER_PROFILE_ID = 2
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> AuthUser:
     """
-    Default "current user" – organizer.
-    This should match an actual row in the `users` table.
-    We’re using organizer@example.com -> id=13.
+    Dev auth:
+      - If Authorization header is present, we still just treat it as "logged in".
+      - Default user is organizer user_id=13 with organizer_profile_id=2.
     """
-    return AuthUser(id=13, role="organizer")
+    # You can extend this later to decode JWTs, etc.
+    return AuthUser(
+        id=DEV_ORGANIZER_USER_ID,
+        role="organizer",
+        organizer_id=DEV_ORGANIZER_PROFILE_ID,
+        vendor_id=None,
+    )
 
 
-def require_role(required: str):
-    """
-    Dependency factory that returns a fake user with the given role.
-    We point at real seeded users so FK(user_id -> users.id) succeeds.
-    """
-
-    def dep() -> AuthUser:
-        if required == "vendor":
-            # pytest_vendor@example.com -> id=5 (role = 'vendor')
-            return AuthUser(id=5, role="vendor", vendor_id=1)
-
-        # Fallback: organizer
-        return AuthUser(id=13, role="organizer")
-
-    return dep
-
-
-# ✅ Organizer-only dependency used by organizer routers
 def require_organizer(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     if getattr(user, "role", None) != "organizer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Organizer access required",
+        )
+    if getattr(user, "organizer_id", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organizer profile required",
+        )
+    return user
+
+
+def require_vendor(user: AuthUser = Depends(get_current_user)) -> AuthUser:
+    if getattr(user, "role", None) != "vendor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vendor access required",
+        )
+    if getattr(user, "vendor_id", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vendor profile required",
         )
     return user

@@ -43,9 +43,10 @@ export default function Layout() {
                 Events
               </NavLink>
 
-              <NavLink to="/organizer/contacts" className={({ isActive }) => cls(isActive)}>
-  Messaging
-</NavLink>
+              {/* NOTE: if your actual route is different, change this path accordingly */}
+              <NavLink to="/organizer/messages" className={({ isActive }) => cls(isActive)}>
+                Messaging
+              </NavLink>
 
               <NavLink to="/organizer/profile" className={({ isActive }) => cls(isActive)}>
                 Organizer Profile
@@ -138,11 +139,9 @@ export default function Layout() {
             </div>
           </div>
 
-          {/* scrollable content */}
+          {/* scrollable content (pages control their own padding/height) */}
           <div className="flex-1 overflow-y-auto">
-            <div className="px-6 py-6">
-              <Outlet />
-            </div>
+            <Outlet />
           </div>
         </main>
       </div>

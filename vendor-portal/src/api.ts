@@ -1,21 +1,21 @@
 // vendor-portal/src/api.ts
-//
-// Compatibility façade for the frontend.
-// RULES:
-// - NO JSX in this file.
-// - Keep export names + signatures stable (pages depend on them).
-// - Prefer token-arg helpers: apiPatch(url, body, token) etc.
+// NOTE: This file is imported all over the frontend. Keep exports stable.
 
 export type Role = "vendor" | "organizer";
 export type UserRole = "public" | "vendor" | "organizer";
 
-const DEFAULT_API_BASE = "http://127.0.0.1:8002";
+/**
+ * Primary base (you said you moved to 8002).
+ * We'll fallback to 8001 automatically for 404/405/network errors.
+ */
+const PRIMARY_DEFAULT_BASE = "http://127.0.0.1:8002";
+const FALLBACK_DEFAULT_BASES = ["http://127.0.0.1:8001"];
 
-// Vite env: VITE_API_BASE="http://127.0.0.1:8002"
+// You can override with VITE_API_BASE in .env
 export const API_BASE: string =
   (import.meta as any)?.env?.VITE_API_BASE ||
   (window as any)?.__API_BASE__ ||
-  DEFAULT_API_BASE;
+  PRIMARY_DEFAULT_BASE;
 
 const TOKEN_KEY = "access_token";
 const USER_ROLE_KEY = "vc_user_role";
@@ -26,79 +26,63 @@ const USER_ROLE_KEY = "vc_user_role";
 export class ApiError extends Error {
   status: number;
   body: any;
+  url?: string;
 
-  constructor(message: string, status: number, body: any) {
+  constructor(message: string, status: number, body: any, url?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+    this.url = url;
   }
 }
 
 // ----------------------------
-// Token + role storage (legacy-friendly)
+// Token helpers
 // ----------------------------
-export function getAccessToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
 export function setAccessToken(token: string | null) {
-  try {
-    if (!token) localStorage.removeItem(TOKEN_KEY);
-    else localStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    // ignore
-  }
+  if (!token) localStorage.removeItem(TOKEN_KEY);
+  else localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function getAccessToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
 }
 
 export function clearAccessToken() {
-  setAccessToken(null);
-}
-
-export function getUserRole(): UserRole {
-  try {
-    const v = localStorage.getItem(USER_ROLE_KEY);
-    if (v === "vendor" || v === "organizer" || v === "public") return v;
-    return "public";
-  } catch {
-    return "public";
-  }
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 export function setUserRole(role: UserRole) {
-  try {
-    localStorage.setItem(USER_ROLE_KEY, role);
-  } catch {
-    // ignore
-  }
+  localStorage.setItem(USER_ROLE_KEY, role);
+}
+
+export function getUserRole(): UserRole {
+  return (localStorage.getItem(USER_ROLE_KEY) as UserRole) || "public";
 }
 
 // ----------------------------
-// Low-level request helpers (token-style)
+// Internal request utils
 // ----------------------------
 type RequestOptions = {
   query?: Record<string, any>;
   headers?: Record<string, string>;
-  signal?: AbortSignal;
   body?: any;
+  signal?: AbortSignal;
 };
 
-function buildUrl(path: string, query?: Record<string, any>) {
-  const base = API_BASE.replace(/\/+$/, "");
+function buildUrlWithBase(base: string, path: string, query?: Record<string, any>) {
+  const b = base.replace(/\/+$/, "");
   const p = path.startsWith("/") ? path : `/${path}`;
 
-  if (!query || Object.keys(query).length === 0) return `${base}${p}`;
+  if (!query || Object.keys(query).length === 0) return `${b}${p}`;
 
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v === undefined || v === null) continue;
     usp.set(k, String(v));
   }
-  return `${base}${p}?${usp.toString()}`;
+  return `${b}${p}?${usp.toString()}`;
 }
 
 async function parseJsonSafe(res: Response) {
@@ -111,7 +95,17 @@ async function parseJsonSafe(res: Response) {
   }
 }
 
-async function request<T>(
+function basesToTry(): string[] {
+  const primary = API_BASE;
+  const rest = FALLBACK_DEFAULT_BASES.filter((b) => b !== primary);
+  return [primary, ...rest];
+}
+
+/**
+ * Make one fetch attempt against a specific base.
+ */
+async function requestOnce<T>(
+  base: string,
   method: string,
   path: string,
   opts: RequestOptions,
@@ -132,18 +126,24 @@ async function request<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const url = buildUrl(path, opts.query);
+  const url = buildUrlWithBase(base, path, opts.query);
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: hasBody
-      ? typeof opts.body === "string"
-        ? opts.body
-        : JSON.stringify(opts.body)
-      : undefined,
-    signal: opts.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: hasBody
+        ? typeof opts.body === "string"
+          ? opts.body
+          : JSON.stringify(opts.body)
+        : undefined,
+      signal: opts.signal,
+    });
+  } catch (e: any) {
+    // network error (server down / wrong port)
+    throw new ApiError(e?.message || "Network error", 0, null, url);
+  }
 
   if (!res.ok) {
     const parsed = await parseJsonSafe(res);
@@ -151,79 +151,82 @@ async function request<T>(
       (parsed && typeof parsed === "object" && (parsed as any).detail) ||
       res.statusText ||
       `HTTP ${res.status}`;
-    throw new ApiError(String(msg), res.status, parsed);
+
+    throw new ApiError(String(msg), res.status, parsed, url);
   }
 
   return (await parseJsonSafe(res)) as T;
 }
 
+/**
+ * Request with safe fallback:
+ * Only retries on: 0 (network), 404, 405.
+ * Does NOT retry on 400/401/403/409/500 etc to avoid duplicate POSTs.
+ */
+async function request<T>(
+  method: string,
+  path: string,
+  opts: RequestOptions,
+  token?: string | null
+): Promise<T> {
+  const bases = basesToTry();
+  let lastErr: any = null;
+
+  for (const base of bases) {
+    try {
+      return await requestOnce<T>(base, method, path, opts, token);
+    } catch (e: any) {
+      lastErr = e;
+
+      // Retry only for "wrong server / wrong route / wrong port"
+      if (e instanceof ApiError && (e.status === 0 || e.status === 404 || e.status === 405)) {
+        continue;
+      }
+
+      // Anything else: stop immediately
+      throw e;
+    }
+  }
+
+  throw lastErr || new ApiError("Request failed.", 500, null);
+}
+
+// ----------------------------
+// Public request helpers
+// ----------------------------
 export function apiGet<T>(path: string, token?: string | null, signal?: AbortSignal) {
   return request<T>("GET", path, { signal }, token);
 }
+
 export function apiPost<T>(path: string, body: any, token?: string | null, signal?: AbortSignal) {
   return request<T>("POST", path, { body, signal }, token);
 }
+
 export function apiPut<T>(path: string, body: any, token?: string | null, signal?: AbortSignal) {
   return request<T>("PUT", path, { body, signal }, token);
 }
+
 export function apiPatch<T>(path: string, body: any, token?: string | null, signal?: AbortSignal) {
   return request<T>("PATCH", path, { body, signal }, token);
 }
+
 export function apiDelete<T>(path: string, token?: string | null, signal?: AbortSignal) {
   return request<T>("DELETE", path, { signal }, token);
 }
 
-export async function tryGetFirst<T>(paths: string[], token?: string | null) {
-  let lastErr: any = null;
-  for (const p of paths) {
-    try {
-      return await apiGet<T>(p, token);
-    } catch (e: any) {
-      lastErr = e;
-      if (e instanceof ApiError && e.status === 404) continue;
-      throw e;
-    }
-  }
-  throw lastErr || new ApiError("Not found", 404, null);
-}
-
-export async function tryPostFirst<T>(paths: string[], payload: any, token?: string | null) {
-  let lastErr: any = null;
-  for (const p of paths) {
-    try {
-      return await apiPost<T>(p, payload, token);
-    } catch (e: any) {
-      lastErr = e;
-      if (e instanceof ApiError && e.status === 404) continue;
-      throw e;
-    }
-  }
-  throw lastErr || new ApiError("Not found", 404, null);
-}
-
-export async function tryPatchFirst<T>(paths: string[], payload: any, token?: string | null) {
-  let lastErr: any = null;
-  for (const p of paths) {
-    try {
-      return await apiPatch<T>(p, payload, token);
-    } catch (e: any) {
-      lastErr = e;
-      if (e instanceof ApiError && e.status === 404) continue;
-      throw e;
-    }
-  }
-  throw lastErr || new ApiError("Not found", 404, null);
-}
+// ============================================================================
+// Exports expected by pages
+// ============================================================================
 
 // ----------------------------
-// Public events + diagram
+// Public events
 // ----------------------------
 export type PublicEventListItem = {
   id: number;
   title: string;
   date: string;
-  location: string;
-  city: string;
+  location?: string | null;
+  city?: string | null;
 };
 
 export async function listPublicEvents(limit = 50, signal?: AbortSignal) {
@@ -234,201 +237,159 @@ export async function listPublicEvents(limit = 50, signal?: AbortSignal) {
   );
 }
 
-export async function getPublicEventDiagram(eventId: number, signal?: AbortSignal) {
-  return tryGetFirst<any>(
-    [`/public/events/${eventId}/diagram`, `/public/events/${eventId}/boothmap`],
-    null
-  );
-}
-
-export const getPublicEventDiagramLegacy = getPublicEventDiagram;
-
 // ----------------------------
-// Login
+// Event diagram
 // ----------------------------
-export async function login(
-  a: any,
-  b: any,
-  c?: any
-): Promise<{ access_token: string } | any> {
-  let role: Role = "organizer";
-  let email: string;
-  let password: string;
-
-  if (a === "vendor" || a === "organizer") {
-    role = a;
-    email = String(b);
-    password = String(c ?? "");
-  } else {
-    email = String(a);
-    password = String(b);
-    if (c === "vendor" || c === "organizer") role = c;
-  }
-
-  const data = await tryPostFirst<any>(
-    ["/auth/login/json", "/login", `/${role}/auth/login/json`],
-    { email, password, role },
-    null
-  );
-
-  const token: string | undefined = data?.access_token || data?.token;
-  if (token) {
-    setAccessToken(token);
-    setUserRole(role);
-  }
-
-  return data;
-}
-
-// ----------------------------
-// Organizer: Events
-// ----------------------------
-export async function fetchOrganizerEvents(
-  limit = 50,
-  token?: string | null,
-  signal?: AbortSignal
-) {
-  return apiGet<any>(
-    `/organizer/events?limit=${encodeURIComponent(String(limit))}`,
-    token,
-    signal
-  );
-}
-
-export const listOrganizerEvents = fetchOrganizerEvents;
-
-// ----------------------------
-// Organizer: Applications
-// ----------------------------
-export async function organizerListEventApplications(
-  eventId: number,
-  limit = 200,
-  token?: string | null
-) {
-  return apiGet<any>(
-    `/organizer/events/${eventId}/applications?limit=${encodeURIComponent(String(limit))}`,
-    token
-  );
-}
-
-export const fetchOrganizerEventApplications = organizerListEventApplications;
-
-export async function patchOrganizerApplication(
-  applicationId: number,
-  patch: any,
-  token?: string | null
-) {
-  return apiPatch<any>(`/organizer/applications/${applicationId}`, patch, token);
-}
-
-// ----------------------------
-// Organizer: Profile
-// ----------------------------
-export type OrganizerProfileShape = {
-  user_id?: number;
-  business_name?: string | null;
-  contact_name?: string | null;
-  public_email?: string | null;
-  phone?: string | null;
-  website?: string | null;
-  about?: string | null;
-  city?: string | null;
-  state?: string | null;
-  [k: string]: any;
+export type EventDiagramSlot = {
+  id: number;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  status: string;
+  kind: string;
+  price_cents: number;
+  category_id: number | null;
 };
 
-export async function fetchOrganizerProfile(token?: string | null): Promise<OrganizerProfileShape | null> {
-  try {
-    const data = await tryGetFirst<OrganizerProfileShape>(
-      ["/organizer/profile", "/organizer/me/profile", "/organizer/_whoami"],
-      token
-    );
-    return data ?? null;
-  } catch (e: any) {
-    if (e instanceof ApiError && e.status === 404) return null;
-    throw e;
-  }
+export type EventDiagramResponse = {
+  event_id: number;
+  version: number;
+  grid_px: number;
+  slots: EventDiagramSlot[];
+};
+
+export async function getPublicEventDiagram(eventId: number, signal?: AbortSignal) {
+  return apiGet<EventDiagramResponse>(`/public/events/${eventId}/diagram`, null, signal);
 }
 
-export async function saveOrganizerProfile(
-  payload: OrganizerProfileShape,
-  token?: string | null
-): Promise<OrganizerProfileShape | null> {
-  try {
-    try {
-      return await tryPatchFirst<OrganizerProfileShape>(
-        ["/organizer/profile", "/organizer/me/profile"],
-        payload,
-        token
-      );
-    } catch (e: any) {
-      if (!(e instanceof ApiError && e.status === 404)) throw e;
-    }
-    return await tryPostFirst<OrganizerProfileShape>(
-      ["/organizer/profile", "/organizer/me/profile"],
-      payload,
-      token
-    );
-  } catch (e: any) {
-    if (e instanceof ApiError && e.status === 404) return null;
-    throw e;
-  }
+export async function vendorGetEventDiagram(eventId: number, token?: string | null, signal?: AbortSignal) {
+  return apiGet<EventDiagramResponse>(`/vendor/events/${eventId}/diagram`, token, signal);
 }
 
 // ----------------------------
-// Organizer: Contacts
+// Organizer contacts
 // ----------------------------
 export type OrganizerContact = {
   id: number;
-  organizer_id: number;
   name: string;
   email?: string | null;
   phone?: string | null;
   company?: string | null;
-  notes?: string | null;
-  tags?: string[] | string | null;
+  tags?: string[] | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type OrganizerContactsList = {
   items: OrganizerContact[];
-  count: number;
-  // legacy keys can still exist
-  value?: OrganizerContact[];
-  Count?: number;
+  total: number;
 };
 
-export async function createOrganizerContact(payload: any, token?: string | null): Promise<any> {
-  return apiPost<any>(`/organizer/contacts`, payload, token);
+export async function fetchOrganizerContacts(token?: string | null, signal?: AbortSignal): Promise<OrganizerContactsList> {
+  const res = await apiGet<any>(`/organizer/contacts`, token, signal);
+  if (res && typeof res === "object" && Array.isArray(res.items)) {
+    return { items: res.items, total: typeof res.total === "number" ? res.total : res.items.length };
+  }
+  if (Array.isArray(res)) return { items: res, total: res.length };
+  return { items: [], total: 0 };
 }
 
-export async function fetchOrganizerContacts(token?: string | null): Promise<OrganizerContactsList> {
-  const res = await apiGet<any>(`/organizer/contacts`, token);
-
-  // normalize to standard contract
-  const items =
-    (Array.isArray(res?.items) && res.items) ||
-    (Array.isArray(res?.value) && res.value) ||
-    (Array.isArray(res) && res) ||
-    [];
-
-  const count =
-    (typeof res?.count === "number" && res.count) ||
-    (typeof res?.Count === "number" && res.Count) ||
-    items.length;
-
-  return { items, count, value: res?.value, Count: res?.Count };
+export async function createOrganizerContact(payload: Partial<OrganizerContact>, token?: string | null, signal?: AbortSignal) {
+  return apiPost<any>(`/organizer/contacts`, payload, token, signal);
 }
 
 // ----------------------------
-// Vendor diagram helper
+// Organizer profile
 // ----------------------------
-export async function vendorGetEventDiagram(eventId: number, token?: string | null) {
-  return tryGetFirst<any>(
-    [
-      `/vendor/events/${eventId}/diagram`,
-      `/vendor/events/${eventId}/boothmap`,
-      `/public/events/${eventId}/diagram`,
-    ],
-    token
-  );
+export type OrganizerProfile = {
+  id?: number;
+  user_id?: number;
+  company_name?: string | null;
+  contact_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  about?: string | null;
+  address1?: string | null;
+  address2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  license_proof_url?: string | null;
+  permit_proof_url?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function fetchOrganizerProfile(token?: string | null, signal?: AbortSignal) {
+  return apiGet<OrganizerProfile>(`/organizer/profile`, token, signal);
+}
+
+export async function saveOrganizerProfile(payload: Partial<OrganizerProfile>, token?: string | null, signal?: AbortSignal) {
+  return apiPatch<OrganizerProfile>(`/organizer/profile`, payload, token, signal);
+}
+
+// ----------------------------
+// Auth
+// ----------------------------
+export type LoginResponse = {
+  access_token?: string;
+  token?: string;
+  token_type?: string;
+  role?: string;
+  user?: any;
+  [k: string]: any;
+};
+
+export async function login(a: "organizer" | "vendor" | string, b?: string, c?: string): Promise<LoginResponse> {
+  let role: string | null = null;
+  let email: string;
+  let password: string;
+
+  // login(email, password) OR login(role, email, password)
+  if (b !== undefined && c !== undefined) {
+    role = a;
+    email = b;
+    password = c;
+  } else {
+    role = null;
+    email = String(a);
+    password = String(b ?? "");
+  }
+
+  const payload = { email, password, role };
+
+  const endpoints = ["/auth/login/json", "/auth/login", "/login"];
+  let lastErr: any = null;
+
+  for (const ep of endpoints) {
+    try {
+      const res = await apiPost<LoginResponse>(ep, payload, null);
+      const tok = res?.access_token || res?.token;
+      if (tok) setAccessToken(tok);
+
+      if (role) setUserRole(role === "organizer" ? "organizer" : role === "vendor" ? "vendor" : "public");
+
+      return res;
+    } catch (e: any) {
+      lastErr = e;
+
+      // stop if auth endpoint exists but creds are wrong
+      if (e instanceof ApiError && (e.status === 400 || e.status === 401 || e.status === 403)) throw e;
+
+      // try next endpoint if wrong server/route
+      if (e instanceof ApiError && (e.status === 0 || e.status === 404 || e.status === 405)) continue;
+
+      throw e;
+    }
+  }
+
+  throw lastErr || new ApiError("Login failed (no auth endpoint matched).", 500, null);
+}
+
+export function logout() {
+  clearAccessToken();
+  setUserRole("public");
 }
