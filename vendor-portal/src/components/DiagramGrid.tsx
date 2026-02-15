@@ -39,44 +39,82 @@ type DragState =
 
 const CELL_SIZE = 40;
 
-// Map status -> Tailwind classes
-function statusClasses(status: string, selected: boolean): string {
-  const base =
-    "absolute rounded-md border text-xs transition-colors duration-75 flex items-center justify-center select-none";
-  const ring = selected ? " ring-2 ring-offset-2 ring-offset-slate-900" : "";
+function normalizeStatus(status: any): string {
+  const s = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return s || "available";
+}
 
-  switch (status) {
-    case "assigned": // blue
-      return (
-        base +
-        " border-sky-400 bg-sky-900/70 text-sky-100 hover:bg-sky-800" +
-        ring
-      );
-    case "reserved": // orange
-      return (
-        base +
-        " border-orange-400 bg-orange-900/70 text-orange-100 hover:bg-orange-800" +
-        ring
-      );
-    case "pending": // yellow
-      return (
-        base +
-        " border-amber-400 bg-amber-900/70 text-amber-100 hover:bg-amber-800" +
-        ring
-      );
-    case "blocked": // red
-      return (
-        base +
-        " border-red-400 bg-red-900/70 text-red-100 hover:bg-red-800" +
-        ring
-      );
+function getCategory(raw: any): string | null {
+  const v = raw?.category;
+  if (typeof v === "string" && v.trim().length) return v.trim();
+  return null;
+}
+
+function moneyFromBooth(raw: any): string | null {
+  // Supports:
+  // - priceCents (int)
+  // - price (number dollars)
+  // - priceDollars (number dollars)
+  const cents = typeof raw?.priceCents === "number" ? raw.priceCents : null;
+  if (typeof cents === "number" && Number.isFinite(cents)) {
+    const dollars = cents / 100;
+    if (!Number.isFinite(dollars)) return null;
+    return dollars.toFixed(2).replace(/\.00$/, "");
+  }
+
+  const price = typeof raw?.price === "number" ? raw.price : null;
+  if (typeof price === "number" && Number.isFinite(price)) {
+    return price.toFixed(2).replace(/\.00$/, "");
+  }
+
+  const dollars = typeof raw?.priceDollars === "number" ? raw.priceDollars : null;
+  if (typeof dollars === "number" && Number.isFinite(dollars)) {
+    return dollars.toFixed(2).replace(/\.00$/, "");
+  }
+
+  return null;
+}
+
+function statusColors(status: string) {
+  const s = normalizeStatus(status);
+
+  // These are tuned to look like your screenshot:
+  // - strong fill
+  // - subtle border
+  // - readable white text
+  switch (s) {
+    case "pending":
+      return {
+        bg: "bg-amber-500",
+        border: "border-amber-300/60",
+        shadow: "shadow-amber-500/40",
+      };
+    case "reserved":
+      return {
+        bg: "bg-orange-500",
+        border: "border-orange-300/60",
+        shadow: "shadow-orange-500/40",
+      };
+    case "assigned":
+    case "booked":
+      return {
+        bg: "bg-red-500",
+        border: "border-red-300/60",
+        shadow: "shadow-red-500/40",
+      };
+    case "blocked":
+      return {
+        bg: "bg-slate-800",
+        border: "border-slate-400/40",
+        shadow: "shadow-slate-900/40",
+      };
     case "available":
-    default: // green
-      return (
-        base +
-        " border-emerald-400 bg-emerald-900/70 text-emerald-100 hover:bg-emerald-800" +
-        ring
-      );
+    default:
+      return {
+        bg: "bg-emerald-500",
+        border: "border-emerald-300/60",
+        shadow: "shadow-emerald-500/40",
+      };
   }
 }
 
@@ -99,6 +137,7 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
           : typeof b.w === "number"
           ? b.w
           : 1;
+
       const height =
         typeof b.height === "number"
           ? b.height
@@ -106,18 +145,13 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
           ? b.h
           : 1;
 
-      const statusRaw =
-        typeof b.status === "string" && b.status.length > 0
-          ? b.status.toLowerCase()
-          : "available";
-
       return {
         label,
         x: typeof b.x === "number" ? b.x : 0,
         y: typeof b.y === "number" ? b.y : 0,
         width,
         height,
-        status: statusRaw,
+        status: normalizeStatus(b.status),
         raw: b,
       };
     });
@@ -126,8 +160,7 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
   const widthPx = (diagram?.width ?? 1200) || 1200;
   const heightPx = (diagram?.height ?? 800) || 800;
 
-  // ---------------- drag / resize behavior ----------------
-
+  // Drag / resize behavior
   useEffect(() => {
     if (!drag) return;
 
@@ -146,25 +179,14 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
       if (drag.mode === "move") {
         const newX = Math.max(0, drag.origX + dxCells);
         const newY = Math.max(0, drag.origY + dyCells);
-        map[drag.label] = {
-          ...current,
-          x: newX,
-          y: newY,
-        };
+        map[drag.label] = { ...current, x: newX, y: newY };
       } else if (drag.mode === "resize") {
         const newW = Math.max(1, drag.origWidth + dxCells);
         const newH = Math.max(1, drag.origHeight + dyCells);
-        map[drag.label] = {
-          ...current,
-          width: newW,
-          height: newH,
-        };
+        map[drag.label] = { ...current, width: newW, height: newH };
       }
 
-      onDiagramChange({
-        ...diagram,
-        boothMap: map,
-      });
+      onDiagramChange({ ...diagram, boothMap: map });
     }
 
     function handleUp() {
@@ -179,13 +201,11 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
     };
   }, [drag, diagram, onDiagramChange]);
 
-  const handleBoothMouseDown = (
-    e: React.MouseEvent,
-    booth: BoothView
-  ) => {
+  const handleBoothMouseDown = (e: React.MouseEvent, booth: BoothView) => {
     e.stopPropagation();
     onSelectBooth?.(booth.label);
 
+    // left click only
     if (e.button === 0) {
       setDrag({
         mode: "move",
@@ -198,10 +218,7 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
     }
   };
 
-  const handleResizeMouseDown = (
-    e: React.MouseEvent,
-    booth: BoothView
-  ) => {
+  const handleResizeMouseDown = (e: React.MouseEvent, booth: BoothView) => {
     e.stopPropagation();
     onSelectBooth?.(booth.label);
 
@@ -219,59 +236,81 @@ export const DiagramGrid: React.FC<DiagramGridProps> = ({
     onSelectBooth?.(null);
   };
 
-  // ---------------- render ----------------
-
   return (
     <div
-      className="relative w-full overflow-hidden rounded-md bg-slate-950"
+      className="relative w-full overflow-hidden rounded-md bg-white"
       style={{ minHeight: 320 }}
       onMouseDown={handleBackgroundMouseDown}
     >
-      {/* grid background */}
+      {/* Grid background like the Figma editor look */}
       <div
         className="absolute inset-0"
         style={{
           backgroundImage:
-            "linear-gradient(to right, rgba(148,163,184,0.15) 1px, transparent 1px), " +
-            "linear-gradient(to bottom, rgba(148,163,184,0.15) 1px, transparent 1px)",
+            "linear-gradient(to right, rgba(148,163,184,0.25) 1px, transparent 1px), " +
+            "linear-gradient(to bottom, rgba(148,163,184,0.25) 1px, transparent 1px)",
           backgroundSize: `${CELL_SIZE}px ${CELL_SIZE}px`,
         }}
       />
 
-      <div
-        className="relative"
-        style={{
-          width: widthPx,
-          height: heightPx,
-        }}
-      >
+      <div className="relative" style={{ width: widthPx, height: heightPx }}>
         {booths.map((booth) => {
           const left = booth.x * CELL_SIZE;
           const top = booth.y * CELL_SIZE;
           const w = booth.width * CELL_SIZE;
           const h = booth.height * CELL_SIZE;
+
           const isSelected = selectedLabel === booth.label;
+          const { bg, border, shadow } = statusColors(booth.status);
+
+          const price = moneyFromBooth(booth.raw);
+          const category = getCategory(booth.raw);
 
           return (
             <div
               key={booth.label}
-              className={statusClasses(booth.status, isSelected)}
-              style={{ left, top, width: w, height: h }}
               onMouseDown={(e) => handleBoothMouseDown(e, booth)}
+              className={[
+                "absolute rounded-lg border",
+                bg,
+                border,
+                "text-white",
+                "shadow-lg",
+                shadow,
+                isSelected ? "ring-4 ring-blue-500/70 border-blue-500" : "",
+              ].join(" ")}
+              style={{
+                left,
+                top,
+                width: w,
+                height: h,
+              }}
+              title={booth.label}
             >
-              <div className="pointer-events-none flex flex-col items-center justify-center px-1 text-center leading-tight">
-                <div className="text-[10px] font-semibold">
+              {/* Content INSIDE booth (matches your screenshot intent) */}
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-2 text-center leading-tight">
+                <div className="font-extrabold drop-shadow-sm text-[12px]">
                   {booth.label}
                 </div>
-                <div className="text-[10px] opacity-75">
-                  {booth.width}×{booth.height}
-                </div>
+
+                {price ? (
+                  <div className="mt-1 font-bold drop-shadow-sm text-[11px] opacity-95">
+                    ${price}
+                  </div>
+                ) : null}
+
+                {category ? (
+                  <div className="mt-1 font-semibold drop-shadow-sm text-[11px] opacity-95">
+                    {category}
+                  </div>
+                ) : null}
               </div>
 
-              {/* resize handle */}
+              {/* Resize handle */}
               <div
-                className="absolute bottom-0 right-0 h-3 w-3 translate-x-1 translate-y-1 cursor-se-resize rounded-sm bg-white/80"
+                className="absolute bottom-0 right-0 h-3 w-3 translate-x-1 translate-y-1 cursor-se-resize rounded-sm bg-white/90"
                 onMouseDown={(e) => handleResizeMouseDown(e, booth)}
+                title="Resize"
               />
             </div>
           );
