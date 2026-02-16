@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 type VendorEvent = {
   id: number | string;
   title?: string;
   name?: string;
-  status?: string; // draft/published/etc
+  status?: string;
   venue_name?: string;
   city?: string;
   state?: string;
@@ -48,6 +48,8 @@ async function getJson(path: string) {
 export default function VendorAvailableEventsPage() {
   const navigate = useNavigate();
 
+  const didLoadRef = useRef(false); // prevents double-fetch in React 18 StrictMode dev
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<VendorEvent[]>([]);
@@ -57,42 +59,16 @@ export default function VendorAvailableEventsPage() {
     setError(null);
 
     try {
-      // Try the most likely endpoints.
-      // NOTE: We are intentionally NOT using "/api/..." because that hits Vite (5173),
-      // not FastAPI (8002).
-      const candidates = [
-        "/vendor/events",
-        "/public/events",
-        "/events",
-        "/api/vendor/events", // in case your FastAPI actually uses /api prefix
-        "/api/events",
-      ];
-
-      let data: any = null;
-      let lastErr: any = null;
-
-      for (const p of candidates) {
-        try {
-          data = await getJson(p);
-          const list = pickList(data);
-          if (list.length) {
-            setEvents(list);
-            setLoading(false);
-            return;
-          }
-
-          // If endpoint returns an empty array, still accept it as a valid endpoint.
-          if (Array.isArray(data) || Array.isArray(data?.events) || Array.isArray(data?.items)) {
-            setEvents(list);
-            setLoading(false);
-            return;
-          }
-        } catch (e) {
-          lastErr = e;
-        }
+      // ✅ deterministic: vendor endpoint first, fallback to public
+      let data: any;
+      try {
+        data = await getJson("/vendor/events");
+      } catch {
+        data = await getJson("/public/events");
       }
 
-      throw lastErr || new Error("No vendor events endpoint returned data.");
+      const list = pickList(data);
+      setEvents(list);
     } catch (e: any) {
       setError(e?.message || "Unable to load events.");
       setEvents([]);
@@ -102,7 +78,10 @@ export default function VendorAvailableEventsPage() {
   }
 
   useEffect(() => {
+    if (didLoadRef.current) return;
+    didLoadRef.current = true;
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const cards = useMemo(() => {
@@ -143,8 +122,7 @@ export default function VendorAvailableEventsPage() {
             <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
               {error}
               <div className="mt-2 text-xs text-rose-700">
-                If you see requests going to <span className="font-mono">localhost:5173</span>, that’s the Vite dev
-                server. Vendor events must come from <span className="font-mono">127.0.0.1:8002</span>.
+                Backend should be reachable at <span className="font-mono">127.0.0.1:8002</span>.
               </div>
             </div>
           ) : null}
@@ -159,9 +137,6 @@ export default function VendorAvailableEventsPage() {
           {!loading && cards.length === 0 ? (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
               No events are available yet.
-              <div className="mt-1 text-xs text-slate-500">
-                If your organizer event is still “Draft”, it may not be published to vendors (depending on backend rules).
-              </div>
             </div>
           ) : null}
 
@@ -183,17 +158,13 @@ export default function VendorAvailableEventsPage() {
                   ) : null}
                 </div>
 
-                <div className="mt-4 text-sm font-semibold text-orange-600">
-                  Draft saved — continue where you left off.
-                </div>
-
                 <div className="mt-4">
                   <button
                     type="button"
                     onClick={() => navigate(`/vendor/events/${encodeURIComponent(c.id)}`)}
                     className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-3 text-base font-black text-white hover:opacity-95"
                   >
-                    Continue Application
+                    View Event
                   </button>
                 </div>
               </div>

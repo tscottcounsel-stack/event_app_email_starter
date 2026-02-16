@@ -1,6 +1,7 @@
 // src/pages/VendorApplicationsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { buildAuthHeaders } from "../auth/authHeaders";
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
@@ -11,7 +12,7 @@ type VendorProgress = {
   checked: Record<string, boolean>;
   notes?: string;
   updatedAt: string;
-  status?: "draft" | "submitted";
+  status?: "draft" | "submitted" | "approved" | "rejected";
   submittedAt?: string;
 };
 
@@ -25,18 +26,10 @@ type ServerApplication = {
   status?: string;
   submitted_at?: string;
   updated_at?: string;
+
+  vendor_email?: string | null;
+  vendor_id?: string | null;
 };
-
-const LS_VENDOR_PROGRESS = "vendor_requirements_progress_v1";
-
-function safeJsonParse<T = any>(value: string | null): T | null {
-  if (!value) return null;
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return null;
-  }
-}
 
 function formatDate(iso?: string) {
   if (!iso) return "";
@@ -54,48 +47,24 @@ function calcCompletion(item: VendorProgress) {
   return { done, total, pct };
 }
 
-function authHeaders() {
-  // Your vendor apply page uses sessionStorage("session") with accessToken
-  const raw = sessionStorage.getItem("session");
-  if (!raw) return { Accept: "application/json" };
-
-  try {
-    const s = JSON.parse(raw);
-    return {
-      Accept: "application/json",
-      Authorization: s?.accessToken ? `Bearer ${s.accessToken}` : undefined,
-    } as Record<string, string>;
-  } catch {
-    return { Accept: "application/json" };
-  }
-}
-
-function loadLocalDrafts(): VendorProgress[] {
-  const raw = safeJsonParse<VendorProgress[]>(localStorage.getItem(LS_VENDOR_PROGRESS));
-  const list = Array.isArray(raw) ? raw : [];
-  return list.filter((x) => x && x.eventId && x.appId);
-}
-
-function saveLocalDrafts(list: VendorProgress[]) {
-  localStorage.setItem(LS_VENDOR_PROGRESS, JSON.stringify(list));
-}
-
 function normalizeServerToUi(a: ServerApplication): VendorProgress {
-  const appId =
-    (a.app_ref && String(a.app_ref)) ||
-    (a.id != null ? `srv_${String(a.id)}` : `srv_${Date.now()}`);
+  const appId = (a.app_ref && String(a.app_ref)) || String(a.id);
+
+  const rawStatus = String(a.status || "").toLowerCase();
+  const status =
+    rawStatus === "approved" || rawStatus === "rejected" || rawStatus === "submitted"
+      ? (rawStatus as any)
+      : ("draft" as any);
 
   return {
-    eventId: String(a.event_id ?? ""),
+    eventId: String(a.event_id),
     appId,
     boothId: a.booth_id ? String(a.booth_id) : undefined,
     checked: a.checked || {},
     notes: a.notes || "",
     updatedAt: a.updated_at || a.submitted_at || new Date().toISOString(),
-    status: (String(a.status || "submitted").toLowerCase() === "submitted" ? "submitted" : "submitted") as
-      | "draft"
-      | "submitted",
-    submittedAt: a.submitted_at || a.updated_at,
+    status,
+    submittedAt: a.submitted_at || undefined,
   };
 }
 
@@ -104,11 +73,8 @@ export default function VendorApplicationsPage() {
 
   const [loading, setLoading] = useState(true);
   const [serverError, setServerError] = useState<string | null>(null);
-
-  const [localDrafts, setLocalDrafts] = useState<VendorProgress[]>(() => loadLocalDrafts());
   const [serverApps, setServerApps] = useState<VendorProgress[]>([]);
 
-  // Pull from API
   useEffect(() => {
     let cancelled = false;
 
@@ -117,9 +83,19 @@ export default function VendorApplicationsPage() {
       setServerError(null);
 
       try {
+        const headers = buildAuthHeaders();
+
+        // Guard: If no identity, backend will return empty and you'll be confused.
+        const hasIdentity = !!headers.Authorization || !!headers["x-user-email"] || !!headers["x-user-id"];
+        if (!hasIdentity) {
+          throw new Error(
+            "Missing login identity headers (Authorization / x-user-email / x-user-id). Log in again so applications can load."
+          );
+        }
+
         const res = await fetch(`${API_BASE}/vendor/applications`, {
           method: "GET",
-          headers: authHeaders(),
+          headers,
         });
 
         if (!res.ok) {
@@ -129,7 +105,6 @@ export default function VendorApplicationsPage() {
 
         const data = (await res.json().catch(() => null)) as { applications?: ServerApplication[] } | null;
         const apps = Array.isArray(data?.applications) ? data!.applications : [];
-
         const normalized = apps.map(normalizeServerToUi);
 
         if (!cancelled) setServerApps(normalized);
@@ -147,47 +122,15 @@ export default function VendorApplicationsPage() {
     };
   }, []);
 
-  // Merge: server submissions override local drafts (same appId) and also “mark” matching event/booth drafts as submitted when possible
-  const merged = useMemo(() => {
-    const drafts = localDrafts.slice();
-
-    // Map server by appId
-    const serverByAppId = new Map<string, VendorProgress>();
-    serverApps.forEach((a) => serverByAppId.set(a.appId, a));
-
-    // Remove local draft if server has same appId (server wins)
-    const remainingDrafts = drafts.filter((d) => !serverByAppId.has(d.appId));
-
-    // Soft-match: if a local draft has same (eventId + boothId) as a submitted server app, treat local as submitted view (but keep server card)
-    // (This prevents “Continue resets everything” feel when appId didn’t roundtrip)
-    const serverKeys = new Set(
-      serverApps.map((a) => `${a.eventId}::${a.boothId || ""}`)
-    );
-
-    const cleanedDrafts = remainingDrafts.map((d) => {
-      const key = `${d.eventId}::${d.boothId || ""}`;
-      if (serverKeys.has(key)) {
-        return { ...d, status: "submitted", submittedAt: d.submittedAt || d.updatedAt };
-      }
-      return d;
-    });
-
-    // Combine and sort newest-first by updatedAt/submittedAt
-    const all = [...serverApps, ...cleanedDrafts];
-    all.sort((a, b) => {
+  const sorted = useMemo(() => {
+    const list = serverApps.slice();
+    list.sort((a, b) => {
       const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
       const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
       return tb - ta;
     });
-
-    return all;
-  }, [localDrafts, serverApps]);
-
-  function removeLocal(appId: string) {
-    const next = localDrafts.filter((x) => x.appId !== appId);
-    setLocalDrafts(next);
-    saveLocalDrafts(next);
-  }
+    return list;
+  }, [serverApps]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -195,9 +138,7 @@ export default function VendorApplicationsPage() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
-            <p className="mt-2 text-sm font-semibold text-slate-600">
-              Drafts saved locally + submissions saved on the server.
-            </p>
+            <p className="mt-2 text-sm font-semibold text-slate-600">Submissions are loaded from the server.</p>
           </div>
 
           <div className="flex gap-2">
@@ -222,21 +163,21 @@ export default function VendorApplicationsPage() {
               <div className="font-black">Server applications unavailable</div>
               <div className="mt-1 opacity-90">{serverError}</div>
               <div className="mt-2 text-xs font-bold text-amber-800">
-                You can still see local drafts below.
+                If this is unexpected, confirm you are logged in and that the request includes identity headers.
               </div>
             </div>
           ) : (
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
-              Loaded server submissions: <span className="font-black">{serverApps.length}</span>
+              Loaded server applications: <span className="font-black">{serverApps.length}</span>
             </div>
           )}
         </div>
 
-        {merged.length === 0 ? (
+        {sorted.length === 0 ? (
           <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
             <div className="text-xl font-black text-slate-900">No applications yet</div>
             <div className="mt-2 text-sm font-semibold text-slate-600">
-              When you save a draft or submit an application, it will show up here.
+              When you submit an application, it will show up here.
             </div>
 
             <div className="mt-6 flex gap-3">
@@ -251,41 +192,30 @@ export default function VendorApplicationsPage() {
           </div>
         ) : (
           <div className="mt-10 grid gap-4">
-            {merged.map((it) => {
+            {sorted.map((it) => {
               const { done, total, pct } = calcCompletion(it);
-              const status: "draft" | "submitted" = it.status || "draft";
-              const isLocalDraft = localDrafts.some((d) => d.appId === it.appId);
 
-              const continueUrl =
-                status === "submitted"
-                  ? `/vendor/events/${it.eventId}/apply?appId=${encodeURIComponent(it.appId)}`
-                  : `/vendor/events/${it.eventId}/apply?` +
-                    new URLSearchParams({
-                      appId: it.appId,
-                      ...(it.boothId ? { boothId: it.boothId } : {}),
-                    }).toString();
+              const status = it.status || "draft";
+              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/apply?` +
+                new URLSearchParams({
+                  appId: it.appId,
+                  ...(it.boothId ? { boothId: it.boothId } : {}),
+                }).toString();
 
               return (
-                <div
-                  key={`${it.eventId}:${it.appId}`}
-                  className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
-                >
+                <div key={`${it.eventId}:${it.appId}`} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="min-w-[240px]">
                       <div className="text-lg font-black text-slate-900">
                         Event #{it.eventId}
                         {it.boothId ? (
-                          <span className="ml-2 text-sm font-extrabold text-slate-500">
-                            • Booth {it.boothId}
-                          </span>
+                          <span className="ml-2 text-sm font-extrabold text-slate-500">• Booth {it.boothId}</span>
                         ) : null}
                       </div>
 
                       <div className="mt-1 text-xs font-semibold text-slate-500">
                         Last updated: {formatDate(it.updatedAt)}
-                        {status === "submitted" && it.submittedAt ? (
-                          <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
-                        ) : null}
+                        {it.submittedAt ? <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span> : null}
                       </div>
                     </div>
 
@@ -293,12 +223,22 @@ export default function VendorApplicationsPage() {
                       <span
                         className={
                           "rounded-full px-3 py-1 text-xs font-extrabold " +
-                          (status === "submitted"
+                          (status === "approved"
                             ? "bg-emerald-50 text-emerald-700"
+                            : status === "rejected"
+                            ? "bg-rose-50 text-rose-700"
+                            : status === "submitted"
+                            ? "bg-violet-50 text-violet-700"
                             : "bg-slate-100 text-slate-700")
                         }
                       >
-                        {status === "submitted" ? "Submitted" : "Draft"}
+                        {status === "approved"
+                          ? "Approved"
+                          : status === "rejected"
+                          ? "Rejected"
+                          : status === "submitted"
+                          ? "Submitted"
+                          : "Draft"}
                       </span>
 
                       <div className="text-sm font-extrabold text-slate-700">
@@ -315,29 +255,18 @@ export default function VendorApplicationsPage() {
 
                   <div className="mt-5 flex flex-wrap gap-3">
                     <Link
-                      to={continueUrl}
+                      to={viewUrl}
                       className="rounded-full bg-violet-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-violet-700"
                     >
-                      {status === "submitted" ? "View Application" : "Continue"}
+                      View
                     </Link>
 
                     <Link
-                      to={`/vendor/events/${it.eventId}`}
+                      to={`/vendor/events/${encodeURIComponent(it.eventId)}`}
                       className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
                     >
                       View Event
                     </Link>
-
-                    {isLocalDraft ? (
-                      <button
-                        onClick={() => removeLocal(it.appId)}
-                        className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-600 hover:bg-slate-50"
-                        type="button"
-                        title="Remove this local draft (server submissions won’t be deleted here)"
-                      >
-                        Remove Draft
-                      </button>
-                    ) : null}
                   </div>
 
                   {it.notes ? (

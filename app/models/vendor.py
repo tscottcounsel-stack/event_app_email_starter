@@ -1,33 +1,16 @@
-from __future__ import annotations
+# app/models/vendor.py
 
-from typing import List, Optional
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
 
-from sqlalchemy import Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.db import Base, TimestampMixin
+from app.db import Base
 
 
-class Vendor(TimestampMixin, Base):
+class Vendor(Base):
     __tablename__ = "vendors"
-    __table_args__ = {"extend_existing": True}
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
 
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    category: Mapped[Optional[str]] = mapped_column(String(100))
-    phone: Mapped[Optional[str]] = mapped_column(String(50))
-    description: Mapped[Optional[str]] = mapped_column(Text)
-
-    # Reverse side for Application.vendor
-    applications: Mapped[List["Application"]] = relationship(
-        "Application",
-        back_populates="vendor",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-
-
-applications = relationship(
-    "Application", back_populates="vendor", cascade="all, delete-orphan"
-)
+    # Minimal safe fields
+    company_name = Column(String, nullable=True)
+    display_name = Column(String, nullable=True)

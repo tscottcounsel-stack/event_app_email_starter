@@ -1,42 +1,19 @@
 # app/models/event.py
-from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Optional
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
 
-from sqlalchemy import DateTime, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.db import Base  # <- no TimestampMixin here
+from app.db import Base
 
 
-class Event(Base):  # <- removed TimestampMixin
+class Event(Base):
     __tablename__ = "events"
-    __table_args__ = {"extend_existing": True}
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    organizer_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
-    date: Mapped[datetime] = mapped_column(
-        DateTime(), nullable=False
-    )  # timestamp w/o tz
-    location: Mapped[str] = mapped_column(String(255), nullable=False)
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=True)
 
-    description: Mapped[Optional[str]] = mapped_column(Text)
-    diagram_url: Mapped[Optional[str]] = mapped_column(String(255))
-    layout_json: Mapped[Optional[str]] = mapped_column(Text)
-
-    applications: Mapped[List["Application"]] = relationship(
+    applications = relationship(
         "Application",
         back_populates="event",
         cascade="all, delete-orphan",
-        passive_deletes=True,
     )
-
-
-applications = relationship(
-    "Application", back_populates="event", cascade="all, delete-orphan"
-)
-
-
-slots = relationship("Slot", cascade="all, delete-orphan", back_populates="event")

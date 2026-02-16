@@ -1,3 +1,4 @@
+// src/pages/OrganizerDashboard.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -154,6 +155,31 @@ export default function OrganizerDashboard() {
       .sort((a, b) => rank[statusKey(a)] - rank[statusKey(b)])
       .slice(0, 5);
   }, [events]);
+
+  // ✅ Use a real eventId route for applications
+  const defaultApplicationsEventId = useMemo(() => {
+    const rank: Record<StatusKey, number> = {
+      ready: 1,
+      progress: 2,
+      draft: 3,
+      complete: 4,
+      archived: 5,
+    };
+
+    const candidate = [...events]
+      .filter((e) => !e.archived)
+      .sort((a, b) => rank[statusKey(a)] - rank[statusKey(b)])[0];
+
+    return candidate ? String(candidate.id) : null;
+  }, [events]);
+
+  function goToApplications() {
+    if (defaultApplicationsEventId) {
+      navigate(`/organizer/events/${encodeURIComponent(defaultApplicationsEventId)}/applications`);
+      return;
+    }
+    navigate("/organizer/events");
+  }
 
   return (
     <div className="w-full">
@@ -313,7 +339,6 @@ export default function OrganizerDashboard() {
                           {statusLabel(k)}
                         </span>
 
-                        {/* ✅ FIX: Open must go to a REAL route */}
                         <button
                           type="button"
                           onClick={() =>
@@ -353,9 +378,7 @@ export default function OrganizerDashboard() {
                           <button
                             type="button"
                             onClick={() =>
-                              navigate(
-                                `/organizer/events/${ev.id}/requirements`
-                              )
+                              navigate(`/organizer/events/${ev.id}/requirements`)
                             }
                             className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-900 hover:bg-slate-50"
                           >
@@ -403,11 +426,13 @@ export default function OrganizerDashboard() {
                 Pending Applications
               </div>
               <div className="mt-1 text-xs font-semibold text-slate-600">
-                Coming next — once vendor applications are wired.
+                Review vendor applications for your next active event.
               </div>
+
+              {/* ✅ FIXED: Must include :eventId */}
               <button
                 type="button"
-                onClick={() => navigate("/organizer/applications")}
+                onClick={goToApplications}
                 className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
               >
                 Go to Applications
