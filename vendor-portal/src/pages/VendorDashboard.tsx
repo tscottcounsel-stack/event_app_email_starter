@@ -68,9 +68,8 @@ export default function VendorDashboardPage() {
       }
 
       const res = await fetch(`${API_BASE}/vendor/applications`, {
-        method: "GET",
-        headers,
-      });
+  headers: buildAuthHeaders(),
+});
 
       const text = await res.text().catch(() => "");
       if (!res.ok) {

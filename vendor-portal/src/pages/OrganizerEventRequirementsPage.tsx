@@ -8,8 +8,15 @@ import { useAuth } from "../auth/AuthContext";
 type BoothCategory = {
   id: string;
   name: string;
+
   baseSize: string; // e.g. "10x10"
   basePrice: number; // dollars
+
+  additionalPerFt?: number; // dollars/ft
+  cornerPremium?: number; // dollars
+
+  fireMarshalFee?: number; // dollars
+  electricalNote?: string; // optional note shown to vendors
 };
 
 type VendorRestriction = {
@@ -33,15 +40,21 @@ type DocumentRequirement = {
 type RefundPolicy =
   | "No Refunds"
   | "Full Refund"
-  | "Partial Refund"
+  | "Partial Refund (50%)"
   | "Event Credits Only";
 
 type PaymentSettings = {
   requireDeposit: boolean;
   depositPercent: number; // 0-100
+
+  lateFeeEnabled: boolean;
   lateFee: number; // dollars
+
   refundPolicy: RefundPolicy;
   paymentNotes?: string;
+
+  // Stripe-safe optional fallback
+  defaultAmountCents?: number;
 };
 
 type RequirementsModel = {
@@ -57,17 +70,21 @@ type RequirementsModel = {
   updatedAt?: string;
 };
 
-type EventConfigTemplate = {
+type EventTemplate = {
   id: string;
   name: string;
-  description: string;
-  createdAt: string;
+  subtitle: string;
 
-  boothCategories: BoothCategory[];
-  customRestrictions: VendorRestriction[];
-  complianceItems: ComplianceRequirement[];
-  documentRequirements: DocumentRequirement[];
-  paymentSettings: PaymentSettings;
+  boothDefaults: BoothCategory[];
+  restrictionQuickAdds: string[];
+  complianceQuickAdds: string[];
+  documentQuickAdds: string[];
+
+  restrictionsDefaults: string[];
+  complianceDefaults: Array<{ text: string; required: boolean }>;
+  documentsDefaults: Array<{ name: string; required: boolean; dueBy?: string }>;
+
+  paymentDefaults: PaymentSettings;
 };
 
 /* ---------------- Config ---------------- */
@@ -76,8 +93,6 @@ const API_BASE =
   (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
 const LS_EVENT_REQ_PREFIX = "organizer:event";
-const LS_TEMPLATES_KEY = "event-config-templates";
-const BULLET = "\u2022";
 
 /**
  * IMPORTANT:
@@ -109,6 +124,18 @@ function toNumber(v: string, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function dollarsToCents(dollars: number) {
+  const n = Number(dollars);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.round(n * 100));
+}
+
+function centsToDollars(cents: any) {
+  const n = Number(cents);
+  if (!Number.isFinite(n)) return 0;
+  return n / 100;
+}
+
 /**
  * Stable string -> positive int (for FastAPI schemas that want int IDs)
  */
@@ -121,60 +148,6 @@ function stableIntId(input: string) {
   return h >>> 0; // uint32
 }
 
-/**
- * Normalize payload for API:
- * - snake_case keys (FastAPI/Pydantic-friendly)
- * - ids -> int
- * - numbers never ""
- */
-function normalizeForApi(m: RequirementsModel) {
-  // Backend expects:
-  // { version: int, requirements: { ... } }
-  // and it wants version to be an integer.
-  return {
-    version: 2, // <-- IMPORTANT: int, not string
-
-    requirements: {
-      // If backend expects event_id inside requirements, keep it:
-      event_id: Number(m.eventId),
-
-      booth_categories: (m.boothCategories || []).map((c) => ({
-        id: stableIntId(String(c.id)),
-        name: String(c.name || ""),
-        base_size: String(c.baseSize || ""),
-        base_price: Number(c.basePrice) || 0,
-      })),
-
-      custom_restrictions: (m.customRestrictions || []).map((r) => ({
-        id: stableIntId(String(r.id)),
-        text: String(r.text || ""),
-      })),
-
-      compliance_items: (m.complianceItems || []).map((c) => ({
-        id: stableIntId(String(c.id)),
-        text: String(c.text || ""),
-        required: !!c.required,
-      })),
-
-      document_requirements: (m.documentRequirements || []).map((d) => ({
-        id: stableIntId(String(d.id)),
-        name: String(d.name || ""),
-        required: !!d.required,
-        due_by: String(d.dueBy || ""),
-      })),
-
-      payment_settings: {
-        require_deposit: !!m.paymentSettings?.requireDeposit,
-        deposit_percent: Number(m.paymentSettings?.depositPercent) || 0,
-        late_fee: Number(m.paymentSettings?.lateFee) || 0,
-        refund_policy: m.paymentSettings?.refundPolicy || "No Refunds",
-        payment_notes: String(m.paymentSettings?.paymentNotes || ""),
-      },
-
-      updated_at: new Date().toISOString(),
-    },
-  };
-}
 async function fetchJson(path: string, opts: { accessToken?: string } = {}) {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts.accessToken) headers.Authorization = `Bearer ${opts.accessToken}`;
@@ -216,18 +189,28 @@ async function saveJson(
   return { ok: res.ok, status: res.status, data };
 }
 
-function readTemplates(): EventConfigTemplate[] {
-  try {
-    const raw = localStorage.getItem(LS_TEMPLATES_KEY);
-    const arr = JSON.parse(raw || "[]");
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
+/**
+ * Accept either:
+ * A) { version: 2, requirements: {...snake_case...} }
+ * B) { ...snake_case... } (already unwrapped)
+ * C) already-camelCase model
+ */
+function apiToOrganizerShape(src: any) {
+  const root =
+    src?.requirements && typeof src.requirements === "object"
+      ? src.requirements
+      : src;
 
-function writeTemplates(list: EventConfigTemplate[]) {
-  localStorage.setItem(LS_TEMPLATES_KEY, JSON.stringify(list));
+  if (
+    root &&
+    (root.boothCategories || root.customRestrictions || root.complianceItems)
+  ) {
+    return root;
+  }
+
+  if (src?.requirements) return src;
+
+  return { version: 2, requirements: root };
 }
 
 function toRequirementsModel(
@@ -235,155 +218,442 @@ function toRequirementsModel(
   src: Partial<RequirementsModel> | null | undefined
 ): RequirementsModel {
   const base: RequirementsModel = {
-    version: "event_requirements_v1_2",
+    version: "event_requirements_v2",
     eventId,
     boothCategories: [],
     customRestrictions: [],
     complianceItems: [],
     documentRequirements: [],
     paymentSettings: {
-      requireDeposit: true,
+      requireDeposit: false,
       depositPercent: 50,
+      lateFeeEnabled: false,
       lateFee: 0,
       refundPolicy: "No Refunds",
       paymentNotes: "",
+      defaultAmountCents: 0,
     },
     updatedAt: new Date().toISOString(),
   };
 
   if (!src) return base;
 
+  const anySrc: any = src as any;
+  const req =
+    anySrc?.requirements && typeof anySrc.requirements === "object"
+      ? anySrc.requirements
+      : null;
+
+  if (req) {
+    const boothCategories: BoothCategory[] = Array.isArray(req.booth_categories)
+      ? req.booth_categories.map((c: any) => ({
+          id: String(c?.id ?? ""),
+          name: String(c?.name ?? ""),
+          baseSize: String(c?.base_size ?? ""),
+          basePrice:
+            Number(c?.base_price ?? 0) ||
+            centsToDollars(c?.base_price_cents ?? 0) ||
+            0,
+          additionalPerFt:
+            Number(c?.additional_per_ft ?? 0) ||
+            centsToDollars(c?.additional_per_ft_cents ?? 0) ||
+            0,
+          cornerPremium:
+            Number(c?.corner_premium ?? 0) ||
+            centsToDollars(c?.corner_premium_cents ?? 0) ||
+            0,
+          fireMarshalFee:
+            Number(c?.fire_marshal_fee ?? 0) ||
+            centsToDollars(c?.fire_marshal_fee_cents ?? 0) ||
+            0,
+          electricalNote: String(c?.electrical_note ?? ""),
+        }))
+      : [];
+
+    const customRestrictions: VendorRestriction[] = Array.isArray(
+      req.custom_restrictions
+    )
+      ? req.custom_restrictions.map((r: any) => ({
+          id: String(r?.id ?? ""),
+          text: String(r?.text ?? ""),
+        }))
+      : [];
+
+    const complianceItems: ComplianceRequirement[] = Array.isArray(
+      req.compliance_items
+    )
+      ? req.compliance_items.map((c: any) => ({
+          id: String(c?.id ?? ""),
+          text: String(c?.text ?? ""),
+          required: !!c?.required,
+        }))
+      : [];
+
+    const documentRequirements: DocumentRequirement[] = Array.isArray(
+      req.document_requirements
+    )
+      ? req.document_requirements.map((d: any) => ({
+          id: String(d?.id ?? ""),
+          name: String(d?.name ?? ""),
+          required: !!d?.required,
+          dueBy: d?.due_by ? String(d.due_by) : "",
+        }))
+      : [];
+
+    const ps =
+      req.payment_settings && typeof req.payment_settings === "object"
+        ? req.payment_settings
+        : null;
+
+    const paymentSettings: PaymentSettings = ps
+      ? {
+          requireDeposit: !!ps.require_deposit,
+          depositPercent: Number(ps.deposit_percent ?? 0) || 0,
+          lateFeeEnabled: !!ps.late_fee_enabled,
+          lateFee: Number(ps.late_fee ?? 0) || 0,
+          refundPolicy:
+            (ps.refund_policy as RefundPolicy) || ("No Refunds" as RefundPolicy),
+          paymentNotes: ps.payment_notes ? String(ps.payment_notes) : "",
+          defaultAmountCents: Number(ps.default_amount_cents ?? 0) || 0,
+        }
+      : base.paymentSettings;
+
+    return {
+      ...base,
+      eventId,
+      boothCategories,
+      customRestrictions,
+      complianceItems,
+      documentRequirements,
+      paymentSettings,
+      updatedAt: req.updated_at ? String(req.updated_at) : new Date().toISOString(),
+    };
+  }
+
+  // LocalStorage / already camelCase
   return {
     ...base,
     ...src,
     eventId,
-    boothCategories: Array.isArray(src.boothCategories)
-      ? src.boothCategories
+    boothCategories: Array.isArray((src as any).boothCategories)
+      ? (src as any).boothCategories
       : base.boothCategories,
-    customRestrictions: Array.isArray(src.customRestrictions)
-      ? src.customRestrictions
+    customRestrictions: Array.isArray((src as any).customRestrictions)
+      ? (src as any).customRestrictions
       : base.customRestrictions,
-    complianceItems: Array.isArray(src.complianceItems)
-      ? src.complianceItems
+    complianceItems: Array.isArray((src as any).complianceItems)
+      ? (src as any).complianceItems
       : base.complianceItems,
-    documentRequirements: Array.isArray(src.documentRequirements)
-      ? src.documentRequirements
+    documentRequirements: Array.isArray((src as any).documentRequirements)
+      ? (src as any).documentRequirements
       : base.documentRequirements,
-    paymentSettings: src.paymentSettings
-      ? { ...base.paymentSettings, ...src.paymentSettings }
+    paymentSettings: (src as any).paymentSettings
+      ? { ...base.paymentSettings, ...(src as any).paymentSettings }
       : base.paymentSettings,
     updatedAt: new Date().toISOString(),
   };
 }
 
-/* ---------------- Default Templates ---------------- */
+/**
+ * Normalize payload for API:
+ * - snake_case keys (FastAPI/Pydantic-friendly)
+ * - ids -> int
+ */
+function normalizeForApi(m: RequirementsModel) {
+  return {
+    version: 2,
+    requirements: {
+      event_id: Number(m.eventId),
 
-const DEFAULT_TEMPLATES: EventConfigTemplate[] = [
+      booth_categories: (m.boothCategories || []).map((c) => {
+        const basePrice = Number(c.basePrice) || 0;
+        const addl = Number(c.additionalPerFt) || 0;
+        const corner = Number(c.cornerPremium) || 0;
+        const fire = Number(c.fireMarshalFee) || 0;
+
+        return {
+          id: stableIntId(String(c.id)),
+          name: String(c.name || ""),
+          base_size: String(c.baseSize || ""),
+
+          base_price: basePrice,
+          additional_per_ft: addl,
+          corner_premium: corner,
+          fire_marshal_fee: fire,
+          electrical_note: String(c.electricalNote || ""),
+
+          base_price_cents: dollarsToCents(basePrice),
+          additional_per_ft_cents: dollarsToCents(addl),
+          corner_premium_cents: dollarsToCents(corner),
+          fire_marshal_fee_cents: dollarsToCents(fire),
+        };
+      }),
+
+      custom_restrictions: (m.customRestrictions || []).map((r) => ({
+        id: stableIntId(String(r.id)),
+        text: String(r.text || ""),
+      })),
+
+      compliance_items: (m.complianceItems || []).map((c) => ({
+        id: stableIntId(String(c.id)),
+        text: String(c.text || ""),
+        required: !!c.required,
+      })),
+
+      document_requirements: (m.documentRequirements || []).map((d) => ({
+        id: stableIntId(String(d.id)),
+        name: String(d.name || ""),
+        required: !!d.required,
+        due_by: String(d.dueBy || ""),
+      })),
+
+      payment_settings: {
+        require_deposit: !!m.paymentSettings?.requireDeposit,
+        deposit_percent: Number(m.paymentSettings?.depositPercent) || 0,
+
+        late_fee_enabled: !!m.paymentSettings?.lateFeeEnabled,
+        late_fee: Number(m.paymentSettings?.lateFee) || 0,
+
+        refund_policy: m.paymentSettings?.refundPolicy || "No Refunds",
+        payment_notes: String(m.paymentSettings?.paymentNotes || ""),
+
+        default_amount_cents: Number(m.paymentSettings?.defaultAmountCents) || 0,
+      },
+
+      updated_at: new Date().toISOString(),
+    },
+  };
+}
+
+/* ---------------- Templates (each template differs) ---------------- */
+
+const EVENT_TEMPLATES: EventTemplate[] = [
   {
-    id: "tpl_tech_conf",
-    name: "Tech Conference",
-    description: "Technology exhibitions and trade shows",
-    createdAt: new Date().toISOString(),
-    boothCategories: [
-      { id: uid("bc"), name: "Standard Booth", baseSize: "10x10", basePrice: 800 },
-      { id: uid("bc"), name: "Premium Booth", baseSize: "10x20", basePrice: 1500 },
-      { id: uid("bc"), name: "Sponsor Booth", baseSize: "20x20", basePrice: 3500 },
+    id: "food_festival",
+    name: "Food Festival",
+    subtitle: "Food trucks + strict safety/compliance",
+    boothDefaults: [
+      {
+        id: uid("cat"),
+        name: "Food Truck",
+        baseSize: "Truck",
+        basePrice: 500,
+        additionalPerFt: 25,
+        cornerPremium: 100,
+        fireMarshalFee: 0,
+        electricalNote: "Generator required unless power add-on approved",
+      },
     ],
-    customRestrictions: [
-      { id: uid("r"), text: "No loud amplified audio without approval." },
-      { id: uid("r"), text: "No open flames or hazardous materials." },
-      { id: uid("r"), text: "No solicitation outside assigned booth area." },
+    restrictionQuickAdds: [
+      "No outside food or beverage sales",
+      "No alcohol sales",
+      "No use of event branding or logos on merchandise",
+      "No weapons or replicas",
+      "No fireworks or pyrotechnics",
     ],
-    complianceItems: [
-      { id: uid("c"), text: "Electrical equipment inspected and certified.", required: true },
-      { id: uid("c"), text: "All staff must wear event badges at all times.", required: true },
-      { id: uid("c"), text: "Fire code clearance maintained (3ft aisle).", required: true },
-      { id: uid("c"), text: "Wiring taped down / cable ramps used.", required: false },
+    complianceQuickAdds: [
+      "Ground cover required (food vendors)",
+      "Grease must be disposed of in designated containers only",
+      "All banners and signage must be flame-retardant certified",
+      "Noise levels must comply with event regulations",
+      "Vendors must provide their own power source",
+      "Setup must be completed by designated time",
+      "Breakdown must not begin before event end time",
     ],
-    documentRequirements: [
-      { id: uid("d"), name: "Certificate of Insurance (COI)", required: true, dueBy: "14 days before event" },
-      { id: uid("d"), name: "Electrical request form (if needed)", required: false, dueBy: "7 days before event" },
-      { id: uid("d"), name: "Brand guidelines acknowledgment", required: false, dueBy: "" },
+    documentQuickAdds: [
+      "Health Permit",
+      "Fire Safety Documentation",
+      "Menu/Product List",
+      "Tax Certificate",
+      "Food Handler Certifications",
+      "Liquor License",
+      "Health & Safety Compliance Certificate",
     ],
-    paymentSettings: {
+    restrictionsDefaults: ["No outside food or beverage sales", "No alcohol sales"],
+    complianceDefaults: [
+      { text: "All trash must be bagged and disposed of properly", required: true },
+      { text: "Fire extinguisher must be present and accessible", required: true },
+    ],
+    documentsDefaults: [
+      { name: "General Liability Insurance", required: true, dueBy: "14 days before event" },
+      { name: "Business License", required: true, dueBy: "" },
+    ],
+    paymentDefaults: {
       requireDeposit: true,
       depositPercent: 50,
-      refundPolicy: "Partial Refund",
+      lateFeeEnabled: true,
       lateFee: 50,
-      paymentNotes: "Deposit due at application approval. Remaining balance due 30 days before event.",
+      refundPolicy: "Partial Refund (50%)",
+      paymentNotes: "Food vendors must be approved before payment is finalized.",
+      defaultAmountCents: 0,
     },
   },
   {
-    id: "tpl_art_fair",
-    name: "Art Fair",
-    description: "Art shows, craft fairs, maker markets",
-    createdAt: new Date().toISOString(),
-    boothCategories: [
-      { id: uid("bc"), name: "Artist Booth", baseSize: "10x10", basePrice: 250 },
-      { id: uid("bc"), name: "Corner Booth", baseSize: "10x10", basePrice: 325 },
-      { id: uid("bc"), name: "Large Booth", baseSize: "10x20", basePrice: 450 },
+    id: "artisan_market",
+    name: "Artisan Market",
+    subtitle: "Craft vendors + light compliance",
+    boothDefaults: [
+      {
+        id: uid("cat"),
+        name: "Standard Booth",
+        baseSize: "10x10",
+        basePrice: 250,
+        additionalPerFt: 10,
+        cornerPremium: 50,
+        fireMarshalFee: 0,
+        electricalNote: "Optional power add-on available",
+      },
     ],
-    customRestrictions: [
-      { id: uid("r"), text: "No resale / mass-produced goods unless approved." },
-      { id: uid("r"), text: "No hazardous materials / solvents in open areas." },
-      { id: uid("r"), text: "No amplified music without approval." },
+    restrictionQuickAdds: [
+      "No counterfeit or trademark-infringing goods",
+      "No weapons or replicas",
+      "No fireworks or pyrotechnics",
+      "No amplified sound without approval",
     ],
-    complianceItems: [
-      { id: uid("c"), text: "Display must be stable and weighted if outdoors.", required: true },
-      { id: uid("c"), text: "Tablecloths or booth dressing required.", required: false },
-      { id: uid("c"), text: "All products must be labeled with price.", required: false },
-      { id: uid("c"), text: "No blocking walkways / keep within booth footprint.", required: true },
+    complianceQuickAdds: [
+      "Setup must be completed by designated time",
+      "Keep booth area clean and clear of trip hazards",
+      "No open flames without approval",
     ],
-    documentRequirements: [
-      { id: uid("d"), name: "Vendor agreement acknowledgment", required: true, dueBy: "" },
-      { id: uid("d"), name: "COI (if required by venue)", required: false, dueBy: "" },
-      { id: uid("d"), name: "Sales tax certificate (if applicable)", required: false, dueBy: "" },
+    documentQuickAdds: [
+      "Business License",
+      "Tax Certificate",
+      "Certificate of Insurance",
     ],
-    paymentSettings: {
+    restrictionsDefaults: ["No counterfeit or trademark-infringing goods"],
+    complianceDefaults: [
+      { text: "Keep booth area clean and clear of trip hazards", required: true },
+    ],
+    documentsDefaults: [
+      { name: "Business License", required: true, dueBy: "" },
+    ],
+    paymentDefaults: {
+      requireDeposit: true,
+      depositPercent: 25,
+      lateFeeEnabled: false,
+      lateFee: 0,
+      refundPolicy: "No Refunds",
+      paymentNotes: "All booth fees are non-refundable once confirmed.",
+      defaultAmountCents: 0,
+    },
+  },
+  {
+    id: "tech_trade_show",
+    name: "Tech Trade Show",
+    subtitle: "Higher pricing + formal paperwork",
+    boothDefaults: [
+      {
+        id: uid("cat"),
+        name: "Standard Booth",
+        baseSize: "10x10",
+        basePrice: 1500,
+        additionalPerFt: 0,
+        cornerPremium: 200,
+        fireMarshalFee: 0,
+        electricalNote: "Power drops coordinated with venue",
+      },
+      {
+        id: uid("cat"),
+        name: "Premium Booth",
+        baseSize: "10x20",
+        basePrice: 3000,
+        additionalPerFt: 0,
+        cornerPremium: 300,
+        fireMarshalFee: 0,
+        electricalNote: "Dedicated circuit available by request",
+      },
+    ],
+    restrictionQuickAdds: [
+      "No unauthorized solicitation",
+      "No unauthorized recordings",
+      "No event branding on merchandise",
+    ],
+    complianceQuickAdds: [
+      "Setup by 7am",
+      "Breakdown not before close",
+      "Product demos tested 24hrs prior",
+      "WiFi coordination required for streaming demos",
+    ],
+    documentQuickAdds: [
+      "Certificate of Insurance",
+      "W-9 Tax Form",
+      "Product Spec Sheet",
+    ],
+    restrictionsDefaults: ["No unauthorized solicitation"],
+    complianceDefaults: [
+      { text: "Product demos tested 24hrs prior", required: true },
+      { text: "Setup by 7am", required: true },
+    ],
+    documentsDefaults: [
+      { name: "Certificate of Insurance", required: true, dueBy: "30 days before" },
+      { name: "W-9 Tax Form", required: true, dueBy: "" },
+    ],
+    paymentDefaults: {
       requireDeposit: true,
       depositPercent: 50,
-      refundPolicy: "Event Credits Only",
-      lateFee: 0,
-      paymentNotes: "Balance due 14 days before event. Late payments may forfeit booth selection.",
+      lateFeeEnabled: true,
+      lateFee: 100,
+      refundPolicy: "Partial Refund (50%)",
+      paymentNotes: "Balance due 14 days before event.",
+      defaultAmountCents: 0,
     },
   },
 ];
 
-/* ---------------- UI Bits ---------------- */
+/* ---------------- UI helpers ---------------- */
 
-function Section({
-  title,
-  subtitle,
-  right,
-  children,
-}: {
-  title: string;
-  subtitle?: string;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-}) {
+const inputCls =
+  "w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300";
+
+const chipCls =
+  "rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-xs font-black text-indigo-700 hover:bg-indigo-100";
+
+const sectionCard =
+  "rounded-3xl border border-slate-200 bg-white p-6 shadow-sm";
+
+const addBtnGreen =
+  "inline-flex items-center justify-center rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-black text-white hover:bg-emerald-700";
+
+const saveBtnBlue =
+  "inline-flex items-center justify-center rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white hover:bg-indigo-700";
+
+const subtleBtn =
+  "rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50";
+
+function IconBadge({ emoji }: { emoji: string }) {
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
-          <div className="text-lg font-black text-slate-900">{title}</div>
-          {subtitle ? (
-            <div className="mt-1 text-sm font-semibold text-slate-600">{subtitle}</div>
-          ) : null}
-        </div>
-        {right ? <div className="shrink-0">{right}</div> : null}
-      </div>
-      <div className="mt-5">{children}</div>
+    <div className="mr-3 flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-50 text-xl">
+      {emoji}
     </div>
   );
 }
 
-const inputCls =
-  "w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-900 outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300";
-const smallBtn =
-  "rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50";
-const primaryBtn =
-  "rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white shadow-sm hover:bg-indigo-700";
+function SectionHeader({
+  emoji,
+  title,
+  subtitle,
+  right,
+}: {
+  emoji: string;
+  title: string;
+  subtitle: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="flex items-start">
+        <IconBadge emoji={emoji} />
+        <div>
+          <div className="text-xl font-black text-slate-900">{title}</div>
+          <div className="mt-1 text-sm font-semibold text-slate-600">
+            {subtitle}
+          </div>
+        </div>
+      </div>
+      {right ? <div className="shrink-0">{right}</div> : null}
+    </div>
+  );
+}
 
 /* ---------------- Component ---------------- */
 
@@ -404,22 +674,66 @@ export default function OrganizerEventRequirementsPage() {
   const [loading, setLoading] = useState(true);
   const [model, setModel] = useState<RequirementsModel | null>(null);
 
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
 
-  const [templates, setTemplates] = useState<EventConfigTemplate[]>([]);
-  const [activeTab, setActiveTab] = useState<"templates" | "builder">("templates");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
+    EVENT_TEMPLATES[0]?.id || "food_festival"
+  );
 
-  useEffect(() => {
-    const saved = readTemplates();
-    if (saved.length === 0) {
-      writeTemplates(DEFAULT_TEMPLATES);
-      setTemplates(DEFAULT_TEMPLATES);
-    } else {
-      setTemplates(saved);
+  const [customRestrictionText, setCustomRestrictionText] = useState("");
+  const [customComplianceText, setCustomComplianceText] = useState("");
+  const [customDocName, setCustomDocName] = useState("");
+
+  function bump(m: RequirementsModel): RequirementsModel {
+    return { ...m, updatedAt: new Date().toISOString() };
+  }
+
+  function applyTemplate(templateId: string) {
+    if (!eid) return;
+
+    const tpl = EVENT_TEMPLATES.find((t) => t.id === templateId);
+    if (!tpl) return;
+
+    const next: RequirementsModel = bump({
+      version: "event_requirements_v2",
+      eventId: eid,
+
+      boothCategories: tpl.boothDefaults.map((b) => ({ ...b, id: uid("cat") })),
+
+      customRestrictions: tpl.restrictionsDefaults.map((text) => ({
+        id: uid("r"),
+        text,
+      })),
+
+      complianceItems: tpl.complianceDefaults.map((c) => ({
+        id: uid("c"),
+        text: c.text,
+        required: !!c.required,
+      })),
+
+      documentRequirements: tpl.documentsDefaults.map((d) => ({
+        id: uid("d"),
+        name: d.name,
+        required: !!d.required,
+        dueBy: d.dueBy || "",
+      })),
+
+      paymentSettings: { ...tpl.paymentDefaults },
+      updatedAt: new Date().toISOString(),
+    });
+
+    setModel(next);
+    setToast(`Template loaded: ${tpl.name}`);
+    setError(null);
+
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(next));
+    } catch {
+      // ignore
     }
-  }, []);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -451,7 +765,9 @@ export default function OrganizerEventRequirementsPage() {
       for (const path of tries) {
         const res = await fetchJson(path, { accessToken });
         if (res.ok && res.data) {
-          const m = toRequirementsModel(eid, res.data as any);
+          const normalized = apiToOrganizerShape(res.data);
+          const m = toRequirementsModel(eid, normalized as any);
+
           if (!cancelled) {
             setModel(m);
             try {
@@ -464,169 +780,37 @@ export default function OrganizerEventRequirementsPage() {
         }
       }
 
-      if (!cancelled) setLoading(false);
+      // 3) If still nothing, initialize with default template
+      if (!cancelled) {
+        setLoading(false);
+        if (!model) {
+          applyTemplate(selectedTemplateId);
+        }
+      }
     }
 
     run();
     return () => {
       cancelled = true;
     };
-  }, [eid, eventId, storageKey, accessToken]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eid, eventId]);
 
-  function bump(m: RequirementsModel): RequirementsModel {
-    return { ...m, updatedAt: new Date().toISOString() };
-  }
-
-  function applyTemplate(tpl: EventConfigTemplate) {
+  // If user changes the template selector, load it immediately
+  useEffect(() => {
     if (!eid) return;
-
-    const next = bump(
-      toRequirementsModel(eid, {
-        version: "event_requirements_v1_2",
-        eventId: eid,
-        boothCategories: tpl.boothCategories,
-        customRestrictions: tpl.customRestrictions,
-        complianceItems: tpl.complianceItems,
-        documentRequirements: tpl.documentRequirements,
-        paymentSettings: tpl.paymentSettings,
-      })
-    );
-
-    setModel(next);
-    setActiveTab("builder");
-
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
-      setToast("Template loaded.");
-    } catch {
-      // ignore
-    }
-  }
-
-  function saveAsTemplate() {
     if (!model) return;
+    // do not auto-wipe if user has data; this is a destructive action
+    // so we only auto-apply if the current model is effectively empty
+    const isEmpty =
+      (model.boothCategories?.length || 0) === 0 &&
+      (model.customRestrictions?.length || 0) === 0 &&
+      (model.complianceItems?.length || 0) === 0 &&
+      (model.documentRequirements?.length || 0) === 0;
 
-    const name = window.prompt("Template name?", "My Template");
-    if (!name) return;
-
-    const description = window.prompt("Template description?", "Custom template") || "";
-
-    const tpl: EventConfigTemplate = {
-      id: uid("tpl"),
-      name,
-      description,
-      createdAt: new Date().toISOString(),
-      boothCategories: model.boothCategories,
-      customRestrictions: model.customRestrictions,
-      complianceItems: model.complianceItems,
-      documentRequirements: model.documentRequirements,
-      paymentSettings: model.paymentSettings,
-    };
-
-    const next = [tpl, ...templates];
-    setTemplates(next);
-    writeTemplates(next);
-    setToast("Template saved.");
-  }
-
-  function deleteTemplate(templateId: string) {
-    const next = templates.filter((t) => t.id !== templateId);
-    setTemplates(next);
-    writeTemplates(next);
-    setToast("Template deleted.");
-  }
-
-  function addCategory() {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        boothCategories: [
-          ...model.boothCategories,
-          { id: uid("bc"), name: "New category", baseSize: "10x10", basePrice: 0 },
-        ],
-      })
-    );
-  }
-
-  function addRestriction() {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        customRestrictions: [...model.customRestrictions, { id: uid("r"), text: "" }],
-      })
-    );
-  }
-
-  function addCompliance() {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        complianceItems: [...model.complianceItems, { id: uid("c"), text: "", required: true }],
-      })
-    );
-  }
-
-  function addDocReq() {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        documentRequirements: [
-          ...model.documentRequirements,
-          { id: uid("d"), name: "", required: true, dueBy: "" },
-        ],
-      })
-    );
-  }
-
-  function removeById<K extends keyof RequirementsModel>(key: K, id: string) {
-    if (!model) return;
-    const list = (model[key] as any[]) || [];
-    setModel(bump({ ...model, [key]: list.filter((x) => x.id !== id) } as any));
-  }
-
-  function updateCategory(id: string, patch: Partial<BoothCategory>) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        boothCategories: model.boothCategories.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-      })
-    );
-  }
-
-  function updateRestriction(id: string, patch: Partial<VendorRestriction>) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        customRestrictions: model.customRestrictions.map((r) => (r.id === id ? { ...r, ...patch } : r)),
-      })
-    );
-  }
-
-  function updateCompliance(id: string, patch: Partial<ComplianceRequirement>) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        complianceItems: model.complianceItems.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-      })
-    );
-  }
-
-  function updateDocReq(id: string, patch: Partial<DocumentRequirement>) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        documentRequirements: model.documentRequirements.map((d) => (d.id === id ? { ...d, ...patch } : d)),
-      })
-    );
-  }
+    if (isEmpty) applyTemplate(selectedTemplateId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTemplateId]);
 
   async function onSave(): Promise<boolean> {
     if (!model || !eid) {
@@ -639,7 +823,6 @@ export default function OrganizerEventRequirementsPage() {
     setError(null);
     setToast(null);
 
-    // Always cache locally first
     try {
       localStorage.setItem(storageKey, JSON.stringify(model));
     } catch {
@@ -655,15 +838,13 @@ export default function OrganizerEventRequirementsPage() {
 
     for (const attempt of attempts) {
       try {
-        console.log("REQ SAVE ->", attempt.method, `${API_BASE}${attempt.path}`, payload);
-
-        const res = await saveJson(attempt.method, attempt.path, payload, { accessToken });
-
-        console.log("REQ SAVE <-", attempt.method, attempt.path, res.status, res.ok, res.data);
+        const res = await saveJson(attempt.method, attempt.path, payload, {
+          accessToken,
+        });
 
         if (res.ok) {
           setSaving(false);
-          setToast("Saved to API ✅");
+          setToast("Configuration saved ✅");
           return true;
         }
 
@@ -676,31 +857,184 @@ export default function OrganizerEventRequirementsPage() {
 
         setError(msg);
       } catch (e: any) {
-        console.log("REQ SAVE ERROR", e);
         setError(e?.message || "Save failed (network error)");
       }
     }
 
     setSaving(false);
-    setToast(null);
     return false;
   }
 
-  async function onSaveAndContinue() {
-    const ok = await onSave();
-    if (!ok) return;
-    navigate(`/organizer/events/${eid}/layout`);
+  /* ---------------- Mutators ---------------- */
+
+  function setBoothCategory(id: string, patch: Partial<BoothCategory>) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        boothCategories: model.boothCategories.map((c) =>
+          c.id === id ? { ...c, ...patch } : c
+        ),
+      })
+    );
   }
-async function onSaveAndContinue() {
-  const ok = await onSave();
-  if (!ok) return;
-  if (eid) navigate(`/organizer/events/${eid}/layout`);
-}
+
+  function addBoothCategory() {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        boothCategories: [
+          ...model.boothCategories,
+          {
+            id: uid("cat"),
+            name: "New Category",
+            baseSize: "10x10",
+            basePrice: 0,
+            additionalPerFt: 0,
+            cornerPremium: 0,
+            fireMarshalFee: 0,
+            electricalNote: "",
+          },
+        ],
+      })
+    );
+  }
+
+  function removeBoothCategory(id: string) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        boothCategories: model.boothCategories.filter((c) => c.id !== id),
+      })
+    );
+  }
+
+  function addRestriction(text: string) {
+    if (!model) return;
+    const clean = String(text || "").trim();
+    if (!clean) return;
+    if (model.customRestrictions.some((r) => r.text.trim().toLowerCase() === clean.toLowerCase())) return;
+
+    setModel(
+      bump({
+        ...model,
+        customRestrictions: [...model.customRestrictions, { id: uid("r"), text: clean }],
+      })
+    );
+  }
+
+  function removeRestriction(id: string) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        customRestrictions: model.customRestrictions.filter((r) => r.id !== id),
+      })
+    );
+  }
+
+  function addCompliance(text: string, required = true) {
+    if (!model) return;
+    const clean = String(text || "").trim();
+    if (!clean) return;
+    if (model.complianceItems.some((c) => c.text.trim().toLowerCase() === clean.toLowerCase())) return;
+
+    setModel(
+      bump({
+        ...model,
+        complianceItems: [
+          ...model.complianceItems,
+          { id: uid("c"), text: clean, required: !!required },
+        ],
+      })
+    );
+  }
+
+  function toggleComplianceRequired(id: string, required: boolean) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        complianceItems: model.complianceItems.map((c) =>
+          c.id === id ? { ...c, required } : c
+        ),
+      })
+    );
+  }
+
+  function removeCompliance(id: string) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        complianceItems: model.complianceItems.filter((c) => c.id !== id),
+      })
+    );
+  }
+
+  function addDocument(name: string, required = true) {
+    if (!model) return;
+    const clean = String(name || "").trim();
+    if (!clean) return;
+    if (model.documentRequirements.some((d) => d.name.trim().toLowerCase() === clean.toLowerCase())) return;
+
+    setModel(
+      bump({
+        ...model,
+        documentRequirements: [
+          ...model.documentRequirements,
+          { id: uid("d"), name: clean, required: !!required, dueBy: "" },
+        ],
+      })
+    );
+  }
+
+  function toggleDocRequired(id: string, required: boolean) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        documentRequirements: model.documentRequirements.map((d) =>
+          d.id === id ? { ...d, required } : d
+        ),
+      })
+    );
+  }
+
+  function setDocDueBy(id: string, dueBy: string) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        documentRequirements: model.documentRequirements.map((d) =>
+          d.id === id ? { ...d, dueBy } : d
+        ),
+      })
+    );
+  }
+
+  function removeDoc(id: string) {
+    if (!model) return;
+    setModel(
+      bump({
+        ...model,
+        documentRequirements: model.documentRequirements.filter((d) => d.id !== id),
+      })
+    );
+  }
+
+  /* ---------------- Render ---------------- */
+
+  const tpl = EVENT_TEMPLATES.find((t) => t.id === selectedTemplateId) || EVENT_TEMPLATES[0];
 
   if (loading) {
     return (
       <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="text-xl font-black text-slate-900">Loading requirements…</div>
+        <div className="text-xl font-black text-slate-900">
+          Loading configuration…
+        </div>
       </div>
     );
   }
@@ -708,8 +1042,10 @@ async function onSaveAndContinue() {
   if (!model || !eid) {
     return (
       <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="text-xl font-black text-slate-900">Requirements</div>
-        <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
+        <div className="text-xl font-black text-slate-900">
+          Event Setup & Vendor Requirements
+        </div>
+        <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
           {error || "Unable to load requirements."}
         </div>
       </div>
@@ -717,390 +1053,618 @@ async function onSaveAndContinue() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div>
-          <div className="text-4xl font-black tracking-tight text-slate-900">
-            Event {eid} Requirements Builder
-          </div>
-          <div className="mt-2 text-sm font-semibold text-slate-600">
-            Load a template, customize requirements, save, then continue to Map Editor.
-          </div>
+    <div className="min-h-screen bg-slate-50">
+      {/* Top bar */}
+      <div className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+          <button
+            type="button"
+            className="text-sm font-black text-slate-700 hover:text-slate-900"
+            onClick={() => navigate(-1)}
+          >
+            ← Back
+          </button>
 
-          <div className="mt-4 text-xs font-bold text-slate-500">
-            Debug keys:
-            <div className="mt-1 font-mono text-[11px] text-slate-600">{storageKey}</div>
-            <div className="mt-1 font-mono text-[11px] text-slate-600">{model.version}</div>
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-2 md:items-end">
-          <div className="flex gap-2">
-            <button type="button" onClick={onSave} className={primaryBtn} disabled={saving}>
-  {saving ? "Saving…" : "Save Requirements (API)"}
-</button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab("builder")}
-              className={smallBtn}
-              title="Review / edit"
-            >
-              Review
-            </button>
+          <div className="flex items-center gap-3">
+            <span className="text-lg font-black text-slate-900">
+              Event Setup & Vendor Requirements
+            </span>
           </div>
 
           <button
             type="button"
-            onClick={onSaveAndContinue}
-            className="rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-black text-slate-900 hover:bg-slate-50"
+            className={saveBtnBlue}
+            onClick={onSave}
             disabled={saving}
           >
-            Save & Continue → Map Editor
+            {saving ? "Saving…" : "Save Configuration"}
           </button>
         </div>
       </div>
 
-      {toast ? (
-        <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
-          {toast}
-        </div>
-      ) : null}
+      <div className="mx-auto max-w-6xl px-6 py-8">
+        {/* Template row */}
+        <div className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm font-black text-slate-900">
+                Event Template
+              </div>
+              <div className="mt-1 text-xs font-bold text-slate-600">
+                Choose a template. Each template preloads different defaults + quick-add options.
+              </div>
+            </div>
 
-      {error ? (
-        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          {error}
-        </div>
-      ) : null}
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
+              <select
+                className={inputCls}
+                value={selectedTemplateId}
+                onChange={(e) => setSelectedTemplateId(e.target.value)}
+              >
+                {EVENT_TEMPLATES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
 
-      <div className="mt-8 grid gap-6">
-        <Section
-          title="Templates"
-          subtitle="Load a pre-built template or manage your saved templates. Loading overwrites current configuration."
-          right={
-            <button type="button" onClick={saveAsTemplate} className={smallBtn}>
-              Save as Template
-            </button>
-          }
-        >
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className={
-                activeTab === "templates"
-                  ? "rounded-2xl bg-slate-900 px-4 py-2 text-sm font-black text-white"
-                  : smallBtn
-              }
-              onClick={() => setActiveTab("templates")}
-            >
-              Browse Templates
-            </button>
-            <button
-              type="button"
-              className={
-                activeTab === "builder"
-                  ? "rounded-2xl bg-slate-900 px-4 py-2 text-sm font-black text-white"
-                  : smallBtn
-              }
-              onClick={() => setActiveTab("builder")}
-            >
-              Edit Builder
-            </button>
+              <button
+                type="button"
+                className={subtleBtn}
+                onClick={() => applyTemplate(selectedTemplateId)}
+              >
+                Load template
+              </button>
+
+              <div className="text-xs font-bold text-slate-600 md:max-w-[340px]">
+                <span className="font-black">{tpl.name}:</span> {tpl.subtitle}
+              </div>
+            </div>
           </div>
 
-          {activeTab === "templates" ? (
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              {templates.map((t) => (
-                <div
-                  key={t.id}
-                  className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"
+          {toast ? (
+            <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800">
+              {toast}
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-black text-red-800">
+              {error}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Booth Categories */}
+        <div className={sectionCard}>
+          <SectionHeader
+            emoji="🎪"
+            title="Booth Categories"
+            subtitle="Define available booth types and pricing for your event"
+            right={
+              <button type="button" className={addBtnGreen} onClick={addBoothCategory}>
+                + Add Category
+              </button>
+            }
+          />
+
+          <div className="mt-6 grid gap-4">
+            {model.boothCategories.map((c) => (
+              <div
+                key={c.id}
+                className="rounded-3xl border border-slate-200 bg-white p-5"
+              >
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Category Name *
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      value={c.name}
+                      onChange={(e) => setBoothCategory(c.id, { name: e.target.value })}
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Base Size *
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      value={c.baseSize}
+                      onChange={(e) => setBoothCategory(c.id, { baseSize: e.target.value })}
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Base Price *
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      inputMode="decimal"
+                      value={String(c.basePrice ?? 0)}
+                      onChange={(e) =>
+                        setBoothCategory(c.id, {
+                          basePrice: clamp(toNumber(e.target.value, 0), 0, 999999),
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Additional $/ft
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      inputMode="decimal"
+                      value={String(c.additionalPerFt ?? 0)}
+                      onChange={(e) =>
+                        setBoothCategory(c.id, {
+                          additionalPerFt: clamp(toNumber(e.target.value, 0), 0, 999999),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Corner Premium
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      inputMode="decimal"
+                      value={String(c.cornerPremium ?? 0)}
+                      onChange={(e) =>
+                        setBoothCategory(c.id, {
+                          cornerPremium: clamp(toNumber(e.target.value, 0), 0, 999999),
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Fire Marshal Fee
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      inputMode="decimal"
+                      value={String(c.fireMarshalFee ?? 0)}
+                      onChange={(e) =>
+                        setBoothCategory(c.id, {
+                          fireMarshalFee: clamp(toNumber(e.target.value, 0), 0, 999999),
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-black text-slate-700">
+                      Electrical Note (optional)
+                    </div>
+                    <input
+                      className={`mt-2 ${inputCls}`}
+                      value={c.electricalNote || ""}
+                      onChange={(e) => setBoothCategory(c.id, { electricalNote: e.target.value })}
+                      placeholder="e.g., Generator required"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 flex justify-end">
+                  <button type="button" className={subtleBtn} onClick={() => removeBoothCategory(c.id)}>
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {model.boothCategories.length === 0 ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                No booth categories yet.
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Vendor Restrictions */}
+        <div className={`${sectionCard} mt-8`}>
+          <SectionHeader
+            emoji="🚫"
+            title="Vendor Restrictions"
+            subtitle="Define prohibited items and activities for your event"
+          />
+
+          <div className="mt-6">
+            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {tpl.restrictionQuickAdds.map((t) => (
+                <button key={t} type="button" className={chipCls} onClick={() => addRestriction(t)}>
+                  + {t}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-6">
+              <div className="text-sm font-black text-slate-900">Custom Restrictions</div>
+              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                <input
+                  className={inputCls}
+                  value={customRestrictionText}
+                  onChange={(e) => setCustomRestrictionText(e.target.value)}
+                  placeholder="Enter custom restriction…"
+                />
+                <button
+                  type="button"
+                  className={addBtnGreen}
+                  onClick={() => {
+                    addRestriction(customRestrictionText);
+                    setCustomRestrictionText("");
+                  }}
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="text-lg font-black text-slate-900">{t.name}</div>
-                      <div className="mt-1 text-sm font-semibold text-slate-600">{t.description}</div>
-                      <div className="mt-3 text-xs font-bold text-slate-500">
-                        Booths: {t.boothCategories.length} {BULLET} Restrictions:{" "}
-                        {t.customRestrictions.length} {BULLET} Compliance:{" "}
-                        {t.complianceItems.length} {BULLET} Docs:{" "}
-                        {t.documentRequirements.length}
+                  + Add
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 text-sm font-black text-slate-900">
+              Active Restrictions ({model.customRestrictions.length})
+            </div>
+
+            <div className="mt-3 grid gap-3">
+              {model.customRestrictions.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3"
+                >
+                  <div className="text-sm font-semibold text-slate-900">{r.text}</div>
+                  <button
+                    type="button"
+                    className="text-xl font-black text-red-500 hover:text-red-600"
+                    onClick={() => removeRestriction(r.id)}
+                    aria-label="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Compliance Requirements */}
+        <div className={`${sectionCard} mt-8`}>
+          <SectionHeader
+            emoji="📋"
+            title="Compliance Requirements"
+            subtitle="Set operational rules vendors must acknowledge"
+          />
+
+          <div className="mt-6">
+            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {tpl.complianceQuickAdds.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={chipCls}
+                  onClick={() => addCompliance(t, true)}
+                >
+                  + {t}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-6">
+              <div className="text-sm font-black text-slate-900">Custom Compliance Item</div>
+              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                <input
+                  className={inputCls}
+                  value={customComplianceText}
+                  onChange={(e) => setCustomComplianceText(e.target.value)}
+                  placeholder="Enter custom compliance requirement…"
+                />
+                <button
+                  type="button"
+                  className={addBtnGreen}
+                  onClick={() => {
+                    addCompliance(customComplianceText, true);
+                    setCustomComplianceText("");
+                  }}
+                >
+                  + Add
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 text-sm font-black text-slate-900">
+              Active Requirements ({model.complianceItems.length})
+            </div>
+
+            <div className="mt-3 grid gap-3">
+              {model.complianceItems.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={!!c.required}
+                      onChange={(e) => toggleComplianceRequired(c.id, e.target.checked)}
+                    />
+                    <div className="text-sm font-semibold text-slate-900">
+                      <span className="mr-2 text-xs font-black text-slate-600">
+                        Required
+                      </span>
+                      {c.text}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-xl font-black text-red-500 hover:text-red-600"
+                    onClick={() => removeCompliance(c.id)}
+                    aria-label="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Document Requirements */}
+        <div className={`${sectionCard} mt-8`}>
+          <SectionHeader
+            emoji="📄"
+            title="Document Requirements"
+            subtitle="Specify which documents vendors must upload"
+          />
+
+          <div className="mt-6">
+            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {tpl.documentQuickAdds.map((t) => (
+                <button key={t} type="button" className={chipCls} onClick={() => addDocument(t, true)}>
+                  + {t}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-6">
+              <div className="text-sm font-black text-slate-900">Custom Document</div>
+              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                <input
+                  className={inputCls}
+                  value={customDocName}
+                  onChange={(e) => setCustomDocName(e.target.value)}
+                  placeholder="Enter custom document requirement…"
+                />
+                <button
+                  type="button"
+                  className={addBtnGreen}
+                  onClick={() => {
+                    addDocument(customDocName, true);
+                    setCustomDocName("");
+                  }}
+                >
+                  + Add
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 text-sm font-black text-slate-900">
+              Active Documents ({model.documentRequirements.length})
+            </div>
+
+            <div className="mt-3 grid gap-3">
+              {model.documentRequirements.map((d) => (
+                <div
+                  key={d.id}
+                  className="rounded-2xl border border-slate-200 bg-white px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        checked={!!d.required}
+                        onChange={(e) => toggleDocRequired(d.id, e.target.checked)}
+                      />
+                      <div className="text-sm font-semibold text-slate-900">
+                        <span className="mr-2 text-xs font-black text-slate-600">
+                          Required
+                        </span>
+                        {d.name}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => applyTemplate(t)}
-                        className="rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-black text-white hover:bg-indigo-700"
-                      >
-                        Load
-                      </button>
-                      <button type="button" onClick={() => deleteTemplate(t.id)} className={smallBtn}>
-                        Delete
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      className="text-xl font-black text-red-500 hover:text-red-600"
+                      onClick={() => removeDoc(d.id)}
+                      aria-label="Remove"
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  <div className="mt-3">
+                    <input
+                      className={inputCls}
+                      value={d.dueBy || ""}
+                      onChange={(e) => setDocDueBy(d.id, e.target.value)}
+                      placeholder="Optional deadline (e.g., '14 days before event')"
+                    />
                   </div>
                 </div>
               ))}
             </div>
-          ) : null}
-        </Section>
-
-        <Section
-          title="Booth Categories"
-          subtitle="Define booth types (size + base price). Your map editor can reference these categories."
-          right={
-            <button type="button" onClick={addCategory} className={smallBtn}>
-              Add category
-            </button>
-          }
-        >
-          <div className="grid gap-4">
-            {model.boothCategories.map((c) => (
-              <div
-                key={c.id}
-                className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-4"
-              >
-                <input
-                  value={c.name}
-                  onChange={(e) => updateCategory(c.id, { name: e.target.value })}
-                  className={inputCls}
-                  placeholder="Category name"
-                />
-                <input
-                  value={c.baseSize}
-                  onChange={(e) => updateCategory(c.id, { baseSize: e.target.value })}
-                  className={inputCls}
-                  placeholder="Base size (e.g., 10x10)"
-                />
-                <input
-                  value={String(c.basePrice ?? 0)}
-                  onChange={(e) =>
-                    updateCategory(c.id, { basePrice: clamp(toNumber(e.target.value, 0), 0, 999999) })
-                  }
-                  className={inputCls}
-                  inputMode="numeric"
-                  placeholder="Price"
-                />
-                <button type="button" onClick={() => removeById("boothCategories", c.id)} className={smallBtn}>
-                  Remove
-                </button>
-              </div>
-            ))}
           </div>
-        </Section>
+        </div>
 
-        <Section
-          title="Vendor Restrictions"
-          subtitle="Custom rules vendors must follow."
-          right={
-            <button type="button" onClick={addRestriction} className={smallBtn}>
-              Add restriction
-            </button>
-          }
-        >
-          <div className="grid gap-3">
-            {model.customRestrictions.map((r) => (
-              <div
-                key={r.id}
-                className="flex flex-col gap-2 rounded-2xl border border-slate-200 p-4 md:flex-row md:items-center"
-              >
-                <input
-                  className={inputCls}
-                  value={r.text}
-                  onChange={(e) => updateRestriction(r.id, { text: e.target.value })}
-                  placeholder="Restriction text"
-                />
-                <button type="button" onClick={() => removeById("customRestrictions", r.id)} className={smallBtn}>
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        </Section>
+        {/* Payment & Refund Rules */}
+        <div className={`${sectionCard} mt-8`}>
+          <SectionHeader
+            emoji="💳"
+            title="Payment & Refund Rules"
+            subtitle="Configure payment terms and policies"
+          />
 
-        <Section
-          title="Compliance Requirements"
-          subtitle="Items vendors must confirm (checkboxes on the vendor application)."
-          right={
-            <button type="button" onClick={addCompliance} className={smallBtn}>
-              Add requirement
-            </button>
-          }
-        >
-          <div className="grid gap-3">
-            {model.complianceItems.map((c) => (
-              <div
-                key={c.id}
-                className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-[1fr_auto_auto]"
-              >
-                <input
-                  value={c.text}
-                  onChange={(e) => updateCompliance(c.id, { text: e.target.value })}
-                  className={inputCls}
-                  placeholder="Compliance requirement"
-                />
-                <label className="flex items-center gap-2 text-sm font-bold text-slate-700">
+          <div className="mt-6 grid gap-6">
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <label className="flex items-center gap-2 text-sm font-black text-slate-900">
                   <input
                     type="checkbox"
-                    checked={!!c.required}
-                    onChange={(e) => updateCompliance(c.id, { required: e.target.checked })}
+                    checked={!!model.paymentSettings.requireDeposit}
+                    onChange={(e) =>
+                      setModel(
+                        bump({
+                          ...model,
+                          paymentSettings: {
+                            ...model.paymentSettings,
+                            requireDeposit: e.target.checked,
+                          },
+                        })
+                      )
+                    }
                   />
-                  Required
+                  Require Deposit
                 </label>
-                <button type="button" onClick={() => removeById("complianceItems", c.id)} className={smallBtn}>
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        </Section>
 
-        <Section
-          title="Document Requirements"
-          subtitle="Docs vendors may need to upload (COI, permits, etc.)."
-          right={
-            <button type="button" onClick={addDocReq} className={smallBtn}>
-              Add document
-            </button>
-          }
-        >
-          <div className="grid gap-3">
-            {model.documentRequirements.map((d) => (
-              <div
-                key={d.id}
-                className="grid gap-3 rounded-2xl border border-slate-200 p-4 md:grid-cols-[1fr_1fr_auto_auto]"
-              >
-                <input
-                  className={inputCls}
-                  value={d.name}
-                  onChange={(e) => updateDocReq(d.id, { name: e.target.value })}
-                  placeholder="Document name"
-                />
-                <input
-                  className={inputCls}
-                  value={d.dueBy || ""}
-                  onChange={(e) => updateDocReq(d.id, { dueBy: e.target.value })}
-                  placeholder="Due by (optional)"
-                />
-                <label className="flex items-center gap-2 text-sm font-bold text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={!!d.required}
-                    onChange={(e) => updateDocReq(d.id, { required: e.target.checked })}
-                  />
-                  Required
-                </label>
-                <button type="button" onClick={() => removeById("documentRequirements", d.id)} className={smallBtn}>
-                  Remove
-                </button>
+                <div className="mt-4">
+                  <div className="text-xs font-black text-slate-700">
+                    Deposit Percentage
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      className={inputCls}
+                      inputMode="numeric"
+                      value={String(model.paymentSettings.depositPercent ?? 0)}
+                      onChange={(e) =>
+                        setModel(
+                          bump({
+                            ...model,
+                            paymentSettings: {
+                              ...model.paymentSettings,
+                              depositPercent: clamp(toNumber(e.target.value, 0), 0, 100),
+                            },
+                          })
+                        )
+                      }
+                    />
+                    <span className="text-sm font-black text-slate-600">%</span>
+                  </div>
+                </div>
               </div>
-            ))}
-          </div>
-        </Section>
 
-        <Section title="Payment Settings" subtitle="Define deposit rules, late fees, and refund policy.">
-          <div className="grid gap-5">
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <label className="flex items-center gap-2 text-sm font-black text-slate-900">
-                <input
-                  type="checkbox"
-                  checked={!!model.paymentSettings.requireDeposit}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="text-xs font-black text-slate-700">
+                  Refund Policy
+                </div>
+                <select
+                  className={`mt-2 ${inputCls}`}
+                  value={model.paymentSettings.refundPolicy}
                   onChange={(e) =>
                     setModel(
                       bump({
                         ...model,
-                        paymentSettings: { ...model.paymentSettings, requireDeposit: e.target.checked },
+                        paymentSettings: {
+                          ...model.paymentSettings,
+                          refundPolicy: e.target.value as RefundPolicy,
+                        },
+                      })
+                    )
+                  }
+                >
+                  <option>No Refunds</option>
+                  <option>Full Refund</option>
+                  <option>Partial Refund (50%)</option>
+                  <option>Event Credits Only</option>
+                </select>
+
+                <div className="mt-4 text-xs font-black text-slate-700">
+                  Payment Notes (optional)
+                </div>
+                <textarea
+                  className={`mt-2 ${inputCls}`}
+                  rows={3}
+                  value={model.paymentSettings.paymentNotes || ""}
+                  onChange={(e) =>
+                    setModel(
+                      bump({
+                        ...model,
+                        paymentSettings: {
+                          ...model.paymentSettings,
+                          paymentNotes: e.target.value,
+                        },
+                      })
+                    )
+                  }
+                  placeholder="Shown to vendors / internal notes…"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <label className="flex items-center gap-2 text-sm font-black text-slate-900">
+                <input
+                  type="checkbox"
+                  checked={!!model.paymentSettings.lateFeeEnabled}
+                  onChange={(e) =>
+                    setModel(
+                      bump({
+                        ...model,
+                        paymentSettings: {
+                          ...model.paymentSettings,
+                          lateFeeEnabled: e.target.checked,
+                        },
                       })
                     )
                   }
                 />
-                Require deposit
+                Late Submission Surcharge
               </label>
 
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                <div>
-                  <div className="text-xs font-black text-slate-700">Deposit %</div>
-                  <input
-                    className={`mt-2 ${inputCls}`}
-                    value={String(model.paymentSettings.depositPercent ?? 0)}
-                    onChange={(e) =>
-                      setModel(
-                        bump({
-                          ...model,
-                          paymentSettings: {
-                            ...model.paymentSettings,
-                            depositPercent: clamp(toNumber(e.target.value, 0), 0, 100),
-                          },
-                        })
-                      )
-                    }
-                    inputMode="numeric"
-                  />
+              <div className="mt-4 max-w-sm">
+                <div className="text-xs font-black text-slate-700">
+                  Late Fee Amount
                 </div>
-
-                <div>
-                  <div className="text-xs font-black text-slate-700">Late fee ($)</div>
-                  <input
-                    className={`mt-2 ${inputCls}`}
-                    value={String(model.paymentSettings.lateFee ?? 0)}
-                    onChange={(e) =>
-                      setModel(
-                        bump({
-                          ...model,
-                          paymentSettings: {
-                            ...model.paymentSettings,
-                            lateFee: clamp(toNumber(e.target.value, 0), 0, 999999),
-                          },
-                        })
-                      )
-                    }
-                    inputMode="numeric"
-                  />
-                </div>
+                <input
+                  className={`mt-2 ${inputCls}`}
+                  inputMode="decimal"
+                  value={String(model.paymentSettings.lateFee ?? 0)}
+                  onChange={(e) =>
+                    setModel(
+                      bump({
+                        ...model,
+                        paymentSettings: {
+                          ...model.paymentSettings,
+                          lateFee: clamp(toNumber(e.target.value, 0), 0, 999999),
+                        },
+                      })
+                    )
+                  }
+                  disabled={!model.paymentSettings.lateFeeEnabled}
+                />
               </div>
             </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-black text-slate-700">Refund Policy</div>
-              <select
-                className={`mt-2 ${inputCls}`}
-                value={model.paymentSettings.refundPolicy}
-                onChange={(e) =>
-                  setModel(
-                    bump({
-                      ...model,
-                      paymentSettings: {
-                        ...model.paymentSettings,
-                        refundPolicy: e.target.value as RefundPolicy,
-                      },
-                    })
-                  )
-                }
-              >
-                <option value="No Refunds">No Refunds</option>
-                <option value="Full Refund">Full Refund</option>
-                <option value="Partial Refund">Partial Refund</option>
-                <option value="Event Credits Only">Event Credits Only</option>
-              </select>
-
-              <div className="mt-4 text-xs font-black text-slate-700">Payment Notes</div>
-              <textarea
-                className={`mt-2 min-h-[120px] ${inputCls}`}
-                value={model.paymentSettings.paymentNotes || ""}
-                onChange={(e) =>
-                  setModel(
-                    bump({
-                      ...model,
-                      paymentSettings: { ...model.paymentSettings, paymentNotes: e.target.value },
-                    })
-                  )
-                }
-                placeholder="Shown to vendors during application / invoicing."
-              />
-            </div>
           </div>
-        </Section>
+
+          <div className="mt-6 text-xs font-bold text-slate-500">
+            Backend note: booth pricing is saved with both dollars and cents
+            fields for Stripe safety.
+          </div>
+        </div>
+
+        {/* footer spacing */}
+        <div className="h-10" />
       </div>
     </div>
   );

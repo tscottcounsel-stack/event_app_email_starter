@@ -3,11 +3,36 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
-type VendorProgress = {
+/* ---------------- Types ---------------- */
+
+type UploadedDocMeta = {
+  name: string;
+  size: number;
+  type?: string;
+  lastModified?: number;
+  dataUrl?: string;
+};
+
+type VendorApplyProgress = {
+  version: 1;
   eventId: string;
-  appId: string;
+  applicationId?: number; // numeric server id (preferred)
+  appId?: string; // string version of numeric id
+  boothId?: string;
+  checked: Record<string, boolean>;
+  docs: Record<string, UploadedDocMeta | null>;
+  notes?: string;
+  agreed?: boolean;
+  updatedAt: string;
+};
+
+type VendorProgressCard = {
+  eventId: string;
+  appId: string; // numeric id as string
+  applicationId: number; // numeric id
   boothId?: string;
   checked: Record<string, boolean>;
   notes?: string;
@@ -21,59 +46,231 @@ type ServerApplication = {
   event_id: number;
   booth_id?: string | null;
   app_ref?: string | null;
-  notes?: string;
-  checked?: Record<string, boolean>;
-  status?: string;
-  submitted_at?: string;
-  updated_at?: string;
+
+  notes?: string | null;
+  checked?: Record<string, boolean> | null;
+  status?: string | null;
+  submitted_at?: string | null;
+  updated_at?: string | null;
 
   vendor_email?: string | null;
   vendor_id?: string | null;
 };
 
+type RequirementItem = { id: string; text: string; required?: boolean };
+type DocumentItem = { id: string; name: string; required?: boolean; dueBy?: string };
+
+type LoadedRequirements = {
+  compliance: RequirementItem[];
+  documents: DocumentItem[];
+  source: "api" | "localStorage";
+  sourceKey?: string;
+};
+
+/* ---------------- localStorage keys ---------------- */
+
+// canonical progress storage for Apply page (event-only)
+const LS_VENDOR_APPLY_PROGRESS_PREFIX = "vendor_apply_progress_v1";
+function makeProgressKeyStable(eventId: string) {
+  return `${LS_VENDOR_APPLY_PROGRESS_PREFIX}:event:${eventId}`;
+}
+
+// legacy composite key support (older versions)
+function makeProgressKeyComposite(eventId: string, appId?: string, boothId?: string) {
+  const a = appId ? `app:${appId}` : "app:-";
+  const b = boothId ? `booth:${boothId}` : "booth:-";
+  return `${LS_VENDOR_APPLY_PROGRESS_PREFIX}:event:${eventId}:${a}:${b}`;
+}
+
+/* ---------------- Utils ---------------- */
+
+function normalizeId(v: unknown) {
+  return String(v ?? "").trim();
+}
+
+function safeJsonParse<T = any>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
 function formatDate(iso?: string) {
-  if (!iso) return "";
+  if (!iso) return "—";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  if (Number.isNaN(d.getTime())) return String(iso);
   return d.toLocaleString();
 }
 
-function calcCompletion(item: VendorProgress) {
-  const keys = Object.keys(item.checked || {});
-  if (keys.length === 0) return { done: 0, total: 0, pct: 100 };
-  const done = keys.filter((k) => item.checked[k]).length;
-  const total = keys.length;
-  const pct = total === 0 ? 100 : Math.round((done / total) * 100);
+function parseStatus(raw: any): "draft" | "submitted" | "approved" | "rejected" {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (s === "submitted" || s === "approved" || s === "rejected") return s as any;
+  return "draft";
+}
+
+function normalizeRequirements(raw: any): { compliance: RequirementItem[]; documents: DocumentItem[] } {
+  if (!raw || typeof raw !== "object") return { compliance: [], documents: [] };
+  const parsed = raw?.requirements ?? raw;
+
+  const complianceRaw =
+    parsed?.compliance ??
+    parsed?.complianceItems ??
+    parsed?.compliance_items ??
+    parsed?.compliance_items_list ??
+    [];
+
+  const documentsRaw =
+    parsed?.documents ??
+    parsed?.documentRequirements ??
+    parsed?.document_requirements ??
+    parsed?.document_requirements_list ??
+    [];
+
+  const compliance: RequirementItem[] = Array.isArray(complianceRaw)
+    ? complianceRaw
+        .map((c: any) => {
+          const id = normalizeId(c?.id || c?.text || c?.label);
+          const text = String(c?.text || c?.label || "").trim();
+          if (!text) return null;
+          return { id, text, required: !!c?.required } as RequirementItem;
+        })
+        .filter(Boolean) as RequirementItem[]
+    : [];
+
+  const documents: DocumentItem[] = Array.isArray(documentsRaw)
+    ? documentsRaw
+        .map((d: any) => {
+          const id = normalizeId(d?.id || d?.name);
+          const name = String(d?.name || "").trim();
+          if (!name) return null;
+          const dueBy = d?.dueBy ? String(d.dueBy) : d?.due_by ? String(d.due_by) : undefined;
+          return { id, name, required: !!d?.required, dueBy } as DocumentItem;
+        })
+        .filter(Boolean) as DocumentItem[]
+    : [];
+
+  return { compliance, documents };
+}
+
+async function loadRequirementsForEvent(eventId: string): Promise<LoadedRequirements | null> {
+  const id = normalizeId(eventId);
+  if (!id) return null;
+
+  // Prefer the public endpoint first (vendor flow)
+  const candidates = [
+    `${API_BASE}/events/${encodeURIComponent(id)}/requirements`,
+    `${API_BASE}/organizer/events/${encodeURIComponent(id)}/requirements`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => null);
+      const norm = normalizeRequirements(data);
+      if ((norm.compliance?.length || 0) > 0 || (norm.documents?.length || 0) > 0) {
+        return { compliance: norm.compliance, documents: norm.documents, source: "api", sourceKey: url };
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  // localStorage fallback (dev)
+  const organizerKey = `organizer:event:${id}:requirements`;
+  const organizerParsed = safeJsonParse(localStorage.getItem(organizerKey));
+  const normOrg = normalizeRequirements(organizerParsed);
+  if ((normOrg.compliance?.length || 0) > 0 || (normOrg.documents?.length || 0) > 0) {
+    return { compliance: normOrg.compliance, documents: normOrg.documents, source: "localStorage", sourceKey: organizerKey };
+  }
+
+  return null;
+}
+
+function readLocalProgress(eventId: string, appId?: string, boothId?: string): VendorApplyProgress | null {
+  const eid = normalizeId(eventId);
+  if (!eid) return null;
+
+  // Try stable first (new canonical)
+  const k1 = makeProgressKeyStable(eid);
+  const p1 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k1));
+  if (p1 && normalizeId(p1.eventId) === eid) return p1;
+
+  // Try legacy composite next
+  const k2 = makeProgressKeyComposite(eid, appId, boothId);
+  const p2 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k2));
+  if (p2 && normalizeId(p2.eventId) === eid) return p2;
+
+  // As last effort: composite without booth
+  const k3 = makeProgressKeyComposite(eid, appId, undefined);
+  const p3 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k3));
+  if (p3 && normalizeId(p3.eventId) === eid) return p3;
+
+  return null;
+}
+
+/**
+ * Completion logic:
+ * - Use requirements totals (compliance + documents).
+ * - Count required items; if none are marked required, treat all as required.
+ */
+function calcCompletion(
+  checked: Record<string, boolean>,
+  docs: Record<string, UploadedDocMeta | null>,
+  req?: LoadedRequirements | null
+) {
+  const compliance = req?.compliance || [];
+  const documents = req?.documents || [];
+
+  const reqComplianceOnly = compliance.filter((c) => !!c.required);
+  const reqCompliance = reqComplianceOnly.length > 0 ? reqComplianceOnly : compliance;
+
+  const reqDocsOnly = documents.filter((d) => !!d.required);
+  const reqDocs = reqDocsOnly.length > 0 ? reqDocsOnly : documents;
+
+  const compTotal = reqCompliance.length;
+  const docsTotal = reqDocs.length;
+
+  const compDone = reqCompliance.reduce((acc, c) => acc + (checked[normalizeId(c.id || c.text)] ? 1 : 0), 0);
+  const docsDone = reqDocs.reduce((acc, d) => acc + (docs[normalizeId(d.id || d.name)] ? 1 : 0), 0);
+
+  const done = compDone + docsDone;
+  const total = compTotal + docsTotal;
+
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
   return { done, total, pct };
 }
 
-function normalizeServerToUi(a: ServerApplication): VendorProgress {
-  const appId = (a.app_ref && String(a.app_ref)) || String(a.id);
-
-  const rawStatus = String(a.status || "").toLowerCase();
-  const status =
-    rawStatus === "approved" || rawStatus === "rejected" || rawStatus === "submitted"
-      ? (rawStatus as any)
-      : ("draft" as any);
+function normalizeServerToCard(a: ServerApplication): VendorProgressCard {
+  const applicationId = Number(a.id);
+  const appId = String(a.id);
 
   return {
     eventId: String(a.event_id),
     appId,
+    applicationId,
     boothId: a.booth_id ? String(a.booth_id) : undefined,
-    checked: a.checked || {},
-    notes: a.notes || "",
-    updatedAt: a.updated_at || a.submitted_at || new Date().toISOString(),
-    status,
-    submittedAt: a.submitted_at || undefined,
+    checked: (a.checked && typeof a.checked === "object") ? a.checked : {},
+    notes: String(a.notes ?? "").trim(),
+    updatedAt: String(a.updated_at || a.submitted_at || new Date().toISOString()),
+    status: parseStatus(a.status),
+    submittedAt: a.submitted_at ? String(a.submitted_at) : undefined,
   };
 }
+
+/* ---------------- Page ---------------- */
 
 export default function VendorApplicationsPage() {
   const nav = useNavigate();
 
   const [loading, setLoading] = useState(true);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [serverApps, setServerApps] = useState<VendorProgress[]>([]);
+  const [serverApps, setServerApps] = useState<VendorProgressCard[]>([]);
+
+  const [reqByEventId, setReqByEventId] = useState<Record<string, LoadedRequirements | null>>({});
+  const [localByKey, setLocalByKey] = useState<Record<string, VendorApplyProgress | null>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -85,8 +282,11 @@ export default function VendorApplicationsPage() {
       try {
         const headers = buildAuthHeaders();
 
-        // Guard: If no identity, backend will return empty and you'll be confused.
-        const hasIdentity = !!headers.Authorization || !!headers["x-user-email"] || !!headers["x-user-id"];
+        const hasIdentity =
+          !!(headers as any).Authorization ||
+          !!(headers as any)["x-user-email"] ||
+          !!(headers as any)["x-user-id"];
+
         if (!hasIdentity) {
           throw new Error(
             "Missing login identity headers (Authorization / x-user-email / x-user-id). Log in again so applications can load."
@@ -105,12 +305,44 @@ export default function VendorApplicationsPage() {
 
         const data = (await res.json().catch(() => null)) as { applications?: ServerApplication[] } | null;
         const apps = Array.isArray(data?.applications) ? data!.applications : [];
-        const normalized = apps.map(normalizeServerToUi);
+        const normalized = apps.map(normalizeServerToCard);
 
-        if (!cancelled) setServerApps(normalized);
+        if (cancelled) return;
+
+        setServerApps(normalized);
+
+        // Requirements per event
+        const uniqueEventIds = Array.from(new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean)));
+        const nextReq: Record<string, LoadedRequirements | null> = {};
+
+        await Promise.all(
+          uniqueEventIds.map(async (eid) => {
+            try {
+              nextReq[eid] = await loadRequirementsForEvent(eid);
+            } catch {
+              nextReq[eid] = null;
+            }
+          })
+        );
+
+        // Local progress per card (supports stable+legacy keys)
+        const nextLocal: Record<string, VendorApplyProgress | null> = {};
+        for (const a of normalized) {
+          const key = `${normalizeId(a.eventId)}:${normalizeId(a.appId)}:${normalizeId(a.boothId || "")}`;
+          nextLocal[key] = readLocalProgress(a.eventId, a.appId, a.boothId);
+        }
+
+        if (!cancelled) {
+          setReqByEventId(nextReq);
+          setLocalByKey(nextLocal);
+        }
       } catch (e: any) {
-        if (!cancelled) setServerError(e?.message || "Failed to load applications from server.");
-        if (!cancelled) setServerApps([]);
+        if (!cancelled) {
+          setServerError(e?.message || "Failed to load applications from server.");
+          setServerApps([]);
+          setReqByEventId({});
+          setLocalByKey({});
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -138,7 +370,9 @@ export default function VendorApplicationsPage() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
-            <p className="mt-2 text-sm font-semibold text-slate-600">Submissions are loaded from the server.</p>
+            <p className="mt-2 text-sm font-semibold text-slate-600">
+              Submissions are loaded from the server. Draft progress is shown from your browser.
+            </p>
           </div>
 
           <div className="flex gap-2">
@@ -193,14 +427,32 @@ export default function VendorApplicationsPage() {
         ) : (
           <div className="mt-10 grid gap-4">
             {sorted.map((it) => {
-              const { done, total, pct } = calcCompletion(it);
+              const eid = normalizeId(it.eventId);
+              const req = reqByEventId[eid] ?? null;
+
+              const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
+              const local = localByKey[localKey] ?? null;
+
+              const effectiveChecked = local?.checked ?? it.checked ?? {};
+              const effectiveDocs = local?.docs ?? {};
+              const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
+
+              const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
 
               const status = it.status || "draft";
-              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/apply?` +
+
+              // ✅ IMPORTANT: appId in URL is numeric application.id (required for uploads/progress)
+              const viewUrl =
+                `/vendor/events/${encodeURIComponent(it.eventId)}/apply?` +
                 new URLSearchParams({
-                  appId: it.appId,
+                  appId: String(it.applicationId),
                   ...(it.boothId ? { boothId: it.boothId } : {}),
                 }).toString();
+
+              const reqSource =
+                req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
+
+              const progressSource = local ? "progress: local" : "progress: server";
 
               return (
                 <div key={`${it.eventId}:${it.appId}`} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -214,8 +466,10 @@ export default function VendorApplicationsPage() {
                       </div>
 
                       <div className="mt-1 text-xs font-semibold text-slate-500">
-                        Last updated: {formatDate(it.updatedAt)}
+                        Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
                         {it.submittedAt ? <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span> : null}
+                        <span className="ml-2">• {reqSource}</span>
+                        <span className="ml-2">• {progressSource}</span>
                       </div>
                     </div>
 
@@ -228,7 +482,7 @@ export default function VendorApplicationsPage() {
                             : status === "rejected"
                             ? "bg-rose-50 text-rose-700"
                             : status === "submitted"
-                            ? "bg-violet-50 text-violet-700"
+                            ? "bg-indigo-50 text-indigo-700"
                             : "bg-slate-100 text-slate-700")
                         }
                       >
@@ -249,15 +503,12 @@ export default function VendorApplicationsPage() {
 
                   <div className="mt-4">
                     <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                      <div className="h-2 rounded-full bg-violet-500" style={{ width: `${pct}%` }} />
+                      <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
                     </div>
                   </div>
 
                   <div className="mt-5 flex flex-wrap gap-3">
-                    <Link
-                      to={viewUrl}
-                      className="rounded-full bg-violet-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-violet-700"
-                    >
+                    <Link to={viewUrl} className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700">
                       View
                     </Link>
 
@@ -269,10 +520,10 @@ export default function VendorApplicationsPage() {
                     </Link>
                   </div>
 
-                  {it.notes ? (
+                  {effectiveNotes ? (
                     <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
                       <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
-                      <div className="mt-1 whitespace-pre-wrap">{it.notes}</div>
+                      <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
                     </div>
                   ) : null}
                 </div>

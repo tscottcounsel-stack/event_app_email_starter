@@ -34,9 +34,23 @@ def _str_keyed(d: Dict[int, Any]) -> dict:
     return {str(k): v for k, v in (d or {}).items()}
 
 
+def _lower_str_keyed(d: dict) -> Dict[str, Any]:
+    """
+    For vendor profiles keyed by email (string).
+    """
+    out: Dict[str, Any] = {}
+    for k, v in (d or {}).items():
+        kk = str(k or "").strip().lower()
+        if not kk:
+            continue
+        out[kk] = v
+    return out
+
+
 def load_store() -> None:
     global _EVENTS, _REQUIREMENTS, _DIAGRAMS, _APPLICATIONS
     global _LAYOUT_META, _BOOTHS, _TEMPLATES
+    global _VENDORS
     global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
 
     with _LOCK:
@@ -62,6 +76,9 @@ def load_store() -> None:
         _LAYOUT_META = _int_keyed(raw.get("layout_meta", {}))
         _BOOTHS = _int_keyed(raw.get("booths", {}))
         _TEMPLATES = _int_keyed(raw.get("templates", {}))
+
+        # ✅ NEW: vendors keyed by email (lowercased)
+        _VENDORS = _lower_str_keyed(raw.get("vendors", {}))
 
         nxt = raw.get("next", {}) or {}
         _NEXT_EVENT_ID = int(nxt.get("event_id", 1) or 1)
@@ -89,7 +106,6 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         )
 
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            # ensure stable JSON output
             json.dump(payload, f, indent=2, default=str)
             f.flush()
             os.fsync(f.fileno())
@@ -97,7 +113,6 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         os.replace(tmp_name, path)
         tmp_name = None  # ownership transferred
     finally:
-        # If anything failed before replace, cleanup temp file
         if tmp_name:
             try:
                 os.unlink(tmp_name)
@@ -115,6 +130,8 @@ def save_store() -> None:
             "layout_meta": _str_keyed(_LAYOUT_META),
             "booths": _str_keyed(_BOOTHS),
             "templates": _str_keyed(_TEMPLATES),
+            # ✅ NEW
+            "vendors": {str(k): v for k, v in (_VENDORS or {}).items()},
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
@@ -138,6 +155,9 @@ _APPLICATIONS: Dict[int, Dict[str, Any]] = {}
 _LAYOUT_META: Dict[int, Dict[str, Any]] = {}
 _BOOTHS: Dict[int, Dict[str, Any]] = {}
 _TEMPLATES: Dict[int, Dict[str, Any]] = {}
+
+# ✅ NEW: vendor profiles keyed by vendor_email (lowercase)
+_VENDORS: Dict[str, Dict[str, Any]] = {}
 
 _NEXT_EVENT_ID = 1
 _NEXT_BOOTH_ID = 1

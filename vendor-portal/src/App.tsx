@@ -73,27 +73,19 @@ export default function App() {
           <Route path="events" element={<OrganizerEventsPage />} />
           <Route path="events/create" element={<OrganizerCreateEventPage />} />
 
-          {/* ✅ DETAILS ROUTE (this is what Open should target) */}
-          <Route
-            path="events/:eventId/details"
-            element={<OrganizerEventDetailsPage />}
-          />
+          {/* ✅ DETAILS ROUTE */}
+          <Route path="events/:eventId/details" element={<OrganizerEventDetailsPage />} />
 
-          <Route
-            path="events/:eventId/requirements"
-            element={<OrganizerEventRequirementsPage />}
-          />
+          <Route path="events/:eventId/requirements" element={<OrganizerEventRequirementsPage />} />
           <Route path="events/:eventId/review" element={<OrganizerEventReviewPage />} />
           <Route path="events/:eventId/layout" element={<MapEditorPage />} />
-          <Route
-            path="events/:eventId/applications"
-            element={<OrganizerApplicationsPage />}
-          />
-          <Route
-            path="vendor-preview/:applicationId"
-            element={<OrganizerVendorPreviewPage />}
-          />
+
+          <Route path="events/:eventId/applications" element={<OrganizerApplicationsPage />} />
+          <Route path="vendor-preview/:applicationId" element={<OrganizerVendorPreviewPage />} />
           <Route path="contacts" element={<OrganizerContactsPage />} />
+
+          {/* ✅ Organizer read-only vendor profile */}
+          <Route path="vendors/:vendorId" element={<VendorPublicProfilePage />} />
         </Route>
       </Route>
 
@@ -105,10 +97,8 @@ export default function App() {
           <Route path="dashboard" element={<VendorDashboard />} />
           <Route path="events" element={<VendorAvailableEventsPage />} />
           <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
-          <Route
-            path="events/:eventId/requirements"
-            element={<VendorEventRequirementsPage />}
-          />
+
+          <Route path="events/:eventId/requirements" element={<VendorEventRequirementsPage />} />
           <Route path="events/:eventId/map" element={<VendorEventMapLayoutPage />} />
           <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
 

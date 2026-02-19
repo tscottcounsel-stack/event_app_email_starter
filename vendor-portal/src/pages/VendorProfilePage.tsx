@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { readSession } from "../auth/authStorage";
 
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
@@ -21,18 +20,11 @@ type VendorProfile = {
 
   categories?: string[];
 
-  // optional media (future-friendly)
-  imageUrls?: string[];
-  videoUrls?: string[];
-
   logoDataUrl?: string;
   updatedAt?: string;
 
-  // optional flags
   verified?: boolean;
-
-  // optional backend identity
-  vendor_id?: string | number | null;
+  [k: string]: any;
 };
 
 const LS_PROFILE_KEY = "vendor_profile_v1";
@@ -67,56 +59,34 @@ function formatAddress(p: VendorProfile) {
 
 function normalizeVendorPayload(raw: any): VendorProfile {
   const v: any = raw || {};
-
   const profile: VendorProfile = {
     businessName: v.businessName ?? v.business_name ?? v.name ?? v.business ?? "",
     businessDescription: v.businessDescription ?? v.business_description ?? v.description ?? "",
-
     email: v.email ?? v.vendor_email ?? "",
     phone: v.phone ?? v.phone_number ?? "",
     website: v.website ?? v.web ?? "",
-
     address1: v.address1 ?? v.address_1 ?? v.street_address ?? "",
     address2: v.address2 ?? v.address_2 ?? "",
     city: v.city ?? "",
     state: v.state ?? "",
     zip: v.zip ?? v.zip_code ?? "",
     country: v.country ?? "USA",
-
     categories: Array.isArray(v.categories) ? v.categories : Array.isArray(v.category) ? v.category : [],
-
-    imageUrls: Array.isArray(v.imageUrls) ? v.imageUrls : Array.isArray(v.image_urls) ? v.image_urls : [],
-    videoUrls: Array.isArray(v.videoUrls) ? v.videoUrls : Array.isArray(v.video_urls) ? v.video_urls : [],
-
     logoDataUrl: v.logoDataUrl ?? v.logo_data_url ?? v.logo ?? "",
     updatedAt: v.updatedAt ?? v.updated_at ?? "",
-
     verified: !!(v.verified ?? v.is_verified ?? v.verification_status === "verified"),
-    vendor_id: v.vendor_id ?? v.vendorId ?? null,
   };
-
   return profile;
 }
 
-function isEmailLike(s: string) {
+function looksLikeEmail(s: string) {
   const x = String(s || "").trim();
-  return !!x && x.includes("@") && x.includes(".");
+  return x.includes("@") || x.includes("%40"); // %40 in raw params sometimes
 }
 
-/** Vendor headers (dev-friendly) */
-function buildVendorHeaders(): Record<string, string> {
-  const session: any = typeof readSession === "function" ? (readSession() as any) : null;
-
-  const token: string = session?.accessToken || session?.token || "";
-  const email: string = session?.email || session?.user?.email || "";
-
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  if (email) headers["x-user-email"] = String(email).trim().toLowerCase();
-
-  // if your JWT sub is numeric, your other code already sets x-user-id elsewhere.
-  // we keep it optional here.
-  return headers;
+function looksNumericId(s: string) {
+  const x = String(s || "").trim();
+  return /^[0-9]+$/.test(x);
 }
 
 export default function VendorPublicProfilePage() {
@@ -143,68 +113,28 @@ export default function VendorPublicProfilePage() {
   // organizer read-only mode (fetch from backend)
   const [remoteProfile, setRemoteProfile] = useState<VendorProfile | null>(null);
 
-  // ✅ NEW: when vendor views their own public profile, sync local profile to backend
-  useEffect(() => {
-    let mounted = true;
-
-    async function syncLocalToServer() {
-      if (isOrganizerView) return;
-
-      // only sync if we have something meaningful
-      const email = String(localProfile?.email || "").trim().toLowerCase();
-      if (!email) return;
-
-      try {
-        await fetch(`${API_BASE}/vendors/me`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            ...buildVendorHeaders(),
-            "x-user-email": email, // ensure identity even in dev
-          },
-          body: JSON.stringify({
-            ...localProfile,
-            email,
-            verified: localVerified,
-            updatedAt: new Date().toISOString(),
-          }),
-        });
-      } catch {
-        // ignore sync failures (profile still works locally)
-      }
-
-      if (!mounted) return;
-    }
-
-    syncLocalToServer();
-    return () => {
-      mounted = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOrganizerView, localVerified]);
-
-  // ✅ Organizer fetch (email-safe)
   useEffect(() => {
     let mounted = true;
 
     async function load() {
       if (!isOrganizerView) return;
 
+      const key = String(vendorId || "").trim();
+      if (!key) return;
+
       setLoading(true);
       setErr("");
 
       try {
-        const rawParam = String(vendorId || "").trim();
-        if (!rawParam) return;
+        // ✅ Decide correct endpoint:
+        // - email -> /vendors/by-email/{email}
+        // - numeric -> /vendors/{id}
+        const url =
+          looksNumericId(key) && !looksLikeEmail(key)
+            ? `${API_BASE}/vendors/${encodeURIComponent(key)}`
+            : `${API_BASE}/vendors/by-email/${encodeURIComponent(key)}`;
 
-        const url = isEmailLike(rawParam)
-          ? `${API_BASE}/vendors/by-email/${encodeURIComponent(rawParam)}`
-          : `${API_BASE}/vendors/${encodeURIComponent(rawParam)}`;
-
-        const res = await fetch(url, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        });
+        const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
 
         if (!res.ok) {
           const text = await res.text().catch(() => "");
@@ -265,7 +195,9 @@ export default function VendorPublicProfilePage() {
   function onContact() {
     const email = (profile.email || "").trim();
     if (email) {
-      window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent("VendorConnect inquiry")}`;
+      window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(
+        "VendorConnect inquiry"
+      )}`;
     }
   }
 
@@ -410,7 +342,11 @@ export default function VendorPublicProfilePage() {
 
                 <div className="mt-3 flex items-center gap-3">
                   <div className="flex items-center gap-1 text-slate-300">
-                    <span>★</span><span>★</span><span>★</span><span>★</span><span>★</span>
+                    <span>★</span>
+                    <span>★</span>
+                    <span>★</span>
+                    <span>★</span>
+                    <span>★</span>
                   </div>
                   <div className="text-2xl font-extrabold text-slate-900">0.0</div>
                   <div className="text-sm font-semibold text-slate-600">(0 reviews)</div>
@@ -475,11 +411,7 @@ export default function VendorPublicProfilePage() {
                 <div className="mt-2 text-sm font-semibold text-slate-600">Verification status for this vendor.</div>
 
                 <div className="mt-4 flex items-center gap-3">
-                  <div
-                    className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                      isVerified ? "bg-emerald-600" : "bg-slate-300"
-                    }`}
-                  >
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-full ${isVerified ? "bg-emerald-600" : "bg-slate-300"}`}>
                     <span className="text-white text-sm font-extrabold">✓</span>
                   </div>
                   <div className={`text-sm font-extrabold ${isVerified ? "text-emerald-700" : "text-slate-500"}`}>

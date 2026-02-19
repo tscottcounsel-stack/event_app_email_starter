@@ -210,6 +210,26 @@ export default function OrganizerEventDetailsPage() {
       )}
 
       {/* Actions */}
+<button
+  type="button"
+  className="rounded-2xl bg-red-600 px-5 py-3 text-sm font-black text-white hover:bg-red-700"
+  onClick={async () => {
+    if (!window.confirm("Delete this event and all applications?")) return;
+
+    const res = await fetch(`${API_BASE}/organizer/events/${id}`, {
+      method: "DELETE",
+    });
+
+    if (res.ok) {
+      navigate("/organizer");
+    } else {
+      alert("Failed to delete event.");
+    }
+  }}
+>
+  Delete Event
+</button>
+
       <div className="mt-8 flex flex-wrap gap-3">
         <button
           type="button"

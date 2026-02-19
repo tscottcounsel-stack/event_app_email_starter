@@ -1,5 +1,8 @@
+// src/pages/VendorEventRequirementsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+
+/* ---------------- Types ---------------- */
 
 type RequirementField = {
   id: string;
@@ -26,10 +29,10 @@ type BoothCategory = {
   id: string;
   name: string;
   baseSize?: string; // e.g. "10x10"
-  basePrice?: number;
-  additionalPerFt?: number;
-  cornerPremium?: number;
-  fireMarshalFee?: number;
+  basePrice?: number; // dollars (normalized)
+  additionalPerFt?: number; // dollars (normalized)
+  cornerPremium?: number; // dollars (normalized)
+  fireMarshalFee?: number; // dollars (normalized)
   electricalNote?: string;
 };
 
@@ -38,7 +41,6 @@ type PaymentSettings = Record<string, any>;
 type LoadedRequirements = {
   templateKey?: string;
 
-  // normalized keys
   boothCategories: BoothCategory[];
   restrictions: string[];
   compliance: ComplianceItem[];
@@ -66,11 +68,14 @@ type VendorReqProgress = {
   updatedAt: string;
 };
 
+/* ---------------- Config ---------------- */
+
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
-// legacy keys
 const LS_LEGACY_REQUIREMENTS_KEY = "event_requirements_v1_2";
 const LS_VENDOR_PROGRESS_KEY = "vendor_requirements_progress_v1";
+
+/* ---------------- Helpers ---------------- */
 
 function normalizeId(v: unknown) {
   return String(v ?? "").trim();
@@ -85,25 +90,76 @@ function safeJsonParse<T = any>(value: string | null): T | null {
   }
 }
 
+function money(v: unknown): string {
+  return typeof v === "number" && Number.isFinite(v) ? `$${v}` : "—";
+}
+
+function numberOrNull(v: any): number | null {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function boolish(v: any): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") return ["true", "1", "yes", "y", "on"].includes(v.toLowerCase().trim());
+  return false;
+}
+
+/**
+ * Payment settings can come in different shapes depending on old/new UI/API.
+ * We normalize best-effort for display.
+ */
+function normalizePaymentSettings(ps?: any) {
+  const obj = ps && typeof ps === "object" ? ps : null;
+  if (!obj) {
+    return {
+      has: false,
+      requireDeposit: false,
+      depositPercent: null as number | null,
+      lateFee: null as number | null,
+      refundPolicy: "" as string,
+      paymentNotes: "" as string,
+    };
+  }
+
+  const requireDeposit = boolish(obj.requireDeposit ?? obj.require_deposit ?? obj.depositRequired ?? obj.deposit_required);
+
+  const depositPercent = numberOrNull(
+    obj.depositPercent ??
+      obj.deposit_percent ??
+      obj.depositPct ??
+      obj.deposit_pct ??
+      obj.deposit_percentage ??
+      obj.depositPercentage
+  );
+
+  const lateFee = numberOrNull(obj.lateFee ?? obj.late_fee ?? obj.lateFeeAmount ?? obj.late_fee_amount);
+
+  const refundPolicy = String(obj.refundPolicy ?? obj.refund_policy ?? obj.refund ?? obj.refundType ?? obj.refund_type ?? "")
+    .trim();
+
+  const paymentNotes = String(obj.paymentNotes ?? obj.payment_notes ?? obj.notes ?? obj.note ?? "").trim();
+
+  const has =
+    requireDeposit || depositPercent !== null || lateFee !== null || refundPolicy.length > 0 || paymentNotes.length > 0;
+
+  return { has, requireDeposit, depositPercent, lateFee, refundPolicy, paymentNotes };
+}
+
 function Badge({ kind }: { kind: "Required" | "Optional" }) {
   if (kind === "Required") {
-    return (
-      <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">
-        Required
-      </span>
-    );
+    return <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">Required</span>;
   }
-  return (
-    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
-      Optional
-    </span>
-  );
+  return <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">Optional</span>;
 }
 
 /**
  * Accept organizer requirements in either shape:
  * - Newer keys: restrictions/compliance/documents/fields/boothCategories/paymentSettings
- * - Template-system keys: customRestrictions/complianceItems/documentRequirements/boothCategories/paymentSettings
+ * - Builder keys: customRestrictions/complianceItems/documentRequirements/boothCategories/paymentSettings
+ * - API snake_case: custom_restrictions/compliance_items/document_requirements/booth_categories/payment_settings
+ * - Wrapped: { requirements: {...} }
  */
 function normalizeRequirementsShape(raw: any): Omit<LoadedRequirements, "source" | "sourceKey"> | null {
   if (!raw || typeof raw !== "object") return null;
@@ -112,50 +168,145 @@ function normalizeRequirementsShape(raw: any): Omit<LoadedRequirements, "source"
 
   const templateKey = parsed?.templateKey || parsed?.id || undefined;
 
+  // ✅ booth_categories supports *_cents and electrical_note
   const boothCategories: BoothCategory[] = Array.isArray(parsed?.boothCategories)
     ? parsed.boothCategories
-    : [];
+    : Array.isArray(parsed?.booth_categories)
+      ? parsed.booth_categories.map((c: any) => {
+          const toDollars = (n: any) => (typeof n === "number" && Number.isFinite(n) ? n / 100 : undefined);
+
+          const basePrice =
+            typeof c?.base_price === "number"
+              ? c.base_price
+              : typeof c?.basePrice === "number"
+                ? c.basePrice
+                : typeof c?.base_price_cents === "number"
+                  ? toDollars(c.base_price_cents)
+                  : typeof c?.basePriceCents === "number"
+                    ? toDollars(c.basePriceCents)
+                    : undefined;
+
+          const additionalPerFt =
+            typeof c?.additional_per_ft === "number"
+              ? c.additional_per_ft
+              : typeof c?.additionalPerFt === "number"
+                ? c.additionalPerFt
+                : typeof c?.additional_per_ft_cents === "number"
+                  ? toDollars(c.additional_per_ft_cents)
+                  : typeof c?.additionalPerFtCents === "number"
+                    ? toDollars(c.additionalPerFtCents)
+                    : undefined;
+
+          const cornerPremium =
+            typeof c?.corner_premium === "number"
+              ? c.corner_premium
+              : typeof c?.cornerPremium === "number"
+                ? c.cornerPremium
+                : typeof c?.corner_premium_cents === "number"
+                  ? toDollars(c.corner_premium_cents)
+                  : typeof c?.cornerPremiumCents === "number"
+                    ? toDollars(c.cornerPremiumCents)
+                    : undefined;
+
+          const fireMarshalFee =
+            typeof c?.fire_marshal_fee === "number"
+              ? c.fire_marshal_fee
+              : typeof c?.fireMarshalFee === "number"
+                ? c.fireMarshalFee
+                : typeof c?.fire_marshal_fee_cents === "number"
+                  ? toDollars(c.fire_marshal_fee_cents)
+                  : typeof c?.fireMarshalFeeCents === "number"
+                    ? toDollars(c.fireMarshalFeeCents)
+                    : undefined;
+
+          const electricalNote =
+            c?.electrical_note != null
+              ? String(c.electrical_note)
+              : c?.electricalNote != null
+                ? String(c.electricalNote)
+                : undefined;
+
+          return {
+            id: normalizeId(c?.id ?? c?.name),
+            name: String(c?.name || "").trim(),
+            baseSize: c?.base_size ? String(c.base_size) : c?.baseSize ? String(c.baseSize) : undefined,
+            basePrice,
+            additionalPerFt,
+            cornerPremium,
+            fireMarshalFee,
+            electricalNote,
+          };
+        })
+      : [];
 
   const restrictions: string[] = Array.isArray(parsed?.restrictions)
     ? parsed.restrictions
     : Array.isArray(parsed?.customRestrictions)
-      ? parsed.customRestrictions.map((r: any) => (typeof r === "string" ? r : r?.text || r?.label || "")).filter(Boolean)
-      : [];
+      ? parsed.customRestrictions
+          .map((r: any) => (typeof r === "string" ? r : r?.text || r?.label || ""))
+          .map((s: any) => String(s || "").trim())
+          .filter(Boolean)
+      : Array.isArray(parsed?.custom_restrictions)
+        ? parsed.custom_restrictions.map((r: any) => String(r?.text || r?.label || r || "").trim()).filter(Boolean)
+        : [];
 
   const compliance: ComplianceItem[] = Array.isArray(parsed?.compliance)
     ? parsed.compliance
     : Array.isArray(parsed?.complianceItems)
-      ? parsed.complianceItems.map((c: any) => ({
-          id: normalizeId(c?.id || c?.text || c?.label),
-          text: String(c?.text || c?.label || "").trim(),
-          required: !!c?.required,
-        })).filter((c: any) => c.text)
-      : [];
+      ? parsed.complianceItems
+          .map((c: any) => ({
+            id: normalizeId(c?.id || c?.text || c?.label),
+            text: String(c?.text || c?.label || "").trim(),
+            required: !!c?.required,
+          }))
+          .filter((c: any) => c.text)
+      : Array.isArray(parsed?.compliance_items)
+        ? parsed.compliance_items
+            .map((c: any) => ({
+              id: normalizeId(c?.id || c?.text || c?.label),
+              text: String(c?.text || c?.label || "").trim(),
+              required: !!c?.required,
+            }))
+            .filter((c: any) => c.text)
+        : [];
 
   const documents: DocumentRequirement[] = Array.isArray(parsed?.documents)
     ? parsed.documents
     : Array.isArray(parsed?.documentRequirements)
-      ? parsed.documentRequirements.map((d: any) => ({
-          id: normalizeId(d?.id || d?.name),
-          name: String(d?.name || "").trim(),
-          required: !!d?.required,
-          dueBy: d?.dueBy ? String(d.dueBy) : undefined,
-        })).filter((d: any) => d.name)
-      : [];
+      ? parsed.documentRequirements
+          .map((d: any) => ({
+            id: normalizeId(d?.id || d?.name),
+            name: String(d?.name || "").trim(),
+            required: !!d?.required,
+            dueBy: d?.dueBy ? String(d.dueBy) : undefined,
+          }))
+          .filter((d: any) => d.name)
+      : Array.isArray(parsed?.document_requirements)
+        ? parsed.document_requirements
+            .map((d: any) => ({
+              id: normalizeId(d?.id || d?.name),
+              name: String(d?.name || "").trim(),
+              required: !!d?.required,
+              dueBy: d?.due_by ? String(d.due_by) : undefined,
+            }))
+            .filter((d: any) => d.name)
+        : [];
 
   const fields: RequirementField[] = Array.isArray(parsed?.fields)
-    ? parsed.fields.map((f: any) => ({
-        id: normalizeId(f?.id || f?.label),
-        label: String(f?.label || "").trim(),
-        type: f?.type ? String(f.type) : undefined,
-        required: !!f?.required,
-        description: f?.description ? String(f.description) : undefined,
-      })).filter((f: any) => f.label)
+    ? parsed.fields
+        .map((f: any) => ({
+          id: normalizeId(f?.id || f?.label),
+          label: String(f?.label || "").trim(),
+          type: f?.type ? String(f.type) : undefined,
+          required: !!f?.required,
+          description: f?.description ? String(f.description) : undefined,
+        }))
+        .filter((f: any) => f.label)
     : [];
 
-  const paymentSettings = parsed?.paymentSettings && typeof parsed.paymentSettings === "object"
-    ? parsed.paymentSettings
-    : undefined;
+  const paymentSettings =
+    (parsed?.paymentSettings && typeof parsed.paymentSettings === "object" ? parsed.paymentSettings : undefined) ??
+    (parsed?.payment_settings && typeof parsed.payment_settings === "object" ? parsed.payment_settings : undefined);
 
   const hasAny =
     boothCategories.length > 0 ||
@@ -167,39 +318,29 @@ function normalizeRequirementsShape(raw: any): Omit<LoadedRequirements, "source"
 
   if (!hasAny) return null;
 
-  return {
-    templateKey,
-    boothCategories,
-    restrictions,
-    compliance,
-    documents,
-    fields,
-    paymentSettings,
-    raw,
-  };
+  return { templateKey, boothCategories, restrictions, compliance, documents, fields, paymentSettings, raw };
 }
 
 async function loadRequirementsFromApi(eventId: string): Promise<LoadedRequirements | null> {
   const candidates = [
-    // prefer real backend first
-    `${API_BASE}/organizer/events/${encodeURIComponent(eventId)}/requirements`,
+    // ✅ Correct public endpoint (exists)
     `${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`,
-    // legacy paths (keep if you used these before)
-    `${API_BASE}/api/organizer/events/${encodeURIComponent(eventId)}/requirements`,
-    `${API_BASE}/api/events/${encodeURIComponent(eventId)}/requirements`,
-    `${API_BASE}/api/vendor/events/${encodeURIComponent(eventId)}/requirements`,
   ];
 
   for (const url of candidates) {
     try {
-      const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
+      const res = await fetch(url, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+
       if (!res.ok) continue;
 
       const data = await res.json().catch(() => null);
       const normalized = normalizeRequirementsShape(data);
       if (!normalized) continue;
 
-      return { ...normalized, source: "api" };
+      return { ...normalized, source: "api", sourceKey: url };
     } catch {
       // try next
     }
@@ -212,25 +353,35 @@ function loadRequirementsFromLocalStorage(eventId: string): LoadedRequirements |
   const id = normalizeId(eventId);
   if (!id) return null;
 
-  // ✅ PRIMARY: organizer key you showed in UI debug
   const organizerKey = `organizer:event:${id}:requirements`;
   const organizerParsed = safeJsonParse(localStorage.getItem(organizerKey));
   const normalizedOrganizer = normalizeRequirementsShape(organizerParsed);
-  if (normalizedOrganizer) {
-    return { ...normalizedOrganizer, source: "localStorage", sourceKey: organizerKey };
-  }
+  if (normalizedOrganizer) return { ...normalizedOrganizer, source: "localStorage", sourceKey: organizerKey };
 
-  // ✅ SECONDARY: legacy
   const legacyParsed = safeJsonParse(localStorage.getItem(LS_LEGACY_REQUIREMENTS_KEY));
   if (legacyParsed) {
-    // legacy formats can vary; normalizeRequirementsShape will reject if empty
-    const normalizedLegacy = normalizeRequirementsShape(legacyParsed?.[id] ?? legacyParsed);
-    if (normalizedLegacy) {
-      return { ...normalizedLegacy, source: "localStorage", sourceKey: LS_LEGACY_REQUIREMENTS_KEY };
-    }
+    const maybe = (legacyParsed as any)?.[id] ?? legacyParsed;
+    const normalizedLegacy = normalizeRequirementsShape(maybe);
+    if (normalizedLegacy) return { ...normalizedLegacy, source: "localStorage", sourceKey: LS_LEGACY_REQUIREMENTS_KEY };
   }
 
   return null;
+}
+
+function migrateCheckedKeys(checked: Record<string, boolean> | undefined | null) {
+  const src = checked && typeof checked === "object" ? checked : {};
+  const out: Record<string, boolean> = { ...src };
+
+  // ✅ migrate old compliance:<id> => <id>
+  for (const k of Object.keys(src)) {
+    if (k.startsWith("compliance:")) {
+      const plain = normalizeId(k.slice("compliance:".length));
+      if (plain) out[plain] = !!src[k];
+      delete out[k];
+    }
+  }
+
+  return out;
 }
 
 function loadVendorProgress(eventId: string, appId?: string): VendorReqProgress | null {
@@ -256,12 +407,14 @@ function saveVendorProgress(progress: VendorReqProgress) {
   localStorage.setItem(LS_VENDOR_PROGRESS_KEY, JSON.stringify(next));
 }
 
+/* ---------------- Page ---------------- */
+
 export default function VendorEventRequirementsPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams();
 
-  const eventId = useMemo(() => normalizeId(params.eventId), [params.eventId]);
+  const eventId = useMemo(() => normalizeId((params as any).eventId), [(params as any).eventId]);
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
   const appId = useMemo(() => normalizeId(searchParams.get("appId") || ""), [searchParams]);
 
@@ -272,6 +425,7 @@ export default function VendorEventRequirementsPage() {
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [uploads, setUploads] = useState<Record<string, UploadMeta[]>>({});
 
+  // Load requirements + restore progress
   useEffect(() => {
     let alive = true;
 
@@ -294,24 +448,16 @@ export default function VendorEventRequirementsPage() {
       if (!alive) return;
 
       if (!finalReq) {
-        setError(
-          "No requirements found for this event. (API returned nothing and localStorage fallback is empty.)"
-        );
+        setError("No requirements found for this event. (API returned nothing and localStorage fallback is empty.)");
         setLoading(false);
         return;
       }
 
       setRequirements(finalReq);
-      setError("");
 
       const prog = loadVendorProgress(eventId, appId || undefined);
-      if (prog) {
-        setChecked(prog.checked || {});
-        setUploads(prog.uploads || {});
-      } else {
-        setChecked({});
-        setUploads({});
-      }
+      setChecked(migrateCheckedKeys(prog?.checked));
+      setUploads(prog?.uploads || {});
 
       setLoading(false);
     }
@@ -322,6 +468,7 @@ export default function VendorEventRequirementsPage() {
     };
   }, [eventId, appId]);
 
+  // Persist progress
   useEffect(() => {
     if (!eventId) return;
     if (!requirements) return;
@@ -329,7 +476,7 @@ export default function VendorEventRequirementsPage() {
     const progress: VendorReqProgress = {
       eventId,
       appId: appId || undefined,
-      checked,
+      checked: migrateCheckedKeys(checked), // ✅ always store in new format
       uploads,
       updatedAt: new Date().toISOString(),
     };
@@ -343,14 +490,32 @@ export default function VendorEventRequirementsPage() {
   const documents = requirements?.documents ?? [];
   const fields = requirements?.fields ?? [];
 
-  function toggle(id: string) {
-    const key = normalizeId(id);
-    setChecked((prev) => ({ ...prev, [key]: !prev[key] }));
+  const complianceChecked = useMemo(() => {
+    return compliance.reduce((acc, c) => {
+      const cid = normalizeId(c.id || c.text);
+      return acc + (checked[cid] ? 1 : 0); // ✅ plain id
+    }, 0);
+  }, [compliance, checked]);
+
+  const docsUploaded = useMemo(() => {
+    return documents.reduce((acc, d) => {
+      const did = normalizeId(d.id || d.name);
+      const list = uploads[did] || [];
+      return acc + (list.length > 0 ? 1 : 0);
+    }, 0);
+  }, [documents, uploads]);
+
+  const payment = useMemo(() => normalizePaymentSettings(requirements?.paymentSettings), [requirements]);
+
+  function toggle(key: string) {
+    const k = normalizeId(key);
+    setChecked((prev) => ({ ...prev, [k]: !prev[k] }));
   }
 
   function addUploads(docId: string, files: FileList | null) {
     if (!files || files.length === 0) return;
     const key = normalizeId(docId);
+
     const nextFiles: UploadMeta[] = Array.from(files).map((f) => ({
       name: f.name,
       size: f.size,
@@ -390,13 +555,9 @@ export default function VendorEventRequirementsPage() {
     navigate(`/vendor/applications?appId=${encodeURIComponent(appId)}&eventId=${encodeURIComponent(eventId)}`);
   }
 
-  function continueFlow() {
-    navigate(`/vendor/events/${encodeURIComponent(eventId)}/map${appId ? `?appId=${encodeURIComponent(appId)}` : ""}`);
-  }
-
   const sourceLabel = useMemo(() => {
     if (!requirements) return "—";
-    if (requirements.source === "api") return "API";
+    if (requirements.source === "api") return requirements.sourceKey ? `API • ${requirements.sourceKey}` : "API";
     return requirements.sourceKey ? `localStorage • ${requirements.sourceKey}` : "localStorage";
   }, [requirements]);
 
@@ -405,9 +566,9 @@ export default function VendorEventRequirementsPage() {
       <div className="mx-auto w-full max-w-6xl px-4 py-6">
         {/* Header */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
+          <div className="min-w-0">
             <div className="text-sm text-slate-500">Vendor Portal</div>
-            <h1 className="text-2xl font-semibold text-slate-900">Event {eventId} Requirements</h1>
+            <h1 className="truncate text-2xl font-semibold text-slate-900">Event Requirements</h1>
 
             {requirements?.templateKey ? (
               <div className="mt-1 text-sm text-slate-600">
@@ -415,7 +576,16 @@ export default function VendorEventRequirementsPage() {
               </div>
             ) : null}
 
-            <div className="mt-1 text-xs text-slate-500">Source: {sourceLabel}</div>
+            <div className="mt-1 text-xs text-slate-500">
+              EventId: <span className="font-mono">{eventId || "—"}</span>
+              {appId ? (
+                <>
+                  {" "}
+                  • AppId: <span className="font-mono">{appId}</span>
+                </>
+              ) : null}{" "}
+              • Source: {sourceLabel}
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -440,7 +610,7 @@ export default function VendorEventRequirementsPage() {
               onClick={goToLayout}
               className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
             >
-              Layout
+              Booth Map
             </button>
 
             {appId ? (
@@ -484,27 +654,55 @@ export default function VendorEventRequirementsPage() {
                   Return to Event
                 </button>
               </div>
-
-              <div className="mt-3 text-xs text-slate-500">
-                Debug: eventId=<span className="font-mono">{eventId}</span>
-                {appId ? (
-                  <>
-                    {" "}
-                    • appId=<span className="font-mono">{appId}</span>
-                  </>
-                ) : null}
-              </div>
             </div>
           ) : (
             <>
-              {/* Booth Categories (this is what makes the page feel “not blank”) */}
+              {/* Progress Summary */}
+              <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Your progress</div>
+                    <div className="mt-1 text-sm text-slate-600">
+                      You can prep everything here, but <span className="font-semibold">submission happens on the Booth Map</span>{" "}
+                      (Option A).
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                      Compliance: {complianceChecked}/{compliance.length}
+                    </div>
+                    <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                      Docs uploaded: {docsUploaded}/{documents.length}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={goToLayout}
+                    className="rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
+                  >
+                    Continue to Booth Map
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={goBackToEvent}
+                    className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+                  >
+                    Review Event Details
+                  </button>
+                </div>
+              </div>
+
+              {/* Booth Categories */}
               <div className="mb-6">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Booth Categories</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Pricing and sizes set by the organizer.
-                    </div>
+                    <div className="mt-1 text-sm text-slate-600">Pricing and sizes set by the organizer.</div>
                   </div>
                   <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
                     {boothCategories.length} categor{boothCategories.length === 1 ? "y" : "ies"}
@@ -517,38 +715,35 @@ export default function VendorEventRequirementsPage() {
                   </div>
                 ) : (
                   <div className="mt-3 overflow-hidden rounded-xl border border-slate-200">
-                    <table className="w-full text-left text-sm">
-                      <thead className="bg-slate-50 text-slate-700">
-                        <tr>
-                          <th className="px-4 py-3 font-semibold">Category</th>
-                          <th className="px-4 py-3 font-semibold">Base Size</th>
-                          <th className="px-4 py-3 font-semibold">Base Price</th>
-                          <th className="px-4 py-3 font-semibold">Add’l / ft</th>
-                          <th className="px-4 py-3 font-semibold">Corner</th>
-                          <th className="px-4 py-3 font-semibold">Fire Marshal</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200">
-                        {boothCategories.map((c) => (
-                          <tr key={normalizeId(c.id || c.name)} className="bg-white">
-                            <td className="px-4 py-3 font-semibold text-slate-900">{c.name}</td>
-                            <td className="px-4 py-3 text-slate-700">{c.baseSize || "—"}</td>
-                            <td className="px-4 py-3 text-slate-700">
-                              {typeof c.basePrice === "number" ? `$${c.basePrice}` : "—"}
-                            </td>
-                            <td className="px-4 py-3 text-slate-700">
-                              {typeof c.additionalPerFt === "number" ? `$${c.additionalPerFt}` : "—"}
-                            </td>
-                            <td className="px-4 py-3 text-slate-700">
-                              {typeof c.cornerPremium === "number" ? `$${c.cornerPremium}` : "—"}
-                            </td>
-                            <td className="px-4 py-3 text-slate-700">
-                              {typeof c.fireMarshalFee === "number" ? `$${c.fireMarshalFee}` : "—"}
-                            </td>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[900px] text-left text-sm">
+                        <thead className="bg-slate-50 text-slate-700">
+                          <tr>
+                            <th className="px-4 py-3 font-semibold">Category</th>
+                            <th className="px-4 py-3 font-semibold">Base Size</th>
+                            <th className="px-4 py-3 font-semibold">Base Price</th>
+                            <th className="px-4 py-3 font-semibold">Add’l / ft</th>
+                            <th className="px-4 py-3 font-semibold">Corner</th>
+                            <th className="px-4 py-3 font-semibold">Fire Marshal</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200">
+                          {boothCategories.map((c) => {
+                            const key = normalizeId(c.id || c.name);
+                            return (
+                              <tr key={key} className="bg-white">
+                                <td className="px-4 py-3 font-semibold text-slate-900">{c.name}</td>
+                                <td className="px-4 py-3 text-slate-700">{c.baseSize || "—"}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(c.basePrice)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(c.additionalPerFt)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(c.cornerPremium)}</td>
+                                <td className="px-4 py-3 text-slate-700">{money(c.fireMarshalFee)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 )}
               </div>
@@ -567,17 +762,75 @@ export default function VendorEventRequirementsPage() {
                 </div>
               ) : null}
 
-              {/* Compliance Confirmations */}
+              {/* Payment Settings */}
+              <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Payment Settings</div>
+                    <div className="mt-1 text-sm text-slate-600">
+                      Deposit rules, late fees, and refund policy set by the organizer.
+                    </div>
+                  </div>
+                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
+                    Read-only
+                  </div>
+                </div>
+
+                {!payment.has ? (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                    No payment settings were provided for this event.
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-4">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Deposit</span>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                          {payment.requireDeposit ? "Required" : "Not required"}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
+                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Deposit %</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-900">
+                            {payment.depositPercent === null ? "—" : `${payment.depositPercent}%`}
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
+                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Late fee ($)</div>
+                          <div className="mt-1 text-sm font-semibold text-slate-900">
+                            {payment.lateFee === null ? "—" : `$${payment.lateFee}`}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Refund policy</div>
+                      <div className="mt-1 text-sm font-semibold text-slate-900">{payment.refundPolicy || "—"}</div>
+
+                      {payment.paymentNotes ? (
+                        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Payment notes</div>
+                          <div className="mt-1 whitespace-pre-wrap text-sm font-semibold text-slate-800">{payment.paymentNotes}</div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Compliance */}
               <div className="mb-6">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Compliance Confirmations</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Check each item to confirm you meet the requirement.
-                    </div>
+                    <div className="mt-1 text-sm text-slate-600">Check each item to confirm you meet the requirement.</div>
                   </div>
                   <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    {compliance.length} item{compliance.length === 1 ? "" : "s"}
+                    {complianceChecked}/{compliance.length}
                   </div>
                 </div>
 
@@ -589,7 +842,7 @@ export default function VendorEventRequirementsPage() {
                   <div className="mt-3 space-y-3">
                     {compliance.map((c) => {
                       const cid = normalizeId(c.id || c.text);
-                      const isChecked = Boolean(checked[`compliance:${cid}`]);
+                      const isChecked = Boolean(checked[cid]); // ✅ plain id
 
                       return (
                         <div key={cid} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
@@ -597,7 +850,7 @@ export default function VendorEventRequirementsPage() {
                             type="checkbox"
                             className="mt-1 h-4 w-4"
                             checked={isChecked}
-                            onChange={() => toggle(`compliance:${cid}`)}
+                            onChange={() => toggle(cid)} // ✅ plain id
                           />
 
                           <div className="flex-1">
@@ -618,12 +871,10 @@ export default function VendorEventRequirementsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-900">Document Uploads</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Upload each document under the matching requirement (per-item uploads).
-                    </div>
+                    <div className="mt-1 text-sm text-slate-600">Upload documents now, or do it later—your progress is saved.</div>
                   </div>
                   <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    {documents.length} doc{documents.length === 1 ? "" : "s"}
+                    {docsUploaded}/{documents.length}
                   </div>
                 </div>
 
@@ -640,9 +891,9 @@ export default function VendorEventRequirementsPage() {
                       return (
                         <div key={did} className="rounded-xl border border-slate-200 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div>
+                            <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
-                                <div className="text-sm font-semibold text-slate-900">{d.name}</div>
+                                <div className="truncate text-sm font-semibold text-slate-900">{d.name}</div>
                                 <Badge kind={d.required ? "Required" : "Optional"} />
                                 {d.dueBy ? <span className="text-xs text-slate-500">Due: {d.dueBy}</span> : null}
                               </div>
@@ -714,16 +965,12 @@ export default function VendorEventRequirementsPage() {
                   <div className="mt-3 space-y-3">
                     {fields.map((f) => {
                       const fid = normalizeId(f.id || f.label);
-                      const isChecked = Boolean(checked[`field:${fid}`]);
+                      const key = `field:${fid}`; // keep fields namespaced
+                      const isChecked = Boolean(checked[key]);
 
                       return (
                         <div key={fid} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4"
-                            checked={isChecked}
-                            onChange={() => toggle(`field:${fid}`)}
-                          />
+                          <input type="checkbox" className="mt-1 h-4 w-4" checked={isChecked} onChange={() => toggle(key)} />
 
                           <div className="flex-1">
                             <div className="flex flex-wrap items-center gap-2">
@@ -752,21 +999,11 @@ export default function VendorEventRequirementsPage() {
 
                 <button
                   type="button"
-                  onClick={continueFlow}
+                  onClick={goToLayout}
                   className="rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
                 >
-                  Continue
+                  Continue to Booth Map
                 </button>
-              </div>
-
-              <div className="mt-3 text-xs text-slate-500">
-                Debug: normalized eventId=<span className="font-mono">{eventId}</span>
-                {appId ? (
-                  <>
-                    {" "}
-                    • appId=<span className="font-mono">{appId}</span>
-                  </>
-                ) : null}
               </div>
             </>
           )}

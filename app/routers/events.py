@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.store import _EVENTS, _REQUIREMENTS, next_event_id, save_store
+from app.store import _APPLICATIONS, _EVENTS, _REQUIREMENTS, next_event_id, save_store
 
 router = APIRouter(tags=["Events"])
 
@@ -59,7 +59,6 @@ def utc_now_iso() -> str:
 def normalize_event(ev: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(ev)
 
-    # id must be int
     try:
         out["id"] = int(out.get("id"))
     except Exception:
@@ -88,6 +87,10 @@ def ensure_requirements_slot(event_id: int) -> Dict[str, Any]:
     """
     Stored in app.store._REQUIREMENTS:
       event_id -> { "version": 2, "requirements": {...} }
+
+    IMPORTANT:
+      - organizer UI sets booth category pricing (base_price/base_price_cents, etc.)
+      - we keep the slot flexible (no strict schema enforcement) so UI can evolve
     """
     eid = int(event_id)
 
@@ -97,7 +100,7 @@ def ensure_requirements_slot(event_id: int) -> Dict[str, Any]:
             "version": 2,
             "requirements": {
                 "event_id": eid,
-                "booth_categories": [],
+                "booth_categories": [],  # organizer sets pricing here
                 "custom_restrictions": [],
                 "compliance_items": [],
                 "document_requirements": [],
@@ -107,12 +110,15 @@ def ensure_requirements_slot(event_id: int) -> Dict[str, Any]:
                     "late_fee": 0,
                     "refund_policy": "No Refunds",
                     "payment_notes": "",
+                    # checkout fallback
+                    "default_amount_cents": 0,
                 },
                 "updated_at": utc_now_iso(),
             },
         }
         _REQUIREMENTS[eid] = slot
 
+    # Normalize minimal shape (do NOT overwrite organizer-provided values)
     slot.setdefault("version", 2)
     slot.setdefault("requirements", {})
     if not isinstance(slot["requirements"], dict):
@@ -124,19 +130,21 @@ def ensure_requirements_slot(event_id: int) -> Dict[str, Any]:
     req.setdefault("custom_restrictions", [])
     req.setdefault("compliance_items", [])
     req.setdefault("document_requirements", [])
-    req.setdefault(
-        "payment_settings",
-        {
-            "require_deposit": True,
-            "deposit_percent": 50,
-            "late_fee": 0,
-            "refund_policy": "No Refunds",
-            "payment_notes": "",
-        },
-    )
-    # NOTE: this updates in-memory on read; leaving as-is to minimize change
-    req["updated_at"] = utc_now_iso()
 
+    ps = req.get("payment_settings")
+    if not isinstance(ps, dict):
+        ps = {}
+        req["payment_settings"] = ps
+
+    ps.setdefault("require_deposit", True)
+    ps.setdefault("deposit_percent", 50)
+    ps.setdefault("late_fee", 0)
+    ps.setdefault("refund_policy", "No Refunds")
+    ps.setdefault("payment_notes", "")
+    ps.setdefault("default_amount_cents", 0)
+
+    # NOTE: this updates in-memory on read; leaving as-is
+    req["updated_at"] = utc_now_iso()
     return slot
 
 
@@ -165,7 +173,7 @@ def list_public_events():
     """
     all_events = [normalize_event(e) for e in _EVENTS.values()]
     published = [e for e in all_events if e.get("published") and not e.get("archived")]
-    if len(published) > 0:
+    if published:
         return published
     return [e for e in all_events if not e.get("archived")]
 
@@ -173,12 +181,6 @@ def list_public_events():
 @router.get("/vendor/events", response_model=List[Event])
 def list_vendor_events_alias():
     # Back-compat alias for vendor UI
-    return list_public_events()
-
-
-@router.get("/vendor/events", response_model=List[Event])
-def list_vendor_events_alias():
-    # Alias for vendor UI
     return list_public_events()
 
 
@@ -199,12 +201,16 @@ def create_event(payload: EventCreate):
     }
 
     _EVENTS[event_id] = event
-
-    # create requirements slot so vendor/organizer reads work immediately
     ensure_requirements_slot(event_id)
 
     save_store()
     return normalize_event(event)
+
+
+# legacy create alias (fixes “Method Not Allowed” if UI still POSTs /events)
+@router.post("/events", response_model=Event)
+def create_event_compat(payload: EventCreate):
+    return create_event(payload)
 
 
 @router.get("/organizer/events/{event_id}", response_model=Event)
@@ -216,10 +222,8 @@ def get_event(event_id: int):
 @router.put("/organizer/events/{event_id}", response_model=Event)
 def update_event(event_id: int, payload: EventCreate):
     ev = get_event_or_404(event_id)
-
     for k, v in payload.model_dump().items():
         ev[k] = v
-
     ev["updated_at"] = utc_now_iso()
     save_store()
     return normalize_event(ev)
@@ -253,6 +257,33 @@ def archive_event(event_id: int):
     ev["updated_at"] = utc_now_iso()
     save_store()
     return normalize_event(ev)
+
+
+@router.delete("/organizer/events/{event_id}")
+def delete_event(event_id: int):
+    """
+    Delete an event and cascade-delete its applications (dev store).
+    Also removes the requirements slot if present.
+    """
+    eid = int(event_id)
+
+    ev = _EVENTS.get(eid)
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    to_delete = [
+        app_id
+        for app_id, app in _APPLICATIONS.items()
+        if int(app.get("event_id", -1)) == eid
+    ]
+    for app_id in to_delete:
+        _APPLICATIONS.pop(int(app_id), None)
+
+    _REQUIREMENTS.pop(eid, None)
+    _EVENTS.pop(eid, None)
+
+    save_store()
+    return {"ok": True, "deleted_event_id": eid, "deleted_applications": len(to_delete)}
 
 
 # -------------------------------------------------------------------
@@ -308,10 +339,3 @@ def save_event_requirements_organizer_post(
 def get_event_requirements_public(event_id: int):
     get_event_or_404(event_id)
     return ensure_requirements_slot(event_id)
-
-
-@router.get("/vendor/events", response_model=List[Event])
-def list_vendor_events_alias():
-    # Back-compat alias for vendor UI.
-    # Same behavior as /public/events.
-    return list_public_events()

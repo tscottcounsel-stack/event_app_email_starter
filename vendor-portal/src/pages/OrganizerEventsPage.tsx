@@ -1,3 +1,4 @@
+// src/pages/OrganizerEventsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -6,17 +7,14 @@ type OrganizerEvent = {
   title?: string;
   name?: string;
 
-  // Backend flags
   archived?: boolean;
   published?: boolean;
   layout_published?: boolean;
 
-  // NEW: requirements progress flags (set by requirements.py when saved)
   requirements_published?: boolean;
   requirements_version?: number;
   requirements_updated_at?: string;
 
-  // Optional fields
   start_date?: string;
   end_date?: string;
   venue_name?: string;
@@ -45,8 +43,6 @@ function formatDateRange(ev: OrganizerEvent) {
 
 function statusLabel(ev: OrganizerEvent) {
   if (ev.archived) return "Archived";
-
-  // Once published, no more "Draft"
   if (ev.published) return "Complete";
 
   const hasReq = !!ev.requirements_published;
@@ -99,7 +95,6 @@ export default function OrganizerEventsPage() {
       setErr(null);
 
       try {
-        // Try the most likely endpoints (your app has moved around a bit)
         const candidates = ["/events", "/organizer/events", "/api/events", "/api/organizer/events"];
 
         let data: any = null;
@@ -116,7 +111,6 @@ export default function OrganizerEventsPage() {
 
         if (!data) throw lastError || new Error("Unable to load events");
 
-        // normalize: backend may return { events: [...] } or just [...]
         const list = Array.isArray(data) ? data : Array.isArray(data?.events) ? data.events : [];
         if (!Array.isArray(list)) throw new Error("Unexpected events payload");
 
@@ -180,7 +174,7 @@ export default function OrganizerEventsPage() {
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="grid grid-cols-[2fr_1.2fr_1fr_1fr] gap-3 border-b border-slate-100 pb-3 text-xs font-black uppercase text-slate-500">
+        <div className="grid grid-cols-[2fr_1.2fr_1fr_1.6fr] gap-3 border-b border-slate-100 pb-3 text-xs font-black uppercase text-slate-500">
           <div>Event</div>
           <div>Dates</div>
           <div>Status</div>
@@ -194,7 +188,7 @@ export default function OrganizerEventsPage() {
             const { dates, venueLine } = formatDateRange(ev);
 
             return (
-              <div key={String(id)} className="grid grid-cols-[2fr_1.2fr_1fr_1fr] gap-3 py-4">
+              <div key={String(id)} className="grid grid-cols-[2fr_1.2fr_1fr_1.6fr] gap-3 py-4">
                 <div>
                   <div className="text-base font-black text-slate-900">{title}</div>
                   <div className="mt-1 text-sm font-semibold text-slate-600">{venueLine}</div>
@@ -212,9 +206,17 @@ export default function OrganizerEventsPage() {
                   <button
                     type="button"
                     className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
-                    onClick={() => navigate(`/organizer/events/${id}`)}
+                    onClick={() => navigate(`/organizer/events/${id}/details`)}
                   >
                     Open
+                  </button>
+
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
+                    onClick={() => navigate(`/organizer/events/${id}/applications`)}
+                  >
+                    Applications
                   </button>
 
                   <button

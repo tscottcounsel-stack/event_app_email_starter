@@ -3,17 +3,27 @@ import { useNavigate } from "react-router-dom";
 
 type VendorEvent = {
   id: number | string;
+
   title?: string;
   name?: string;
+
   status?: string;
-  venue_name?: string;
-  city?: string;
-  state?: string;
-  start_date?: string;
-  end_date?: string;
+
+  venue_name?: string | null;
+  street_address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip_code?: string | null;
+
+  start_date?: string | null;
+  end_date?: string | null;
+
+  published?: boolean;
+  archived?: boolean;
 };
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
 function normalizeId(v: any) {
   return String(v ?? "").trim();
@@ -31,9 +41,27 @@ function prettyStatus(s?: string) {
   const v = String(s || "").toLowerCase();
   if (!v) return null;
   if (v.includes("draft")) return "Draft";
+  if (v.includes("submit")) return "Submitted";
+  if (v.includes("approve")) return "Approved";
+  if (v.includes("reject")) return "Rejected";
   if (v.includes("publish")) return "Published";
   if (v.includes("archive")) return "Archived";
-  return s;
+  return s || null;
+}
+
+function fmtDate(d?: string | null) {
+  if (!d) return "";
+  const dt = new Date(d);
+  if (Number.isNaN(dt.getTime())) return String(d);
+  return `${dt.getMonth() + 1}/${dt.getDate()}/${dt.getFullYear()}`;
+}
+
+function fmtDateRange(start?: string | null, end?: string | null) {
+  const s = fmtDate(start);
+  const e = fmtDate(end);
+  if (!s && !e) return "";
+  if (s && e) return `${s} – ${e}`;
+  return s || e;
 }
 
 async function getJson(path: string) {
@@ -47,7 +75,6 @@ async function getJson(path: string) {
 
 export default function VendorAvailableEventsPage() {
   const navigate = useNavigate();
-
   const didLoadRef = useRef(false); // prevents double-fetch in React 18 StrictMode dev
 
   const [loading, setLoading] = useState(false);
@@ -88,9 +115,19 @@ export default function VendorAvailableEventsPage() {
     return (events || []).map((ev) => {
       const id = normalizeId(ev.id);
       const title = ev.title || ev.name || `Event ${id}`;
-      const status = prettyStatus(ev.status);
-      const venueLine = [ev.venue_name, ev.city, ev.state].filter(Boolean).join(" • ");
-      return { id, title, status, venueLine };
+
+      const status =
+        prettyStatus(ev.status) ||
+        (ev.archived ? "Archived" : ev.published ? "Published" : null);
+
+      const locationLine = [ev.venue_name, ev.city, ev.state]
+        .filter(Boolean)
+        .join(" • ");
+
+      const addressLine = [ev.street_address, ev.zip_code].filter(Boolean).join(" • ");
+      const dateLine = fmtDateRange(ev.start_date, ev.end_date);
+
+      return { id, title, status, locationLine, addressLine, dateLine };
     });
   }, [events]);
 
@@ -111,9 +148,10 @@ export default function VendorAvailableEventsPage() {
           <button
             type="button"
             onClick={load}
-            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-800 hover:bg-slate-100"
+            disabled={loading}
+            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-800 hover:bg-slate-100 disabled:opacity-60"
           >
-            Refresh
+            {loading ? "Refreshing…" : "Refresh"}
           </button>
         </div>
 
@@ -122,7 +160,8 @@ export default function VendorAvailableEventsPage() {
             <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
               {error}
               <div className="mt-2 text-xs text-rose-700">
-                Backend should be reachable at <span className="font-mono">127.0.0.1:8002</span>.
+                Backend should be reachable at{" "}
+                <span className="font-mono">127.0.0.1:8002</span>.
               </div>
             </div>
           ) : null}
@@ -146,8 +185,23 @@ export default function VendorAvailableEventsPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-lg font-black text-slate-900">{c.title}</div>
-                    {c.venueLine ? (
-                      <div className="mt-1 text-sm font-semibold text-slate-600">{c.venueLine}</div>
+
+                    {c.locationLine ? (
+                      <div className="mt-1 text-sm font-semibold text-slate-600">
+                        {c.locationLine}
+                      </div>
+                    ) : null}
+
+                    {c.addressLine ? (
+                      <div className="mt-1 text-sm font-semibold text-slate-600">
+                        {c.addressLine}
+                      </div>
+                    ) : null}
+
+                    {c.dateLine ? (
+                      <div className="mt-1 text-xs font-semibold text-slate-500">
+                        {c.dateLine}
+                      </div>
                     ) : null}
                   </div>
 
