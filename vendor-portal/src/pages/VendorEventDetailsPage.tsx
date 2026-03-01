@@ -1,79 +1,55 @@
-// src/pages/VendorEventDetailsPage.tsx
+// VendorEventDetailsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import {
-  listVendorApplications,
-  type ServerApplication,
-  type ListVendorApplicationsResponse,
-} from "../components/api/applications";
+import { listVendorApplications } from "../components/api/applications";
 
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
-type VendorEvent = {
-  id: number | string;
-  title?: string | null;
-  name?: string | null;
-  description?: string | null;
+type VendorEvent = any;
 
-  start_date?: string | null;
-  end_date?: string | null;
-
-  venue_name?: string | null;
-  street_address?: string | null;
-  city?: string | null;
-  state?: string | null;
-  zip_code?: string | null;
-
-  published?: boolean;
-  archived?: boolean;
+type ServerApplication = {
+  id: number;
+  event_id: number;
+  status?: string;
+  payment_status?: string;
+  submitted_at?: string;
+  updated_at?: string;
+  [k: string]: any;
 };
 
-function normalizeId(v: unknown) {
+function normalizeId(v: any) {
   return String(v ?? "").trim();
 }
 
-function fmtDate(d?: string | null) {
-  if (!d) return "";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return String(d);
-  return `${dt.getMonth() + 1}/${dt.getDate()}/${dt.getFullYear()}`;
+function coerceNumericAppId(raw: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (/^\d+$/.test(s)) return s;
+  // legacy: app_71_1771975163 -> 71
+  const m = s.match(/^app_(\d+)_/i) || s.match(/^app(\d+)_/i) || s.match(/^app(\d+)$/i);
+  if (m?.[1]) return m[1];
+  return s;
 }
 
-function fmtDateRange(start?: string | null, end?: string | null) {
-  const s = fmtDate(start);
-  const e = fmtDate(end);
-  if (!s && !e) return "Dates TBD";
-  if (s && e) return `${s} - ${e}`;
-  return s || e;
-}
+async function fetchPublicEventById(eventId: string): Promise<VendorEvent | null> {
+  const eid = String(eventId || "").trim();
+  if (!eid) return null;
 
-async function getJson(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`Request failed (${res.status})`);
-  return await res.json();
-}
+  // Preferred: dedicated detail endpoint (if published).
+  try {
+    const r = await fetch(`${API_BASE}/public/events/${encodeURIComponent(eid)}`);
+    if (r.ok) return await r.json();
+  } catch {
+    // ignore, fallback to list
+  }
 
-function pickList(data: any): VendorEvent[] {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.events)) return data.events;
-  if (Array.isArray(data?.items)) return data.items;
-  if (Array.isArray(data?.data)) return data.data;
-  return [];
-}
-
-function unwrapApps(payload: any): ServerApplication[] {
-  // supports:
-  // - { applications: [...] }
-  // - { data: { applications: [...] } }
-  // - [...]  (defensive)
-  if (Array.isArray(payload)) return payload as ServerApplication[];
-  if (Array.isArray(payload?.applications)) return payload.applications as ServerApplication[];
-  if (Array.isArray(payload?.data?.applications)) return payload.data.applications as ServerApplication[];
-  return [];
+  // Fallback: list and find (handles older servers that only had /public/events)
+  const r2 = await fetch(`${API_BASE}/public/events`);
+  if (!r2.ok) throw new Error("Failed to load public events.");
+  const all = await r2.json();
+  const arr = Array.isArray(all) ? all : [];
+  return (arr.find((x: any) => String(x?.id) === String(eid)) as any) || null;
 }
 
 export default function VendorEventDetailsPage() {
@@ -83,14 +59,10 @@ export default function VendorEventDetailsPage() {
 
   const eventId = useMemo(() => normalizeId(params.eventId), [params.eventId]);
 
-  const searchParams = useMemo(
-    () => new URLSearchParams(location.search),
-    [location.search]
-  );
-  const appIdFromUrl = useMemo(
-    () => normalizeId(searchParams.get("appId") || ""),
-    [searchParams]
-  );
+  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+
+  const rawAppIdFromUrl = useMemo(() => normalizeId(searchParams.get("appId") || ""), [searchParams]);
+  const appIdFromUrl = useMemo(() => coerceNumericAppId(rawAppIdFromUrl), [rawAppIdFromUrl]);
 
   const [loadingEvent, setLoadingEvent] = useState(true);
   const [eventErr, setEventErr] = useState<string | null>(null);
@@ -108,32 +80,12 @@ export default function VendorEventDetailsPage() {
       setEventErr(null);
 
       try {
-        // Most likely: vendor list endpoint, then find by id
-        const candidates = ["/vendor/events", "/public/events", "/events"];
-        let found: VendorEvent | null = null;
-
-        for (const p of candidates) {
-          try {
-            const data = await getJson(p);
-            const list = pickList(data);
-            const match = list.find((x) => normalizeId(x?.id) === eventId);
-            if (match) {
-              found = match;
-              break;
-            }
-          } catch {
-            // next
-          }
-        }
-
-        if (!found) throw new Error("Event not found from vendor/public endpoints.");
-
-        if (!cancelled) setEv(found);
+        const found = await fetchPublicEventById(eventId);
+        if (cancelled) return;
+        setEv(found || null);
+        if (!found) setEventErr("Event not found (it may not be published yet).");
       } catch (e: any) {
-        if (!cancelled) {
-          setEv(null);
-          setEventErr(e?.message || "Failed to load event details.");
-        }
+        if (!cancelled) setEventErr(e?.message || "Failed to load event.");
       } finally {
         if (!cancelled) setLoadingEvent(false);
       }
@@ -142,15 +94,11 @@ export default function VendorEventDetailsPage() {
     async function loadApps() {
       setLoadingApps(true);
       setAppsErr(null);
-      try {
-        // ✅ listVendorApplications returns { applications: [...] }
-        const resp = (await listVendorApplications()) as unknown as
-          | ListVendorApplicationsResponse
-          | ServerApplication[]
-          | any;
 
-        const arr = unwrapApps(resp);
-        if (!cancelled) setApps(arr);
+      try {
+        const res = await listVendorApplications();
+        if (cancelled) return;
+        setApps(Array.isArray(res) ? res : []);
       } catch (e: any) {
         if (!cancelled) {
           setApps([]);
@@ -175,6 +123,20 @@ export default function VendorEventDetailsPage() {
 
   const latestApp = useMemo(() => {
     if (eventApps.length === 0) return null;
+
+    // If the URL specifies an application, prefer that one.
+    if (appIdFromUrl) {
+      const byId = eventApps.find((a) => String(a.id) === String(appIdFromUrl));
+      if (byId) return byId;
+
+      // Also support legacy app refs (e.g., app_71_...) when they leak into the URL.
+      const byRef = eventApps.find(
+        (a) =>
+          String((a as any).ref || (a as any).app_ref || (a as any).application_ref || "") === String(rawAppIdFromUrl)
+      );
+      if (byRef) return byRef;
+    }
+
     return eventApps
       .slice()
       .sort((a, b) => {
@@ -182,7 +144,7 @@ export default function VendorEventDetailsPage() {
         const tb = new Date(b.updated_at || b.submitted_at || 0).getTime();
         return tb - ta;
       })[0];
-  }, [eventApps]);
+  }, [eventApps, appIdFromUrl, rawAppIdFromUrl]);
 
   const statusPill = useMemo(() => {
     const s = String(latestApp?.status || "").toLowerCase();
@@ -217,9 +179,34 @@ export default function VendorEventDetailsPage() {
 
   function goToMap() {
     const qs = new URLSearchParams();
-    if (appIdFromUrl) qs.set("appId", appIdFromUrl);
+    const appId = latestApp ? String((latestApp as any).id ?? "") : appIdFromUrl;
+    if (appId) qs.set("appId", appId);
     const q = qs.toString();
     navigate(`/vendor/events/${encodeURIComponent(eventId)}/map${q ? `?${q}` : ""}`);
+  }
+
+  const appStatus = String((latestApp as any)?.status || "");
+  const paymentStatus = String((latestApp as any)?.payment_status || (latestApp as any)?.paymentStatus || "");
+  const isApproved = appStatus.toLowerCase() === "approved";
+  const isPaid = paymentStatus.toLowerCase() === "paid";
+  const shouldPay = Boolean(latestApp && isApproved && !isPaid);
+
+  function goToRequirements() {
+    const qs = new URLSearchParams();
+    const appId = latestApp ? String((latestApp as any).id ?? "") : appIdFromUrl;
+    if (appId) qs.set("appId", appId);
+    const q = qs.toString();
+    navigate(`/vendor/events/${encodeURIComponent(eventId)}/requirements${q ? `?${q}` : ""}`);
+  }
+
+  function primaryCta() {
+    if (shouldPay) return goToRequirements;
+    return goToMap;
+  }
+
+  function primaryCtaLabel() {
+    if (shouldPay) return "Pay Now";
+    return "Apply Now";
   }
 
   return (
@@ -243,17 +230,17 @@ export default function VendorEventDetailsPage() {
       </div>
 
       <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="text-3xl font-extrabold text-slate-900">{title}</div>
-            <div className="mt-2 flex flex-wrap items-center gap-4 text-sm font-semibold text-slate-700">
-              <span>📅 {fmtDateRange(ev?.start_date, ev?.end_date)}</span>
-              <span>📍 {locationLine}</span>
-              {addressLine ? <span>🏠 {addressLine}</span> : null}
+            <div className="text-4xl font-black text-slate-900">{title}</div>
+            <div className="mt-2 text-sm font-semibold text-slate-600">
+              {locationLine} • {ev?.start_date || "Dates TBD"}
+              {ev?.end_date ? ` - ${ev.end_date}` : ""}
             </div>
+            {addressLine ? <div className="mt-1 text-sm font-semibold text-slate-500">{addressLine}</div> : null}
           </div>
 
-          {statusPill}
+          <div className="flex items-center gap-2">{statusPill}</div>
         </div>
 
         {eventErr ? (
@@ -275,21 +262,15 @@ export default function VendorEventDetailsPage() {
         <div className="mt-8 flex flex-wrap gap-3">
           <button
             type="button"
-            onClick={goToMap}
+            onClick={primaryCta()}
             className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-6 py-2 text-sm font-extrabold text-white shadow-sm hover:from-indigo-700 hover:to-purple-700 active:scale-[0.99] transition"
           >
-            Apply Now
+            {primaryCtaLabel()}
           </button>
 
           <button
             type="button"
-            onClick={() =>
-              navigate(
-                `/vendor/events/${encodeURIComponent(eventId)}/requirements${
-                  appIdFromUrl ? `?appId=${encodeURIComponent(appIdFromUrl)}` : ""
-                }`
-              )
-            }
+            onClick={goToRequirements}
             className="rounded-full border border-slate-200 bg-white px-6 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50 active:scale-[0.99] transition"
           >
             View Requirements

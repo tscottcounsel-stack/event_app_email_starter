@@ -1,106 +1,104 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-type EventRow = {
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+
+type EventModel = {
   id: number;
-  name?: string;
   title?: string;
-  start_date?: string;
-  end_date?: string;
+  description?: string;
   venue_name?: string;
   city?: string;
   state?: string;
+  start_date?: string;
+  end_date?: string;
+  published?: boolean;
 };
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8002";
-
-async function apiGet(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-function label(ev: EventRow) {
-  return ev.name || ev.title || `Event #${ev.id}`;
-}
 
 export default function VendorEventsPage() {
   const navigate = useNavigate();
-  const [events, setEvents] = useState<EventRow[]>([]);
+  const [events, setEvents] = useState<EventModel[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   useEffect(() => {
-    (async () => {
-      try {
-        setError("");
-        setLoading(true);
-        const data: any = await apiGet("/events");
-        const list = data?.events || data?.data || data || [];
-        setEvents(Array.isArray(list) ? list : []);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load events");
-      } finally {
-        setLoading(false);
-      }
-    })();
+    loadEvents();
   }, []);
 
-  return (
-    <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-extrabold text-slate-900">Events</h1>
-          <p className="mt-1 text-slate-600">Browse events and apply.</p>
-        </div>
-      </div>
+  async function loadEvents() {
+    try {
+      setLoading(true);
 
-      {error && (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </div>
+      const res = await fetch(`${API_BASE}/public/events`, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      });
+
+      if (!res.ok) {
+        console.error("Failed to load events:", res.status);
+        setEvents([]);
+        return;
+      }
+
+      const data = await res.json();
+      setEvents(Array.isArray(data?.events) ? data.events : []);
+    } catch (err) {
+      console.error("Error loading events:", err);
+      setEvents([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function formatDateRange(e: EventModel) {
+    if (!e.start_date || !e.end_date) return "Dates TBD";
+    const start = new Date(e.start_date).toLocaleDateString();
+    const end = new Date(e.end_date).toLocaleDateString();
+    return `${start} – ${end}`;
+  }
+
+  function handleViewEvent(id: number) {
+    // IMPORTANT: flyer page should use /public/events/{id}
+    navigate(`/events/${id}`);
+  }
+
+  return (
+    <div className="p-6">
+      <h1 className="text-2xl font-bold mb-4">Available Events</h1>
+
+      {loading && <p>Loading events...</p>}
+
+      {!loading && events.length === 0 && (
+        <p className="text-gray-500">No published events available.</p>
       )}
 
-      <div className="mt-6">
-        {loading ? (
-          <div className="text-slate-600">Loading…</div>
-        ) : events.length === 0 ? (
-          <div className="text-slate-600">No events found.</div>
-        ) : (
-          <div className="space-y-3">
-            {events.map((ev) => (
-              <div
-                key={ev.id}
-                className="flex flex-col gap-3 rounded-2xl border border-slate-200 p-5 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div>
-                  <div className="text-lg font-extrabold text-slate-900">
-                    {label(ev)}
-                  </div>
-                  <div className="mt-1 text-sm text-slate-600">
-                    {ev.venue_name || ""}{" "}
-                    {[ev.city, ev.state].filter(Boolean).join(", ")}
-                  </div>
-                </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        {events.map((e) => (
+          <div
+            key={e.id}
+            className="border rounded-lg p-4 shadow-sm bg-white"
+          >
+            <h2 className="text-lg font-semibold">
+              {e.title || "Untitled event"}
+            </h2>
 
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => navigate(`/vendor/events/${ev.id}`)}
-                    className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-50"
-                  >
-                    View
-                  </button>
-                  <button
-                    onClick={() => navigate(`/vendor/events/${ev.id}/apply`)}
-                    className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
-                  >
-                    Apply
-                  </button>
-                </div>
-              </div>
-            ))}
+            <p className="text-sm text-gray-600">
+              {e.venue_name || "Location TBD"}
+              {e.city && e.state ? ` • ${e.city}, ${e.state}` : ""}
+            </p>
+
+            <p className="text-sm text-gray-500">
+              {formatDateRange(e)}
+            </p>
+
+            <button
+              onClick={() => handleViewEvent(e.id)}
+              className="mt-3 px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+            >
+              View Event
+            </button>
           </div>
-        )}
+        ))}
       </div>
     </div>
   );

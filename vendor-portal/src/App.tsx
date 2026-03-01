@@ -4,7 +4,6 @@ import { Routes, Route, Navigate } from "react-router-dom";
 /* ---------------- PUBLIC ---------------- */
 
 import PublicHomePage from "./pages/PublicHomePage";
-import PublicEventsPage from "./pages/PublicEventsPage";
 import PublicVendorsPage from "./pages/PublicVendorsPage";
 import PublicPricingPage from "./pages/PublicPricingPage";
 import PublicLoginPage from "./pages/PublicLoginPage";
@@ -12,6 +11,10 @@ import PublicFindVenuesPage from "./pages/PublicFindVenuesPage";
 import PublicForgotPasswordPage from "./pages/PublicForgotPasswordPage";
 import PublicGetStartedPage from "./pages/PublicGetStartedPage";
 import CreateAccountPage from "./pages/CreateAccountPage";
+
+// ✅ NEW public pages (list + detail)
+import PublicEventsListPage from "./pages/PublicEventsListPage";
+import PublicEventDetailPage from "./pages/PublicEventDetailPage";
 
 /* ---------------- AUTH ---------------- */
 
@@ -26,6 +29,7 @@ import OrganizerCreateEventPage from "./pages/OrganizerCreateEventPage";
 import OrganizerEventRequirementsPage from "./pages/OrganizerEventRequirementsPage";
 import OrganizerEventReviewPage from "./pages/OrganizerEventReviewPage";
 import OrganizerApplicationsPage from "./pages/OrganizerApplicationsPage";
+import OrganizerApplicationViewPage from "./pages/OrganizerApplicationViewPage";
 import OrganizerVendorPreviewPage from "./pages/OrganizerVendorPreviewPage";
 import OrganizerEventDetailsPage from "./pages/OrganizerEventDetailsPage";
 import OrganizerContactsPage from "./pages/OrganizerContactsPage";
@@ -52,7 +56,11 @@ export default function App() {
     <Routes>
       {/* ---------- PUBLIC ---------- */}
       <Route path="/" element={<PublicHomePage />} />
-      <Route path="/events" element={<PublicEventsPage />} />
+
+      {/* ✅ Public marketplace pages */}
+      <Route path="/events" element={<PublicEventsListPage />} />
+      <Route path="/events/:eventId" element={<PublicEventDetailPage />} />
+
       <Route path="/vendors" element={<PublicVendorsPage />} />
       <Route path="/pricing" element={<PublicPricingPage />} />
       <Route path="/login" element={<PublicLoginPage />} />
@@ -76,11 +84,23 @@ export default function App() {
           {/* ✅ DETAILS ROUTE */}
           <Route path="events/:eventId/details" element={<OrganizerEventDetailsPage />} />
 
-          <Route path="events/:eventId/requirements" element={<OrganizerEventRequirementsPage />} />
+          {/* ✅ Keep requirements editor available */}
+          <Route
+            path="events/:eventId/requirements"
+            element={<OrganizerEventRequirementsPage />}
+          />
           <Route path="events/:eventId/review" element={<OrganizerEventReviewPage />} />
           <Route path="events/:eventId/layout" element={<MapEditorPage />} />
 
+          {/* ✅ Applications list */}
           <Route path="events/:eventId/applications" element={<OrganizerApplicationsPage />} />
+
+          {/* ✅ Application details */}
+          <Route
+            path="events/:eventId/applications/:appId"
+            element={<OrganizerApplicationViewPage />}
+          />
+
           <Route path="vendor-preview/:applicationId" element={<OrganizerVendorPreviewPage />} />
           <Route path="contacts" element={<OrganizerContactsPage />} />
 

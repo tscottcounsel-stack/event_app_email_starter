@@ -1,38 +1,47 @@
 # app/routers/applications.py
 from __future__ import annotations
 
-import os
-import re
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
-from app.store import (
-    _APPLICATIONS,
-    _EVENTS,
-    _REQUIREMENTS,
-    next_application_id,
-    save_store,
-)
+from app.routers.auth import get_current_user
+from app.store import _APPLICATIONS, _EVENTS, next_application_id, save_store
 
 router = APIRouter(tags=["Applications"])
 
-# NOTE:
-# In main.py you mount something like:
-#   app.mount("/uploads", StaticFiles(directory=...), name="uploads")
-# This router writes into app/uploads so URLs /uploads/<filename> work.
-UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 
 
-# ---------------- Time / Helpers ----------------
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now().isoformat()
+
+
+def parse_iso_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        # assume timezone-aware or treat as UTC
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        # Python accepts 'Z' only if replaced
+        s2 = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s2)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
 
 
 def get_event_or_404(event_id: int) -> Dict[str, Any]:
@@ -42,642 +51,801 @@ def get_event_or_404(event_id: int) -> Dict[str, Any]:
     return ev
 
 
-def get_app_or_404(application_id: int) -> Dict[str, Any]:
-    app = _APPLICATIONS.get(int(application_id))
+def get_application_or_404(app_id: int) -> Dict[str, Any]:
+    app = _APPLICATIONS.get(int(app_id))
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
-
-    # Ensure required keys exist for older records
-    if not isinstance(app.get("checked"), dict):
-        app["checked"] = {}
-    if not isinstance(app.get("documents"), dict):
-        app["documents"] = {}
-
     return app
 
 
-def _safe_filename(name: str) -> str:
-    name = (name or "").strip() or "file"
-    name = name.replace("\\", "_").replace("/", "_")
-    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name)
-    return name[:120]
+def _norm_email(x: Any) -> str:
+    return str(x or "").strip().lower()
 
 
-def _identity_from_headers(request: Request) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Dev-friendly identity:
-      - x-user-email
-      - x-user-id
-    """
-    email = request.headers.get("x-user-email")
-    uid = request.headers.get("x-user-id")
-    email = (email or "").strip().lower() or None
-    uid = (uid or "").strip() or None
-    return email, uid
+def _set_status(app: Dict[str, Any], status: str):
+    app["status"] = status
+    if status == "submitted" and not app.get("submitted_at"):
+        app["submitted_at"] = utc_now_iso()
+    app["updated_at"] = utc_now_iso()
 
 
-def _require_vendor_identity(request: Request) -> Tuple[str, Optional[str]]:
-    """
-    Vendor endpoints should not return or modify data without identity.
-    """
-    email, uid = _identity_from_headers(request)
-    if not email and not uid:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing vendor identity (x-user-email or x-user-id)",
-        )
-    return email or "", uid
+def _coerce_payment_status(x: Any) -> str:
+    s = str(x or "").strip().lower()
+    if s in ("unpaid", "pending", "paid", "expired"):
+        return s
+    if not s:
+        return "unpaid"
+    return "unpaid"
 
 
-def _vendor_owns_app(app: Dict[str, Any], email: str, uid: Optional[str]) -> bool:
-    """
-    Ownership rules:
-      - if app has vendor_email -> must match
-      - else if app has vendor_id -> must match
-      - else deny (legacy safety)
-    """
-    app_email = (app.get("vendor_email") or "").strip().lower()
-    app_uid = app.get("vendor_id") or ""
-    if app_email:
-        return app_email == (email or "").strip().lower()
-    if app_uid:
-        return bool(uid) and str(app_uid) == str(uid)
-    return False
-
-
-def _normalize_app_for_output(app: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Stable output shape for UI:
-      - checked: dict[str,bool]
-      - documents: dict[str,dict]
-    """
-    out = dict(app)
-
-    checked = out.get("checked")
-    if not isinstance(checked, dict):
-        out["checked"] = {}
-    else:
-        out["checked"] = {str(k): bool(v) for k, v in checked.items()}
-
-    docs = out.get("documents")
-    if not isinstance(docs, dict):
-        out["documents"] = {}
-    else:
-        norm_docs: Dict[str, Any] = {}
-        for k, v in docs.items():
-            kk = str(k)
-            norm_docs[kk] = v if isinstance(v, dict) else {"value": v}
-        out["documents"] = norm_docs
-
-    # make these predictable
-    if "payment_status" not in out:
-        out["payment_status"] = "unpaid"
-    if "status" not in out:
-        out["status"] = "draft"
-
-    return out
-
-
-def _is_active_application(app: Dict[str, Any]) -> bool:
-    """
-    "Active" for duplicate enforcement:
-      - not archived
-      - status != rejected
-    """
-    if bool(app.get("archived", False)):
+def _reservation_is_expired(app: Dict[str, Any]) -> bool:
+    until = parse_iso_dt(app.get("booth_reserved_until"))
+    if not until:
         return False
-    status = (app.get("status") or "").strip().lower()
-    if status == "rejected":
-        return False
-    return True
+    return until <= utc_now()
 
 
-def _find_duplicate_application(
-    *,
-    event_id: int,
-    booth_id: str,
-    vendor_email: str,
-    vendor_id: Optional[str],
+def expire_reservations_if_needed() -> int:
+    """
+    Simplest Policy 2 expiration cleanup (no cron):
+    If reservation deadline passed and not paid, we clear the hold and mark expired.
+    Returns count of cleared reservations.
+    """
+    changed = 0
+    now = utc_now()
+
+    for a in _APPLICATIONS.values():
+        pay = _coerce_payment_status(a.get("payment_status"))
+        if pay == "paid":
+            continue
+
+        until = parse_iso_dt(a.get("booth_reserved_until"))
+        if not until:
+            continue
+
+        if until <= now:
+            # Expire hold, keep approval status (approved ≠ assigned)
+            a["payment_status"] = "expired"
+            a["booth_id"] = None
+            a["booth_reserved_until"] = None
+            a["updated_at"] = utc_now_iso()
+            changed += 1
+
+    if changed:
+        save_store()
+
+    return changed
+
+
+def _booth_conflict(
+    event_id: int, booth_id: str, exclude_app_id: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Returns the most recent active duplicate application for this vendor+event+booth, if any.
+    Returns the conflicting application if booth is:
+    - paid/occupied OR
+    - reserved (unpaid/pending) and not expired
     """
-    booth_norm = (booth_id or "").strip()
-    if not booth_norm:
+    booth_id = str(booth_id or "").strip()
+    if not booth_id:
         return None
 
-    candidates = []
+    now = utc_now()
+
     for a in _APPLICATIONS.values():
-        if int(a.get("event_id", -1)) != int(event_id):
+        if exclude_app_id is not None and int(a.get("id") or 0) == int(exclude_app_id):
             continue
-        if (a.get("booth_id") or "").strip() != booth_norm:
+        if int(a.get("event_id") or 0) != int(event_id):
             continue
-        if not _vendor_owns_app(a, email=vendor_email, uid=vendor_id):
-            continue
-        if not _is_active_application(a):
-            continue
-        candidates.append(a)
-
-    if not candidates:
-        return None
-
-    def _key(x: Dict[str, Any]) -> str:
-        return str(x.get("updated_at") or x.get("submitted_at") or "")
-
-    candidates.sort(key=_key, reverse=True)
-    return candidates[0]
-
-
-def _format_redirect_url(template: str, application_id: int, event_id: int) -> str:
-    """
-    Supports both tokens:
-      - {APPLICATION_ID}
-      - {EVENT_ID}
-    """
-    return (
-        (template or "")
-        .replace("{APPLICATION_ID}", str(application_id))
-        .replace("{EVENT_ID}", str(event_id))
-    )
-
-
-def _resolve_amount_cents_from_requirements(
-    *,
-    event_id: int,
-    booth_category_id: Optional[str],
-) -> Optional[int]:
-    """
-    Look up price for the selected booth category from requirements.
-
-    We support booth_categories entries shaped like:
-      { id, base_price_cents } OR { id, base_price } (dollars)
-    """
-    if not booth_category_id:
-        return None
-
-    slot = _REQUIREMENTS.get(int(event_id))
-    if not isinstance(slot, dict):
-        return None
-    req = slot.get("requirements")
-    if not isinstance(req, dict):
-        return None
-
-    cats = req.get("booth_categories")
-    if not isinstance(cats, list):
-        return None
-
-    want = str(booth_category_id).strip()
-    if not want:
-        return None
-
-    for c in cats:
-        if not isinstance(c, dict):
-            continue
-        if str(c.get("id") or "").strip() != want:
+        if str(a.get("booth_id") or "").strip() != booth_id:
             continue
 
-        # prefer cents
-        try:
-            cents = int(c.get("base_price_cents") or 0)
-            if cents > 0:
-                return cents
-        except Exception:
-            pass
+        pay = _coerce_payment_status(a.get("payment_status"))
+        if pay == "paid":
+            return a
 
-        # fallback: dollars -> cents
-        try:
-            dollars = float(c.get("base_price") or 0)
-            if dollars > 0:
-                return int(round(dollars * 100))
-        except Exception:
-            pass
+        if pay in ("unpaid", "pending"):
+            until = parse_iso_dt(a.get("booth_reserved_until"))
+            if until and until > now:
+                return a
 
     return None
 
 
-def _resolve_checkout_amount_cents(app: Dict[str, Any]) -> int:
-    """
-    Amount resolution order:
-      1) if application already has amount_cents -> reuse
-      2) else if requirements has booth_categories price for app.booth_category_id -> use it
-      3) else if requirements has payment_settings.default_amount_cents -> use it
-      4) else env STRIPE_DEFAULT_AMOUNT_CENTS (default 2500)
-    """
-    # 1) reuse app amount if already set
-    try:
-        existing = int(app.get("amount_cents") or 0)
-        if existing > 0:
-            return existing
-    except Exception:
-        pass
-
-    event_id = int(app.get("event_id") or 0)
-
-    # 2) per-category
-    booth_category_id = app.get("booth_category_id")
-    cents = _resolve_amount_cents_from_requirements(
-        event_id=event_id,
-        booth_category_id=(
-            str(booth_category_id) if booth_category_id is not None else None
-        ),
-    )
-    if cents and cents > 0:
-        return int(cents)
-
-    # 3) default_amount_cents
-    slot = _REQUIREMENTS.get(event_id) if event_id else None
-    if isinstance(slot, dict):
-        req = slot.get("requirements")
-        if isinstance(req, dict):
-            ps = req.get("payment_settings")
-            if isinstance(ps, dict):
-                try:
-                    v = int(ps.get("default_amount_cents") or 0)
-                    if v > 0:
-                        return v
-                except Exception:
-                    pass
-
-    # 4) env fallback
-    try:
-        return int(os.getenv("STRIPE_DEFAULT_AMOUNT_CENTS", "2500"))
-    except Exception:
-        return 2500
-
-
-# ---------------- Models ----------------
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
 
 
 class ApplyBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    booth_id: Optional[str] = None
-
-    # ✅ NEW: pass category id from the booth selection so Stripe can price correctly
-    # This should match requirements.requirements.booth_categories[].id (stringified is fine).
-    booth_category_id: Optional[str] = None
-
-    checked: Optional[Dict[str, bool]] = None
+    booth_id: Optional[str] = None  # accepted but ignored in Policy 2
     notes: Optional[str] = None
-    vendor_profile: Optional[Dict[str, Any]] = None
+    checked: Optional[Dict[str, bool]] = None
 
 
-class StatusBody(BaseModel):
+class UploadedDocMeta(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    status: str
+    name: str
+    size: int
+    type: Optional[str] = None
+    lastModified: Optional[int] = None
 
 
-class ProgressBody(BaseModel):
+class ApplicationProgressUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
     checked: Optional[Dict[str, bool]] = None
-    notes: Optional[str] = None
+    docs: Optional[Dict[str, List[UploadedDocMeta]]] = None
+    documents: Optional[Dict[str, Any]] = None
 
 
-# -------------------------------------------------------------------
-# Vendor: submit application (created on booth selection)
-# -------------------------------------------------------------------
+class CheckoutCreateBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+    amount_cents: Optional[int] = None
+    currency: str = "usd"
+    description: Optional[str] = None
+
+
+class ReserveBoothBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    booth_id: str
+    hold_hours: int = 48
+
+
+class ExtendReservationBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    extend_hours: int = 48
+
+
+class ChangeBoothBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    booth_id: str
+
+
+# -----------------------------------------------------------------------------
+# Vendor: Apply (creates application)
+# Policy 2: Approved ≠ assigned, so vendor cannot set booth_id during apply.
+# -----------------------------------------------------------------------------
 
 
 @router.post("/applications/events/{event_id}/apply")
 def apply_to_event(
-    event_id: int, payload: ApplyBody, request: Request
-) -> Dict[str, Any]:
+    event_id: int,
+    request: Request,
+    body: ApplyBody = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    expire_reservations_if_needed()
     get_event_or_404(event_id)
 
-    email, uid = _require_vendor_identity(request)
+    email = _norm_email(user.get("email"))
+    if not email:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-    booth_id = (payload.booth_id or "").strip()
-    if not booth_id:
-        raise HTTPException(status_code=400, detail="Missing booth_id")
-
-    dup = _find_duplicate_application(
-        event_id=int(event_id),
-        booth_id=booth_id,
-        vendor_email=email or "",
-        vendor_id=uid,
-    )
-    if dup:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "ok": False,
-                "code": "DUPLICATE_APPLICATION",
-                "message": "An active application already exists for this booth.",
-                "existing_application_id": int(dup.get("id")),
-                "existing_app_ref": dup.get("app_ref"),
-                "event_id": int(event_id),
-                "booth_id": booth_id,
-            },
-        )
-
-    app_id = int(next_application_id())
-    app_ref = f"APP-{event_id}-{app_id}"
-
-    vp = payload.vendor_profile if isinstance(payload.vendor_profile, dict) else None
-    if vp is not None and not vp.get("email"):
-        vp["email"] = email or ""
+    app_id = next_application_id()
 
     app: Dict[str, Any] = {
-        "id": app_id,
+        "id": int(app_id),
         "event_id": int(event_id),
-        "booth_id": booth_id,
-        "booth_category_id": (payload.booth_category_id or None),
-        "app_ref": app_ref,
-        "notes": payload.notes or "",
-        "checked": payload.checked or {},
-        "status": "submitted",
-        "submitted_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-        "vendor_email": email or None,
-        "vendor_id": uid,
+        "vendor_email": email,
+        "vendor_id": user.get("vendor_id") or None,
+        # Policy 2: ignore booth selection on apply
+        "booth_id": None,
+        "booth_reserved_until": None,
+        "notes": body.notes or "",
+        "checked": body.checked or {},
+        "docs": {},
         "documents": {},
-        "vendor_profile": vp,
-        # Stripe
+        "status": "draft",
+        "submitted_at": None,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        # payments
         "payment_status": "unpaid",
+        "paid_at": None,
     }
 
-    _APPLICATIONS[app_id] = app
-
-    ev = _EVENTS.get(int(event_id))
-    if ev is not None:
-        ev["updated_at"] = utc_now_iso()
-
+    _APPLICATIONS[int(app_id)] = app
     save_store()
-    return {"ok": True, "application": _normalize_app_for_output(app)}
+    return {"ok": True, "application": app}
 
 
-# -------------------------------------------------------------------
-# Vendor: start Stripe Checkout
-# NOTE: pay AFTER organizer approval (enforced here)
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Vendor: Update Progress (ownership enforced)
+# -----------------------------------------------------------------------------
 
 
-@router.post("/vendor/applications/{application_id}/checkout")
-def vendor_start_checkout(application_id: int, request: Request) -> Dict[str, Any]:
-    email, uid = _require_vendor_identity(request)
-    app = get_app_or_404(application_id)
+@router.put("/applications/{app_id}/progress")
+def update_application_progress(
+    app_id: int,
+    payload: ApplicationProgressUpdate = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
 
-    if not _vendor_owns_app(app, email=email, uid=uid):
-        raise HTTPException(status_code=403, detail="Not allowed")
+    email = _norm_email(user.get("email"))
+    if _norm_email(app.get("vendor_email")) != email:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-    # ✅ Enforce pay-after-approval
-    status = str(app.get("status") or "").strip().lower()
-    if status != "approved":
-        raise HTTPException(
-            status_code=409, detail="Payment allowed only after organizer approval"
-        )
+    if payload.checked is not None:
+        if not isinstance(payload.checked, dict):
+            raise HTTPException(status_code=400, detail="checked must be an object")
+        app["checked"] = {str(k): bool(v) for k, v in payload.checked.items()}
 
-    if str(app.get("payment_status") or "").strip().lower() == "paid":
-        raise HTTPException(status_code=409, detail="Application already paid")
-
-    try:
-        import stripe  # type: ignore
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="Stripe SDK not installed. Run: pip install stripe",
-        )
-
-    secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip()
-    if not secret_key:
-        raise HTTPException(status_code=500, detail="Missing STRIPE_SECRET_KEY env var")
-    stripe.api_key = secret_key
-
-    amount_cents = _resolve_checkout_amount_cents(app)
-    currency = (os.getenv("STRIPE_CURRENCY", "usd") or "usd").lower()
-
-    # Redirect back into the correct vendor React route
-    success_tpl = os.getenv(
-        "STRIPE_SUCCESS_URL",
-        "http://localhost:5173/vendor/events/{EVENT_ID}/apply?appId={APPLICATION_ID}&paid=1",
+    incoming_docs: Any = (
+        payload.documents if payload.documents is not None else payload.docs
     )
-    cancel_tpl = os.getenv(
-        "STRIPE_CANCEL_URL",
-        "http://localhost:5173/vendor/events/{EVENT_ID}/apply?appId={APPLICATION_ID}&canceled=1",
-    )
+    if incoming_docs is not None:
+        if not isinstance(incoming_docs, dict):
+            raise HTTPException(
+                status_code=400, detail="documents/docs must be an object"
+            )
 
-    eid = int(app.get("event_id") or 0)
-    success_url = _format_redirect_url(success_tpl, int(application_id), eid)
-    cancel_url = _format_redirect_url(cancel_tpl, int(application_id), eid)
+        normalized: Dict[str, List[Dict[str, Any]]] = {}
+        for doc_id, metas in incoming_docs.items():
+            if metas is None:
+                continue
 
-    # Persist pending before contacting Stripe (so UI can reflect it if needed)
-    app["payment_status"] = "pending"
-    app["amount_cents"] = int(amount_cents)
-    app["currency"] = currency
+            meta_list: List[Any] = metas if isinstance(metas, list) else [metas]
+            cleaned: List[Dict[str, Any]] = []
+
+            for m in meta_list:
+                if m is None:
+                    continue
+
+                if isinstance(m, UploadedDocMeta):
+                    name = m.name
+                    size = int(m.size)
+                    mtype = m.type or ""
+                    last_mod = int(m.lastModified or 0)
+                elif isinstance(m, dict):
+                    name = str(m.get("name") or "").strip()
+                    if not name:
+                        continue
+                    size = int(m.get("size") or 0)
+                    mtype = str(m.get("type") or "")
+                    last_mod = int(m.get("lastModified") or 0)
+                else:
+                    continue
+
+                if not name:
+                    continue
+
+                cleaned.append(
+                    {
+                        "name": name,
+                        "size": size,
+                        "type": mtype,
+                        "lastModified": last_mod,
+                    }
+                )
+
+            if cleaned:
+                normalized[str(doc_id)] = cleaned
+
+        # store under both keys for compatibility
+        app["docs"] = normalized
+        app["documents"] = normalized
+
     app["updated_at"] = utc_now_iso()
     save_store()
-
-    try:
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            success_url=success_url,
-            cancel_url=cancel_url,
-            payment_method_types=["card"],
-            line_items=[
-                {
-                    "quantity": 1,
-                    "price_data": {
-                        "currency": currency,
-                        "unit_amount": int(amount_cents),
-                        "product_data": {
-                            "name": f"VendorConnect Application #{int(application_id)}",
-                            "description": f"Event {app.get('event_id')} • Booth {app.get('booth_id')}",
-                        },
-                    },
-                }
-            ],
-            metadata={
-                "application_id": str(int(application_id)),
-                "event_id": str(int(app.get("event_id") or 0)),
-                "booth_id": str(app.get("booth_id") or ""),
-                "booth_category_id": str(app.get("booth_category_id") or ""),
-                "vendor_email": (email or ""),
-            },
-        )
-    except Exception as e:
-        app["payment_status"] = "unpaid"
-        app["updated_at"] = utc_now_iso()
-        save_store()
-        raise HTTPException(status_code=500, detail=f"Stripe error: {e}")
-
-    app["stripe_checkout_session_id"] = session.get("id")
-    app["updated_at"] = utc_now_iso()
-    save_store()
-
-    return {"ok": True, "url": session.get("url"), "session_id": session.get("id")}
+    return {"ok": True, "app_id": int(app_id), "updated_at": app["updated_at"]}
 
 
-# -------------------------------------------------------------------
-# Organizer: list applications for an event
-# -------------------------------------------------------------------
+@router.put("/vendor/applications/{app_id}/progress")
+def vendor_update_application_progress(
+    app_id: int,
+    payload: ApplicationProgressUpdate = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    return update_application_progress(app_id=app_id, payload=payload, user=user)
 
 
-@router.get("/organizer/events/{event_id}/applications")
-def list_event_applications(event_id: int) -> Dict[str, Any]:
-    get_event_or_404(event_id)
-
-    apps_raw = [
-        a for a in _APPLICATIONS.values() if int(a.get("event_id", -1)) == int(event_id)
-    ]
-
-    apps_raw.sort(key=lambda x: x.get("submitted_at") or "", reverse=True)
-    apps = [_normalize_app_for_output(a) for a in apps_raw]
-
-    return {"event_id": int(event_id), "applications": apps}
+# -----------------------------------------------------------------------------
+# Vendor: Read + List
+# -----------------------------------------------------------------------------
 
 
-# -------------------------------------------------------------------
-# Organizer: update application status (Approve/Reject)
-# -------------------------------------------------------------------
+@router.get("/vendor/applications/{app_id}")
+def get_vendor_application(app_id: int, user: dict = Depends(get_current_user)):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
 
+    email = _norm_email(user.get("email"))
+    if _norm_email(app.get("vendor_email")) != email:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-@router.post("/organizer/applications/{application_id}/status")
-def organizer_set_status(application_id: int, body: StatusBody) -> Dict[str, Any]:
-    app = get_app_or_404(application_id)
-
-    s = (body.status or "").strip().lower()
-    if s not in ("approved", "rejected", "submitted", "draft"):
-        raise HTTPException(status_code=400, detail="Invalid status")
-
-    app["status"] = s
-    app["updated_at"] = utc_now_iso()
-    save_store()
-
-    return {"ok": True, "application": _normalize_app_for_output(app)}
-
-
-# -------------------------------------------------------------------
-# Vendor: list MY applications only
-# -------------------------------------------------------------------
+    d = app.get("documents") or app.get("docs") or {}
+    app["documents"] = d
+    app["docs"] = d
+    return {"ok": True, "application": app}
 
 
 @router.get("/vendor/applications")
-def list_vendor_applications(request: Request) -> Dict[str, Any]:
-    email, uid = _require_vendor_identity(request)
-
-    apps_raw = [
-        a for a in _APPLICATIONS.values() if _vendor_owns_app(a, email=email, uid=uid)
+def list_vendor_applications(user: dict = Depends(get_current_user)):
+    expire_reservations_if_needed()
+    email = _norm_email(user.get("email"))
+    apps = [
+        a for a in _APPLICATIONS.values() if _norm_email(a.get("vendor_email")) == email
     ]
 
-    apps_raw.sort(key=lambda x: x.get("submitted_at") or "", reverse=True)
-    apps = [_normalize_app_for_output(a) for a in apps_raw]
+    for a in apps:
+        d = a.get("documents") or a.get("docs") or {}
+        a["documents"] = d
+        a["docs"] = d
 
     return {"applications": apps}
 
 
-# -------------------------------------------------------------------
-# Vendor: get ONE application (by id)
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Vendor: Submit
+# -----------------------------------------------------------------------------
 
 
-@router.get("/vendor/applications/{application_id}")
-def get_vendor_application(application_id: int, request: Request) -> Dict[str, Any]:
-    email, uid = _require_vendor_identity(request)
-    app = get_app_or_404(application_id)
+@router.post("/vendor/applications/{app_id}/submit")
+def vendor_submit_application(app_id: int, user: dict = Depends(get_current_user)):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
 
-    if not _vendor_owns_app(app, email=email, uid=uid):
-        raise HTTPException(status_code=403, detail="Not allowed")
+    email = _norm_email(user.get("email"))
+    if _norm_email(app.get("vendor_email")) != email:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-    return {"application": _normalize_app_for_output(app)}
-
-
-# -------------------------------------------------------------------
-# Vendor: save progress (checked + notes)
-# -------------------------------------------------------------------
-
-
-@router.put("/vendor/applications/{application_id}/progress")
-def vendor_save_progress(
-    application_id: int, body: ProgressBody, request: Request
-) -> Dict[str, Any]:
-    email, uid = _require_vendor_identity(request)
-    app = get_app_or_404(application_id)
-
-    if not _vendor_owns_app(app, email=email, uid=uid):
-        raise HTTPException(status_code=403, detail="Not allowed")
-
-    if body.checked is not None:
-        if not isinstance(body.checked, dict):
-            raise HTTPException(status_code=400, detail="checked must be an object")
-        app["checked"] = body.checked
-
-    if body.notes is not None:
-        app["notes"] = body.notes
-
-    app["updated_at"] = utc_now_iso()
+    _set_status(app, "submitted")
     save_store()
-
-    return {"ok": True, "application": _normalize_app_for_output(app)}
-
-
-# -------------------------------------------------------------------
-# Vendor: upload document
-# -------------------------------------------------------------------
+    return {"ok": True, "application": app}
 
 
-@router.post("/vendor/applications/{application_id}/documents/{doc_id}")
-async def vendor_upload_document(
-    application_id: int,
-    doc_id: str,
-    request: Request,
-    file: UploadFile = File(...),
-) -> Dict[str, Any]:
-    email, uid = _require_vendor_identity(request)
-    app = get_app_or_404(application_id)
+# -----------------------------------------------------------------------------
+# Organizer: List for event
+# -----------------------------------------------------------------------------
 
-    if not _vendor_owns_app(app, email=email, uid=uid):
-        raise HTTPException(status_code=403, detail="Not allowed")
 
-    if not file:
-        raise HTTPException(status_code=400, detail="Missing file")
+@router.get("/organizer/events/{event_id}/applications")
+def organizer_list_event_applications(event_id: int):
+    expire_reservations_if_needed()
+    apps = [
+        a
+        for a in _APPLICATIONS.values()
+        if int(a.get("event_id") or 0) == int(event_id)
+    ]
+    for a in apps:
+        d = a.get("documents") or a.get("docs") or {}
+        a["documents"] = d
+        a["docs"] = d
+        a["payment_status"] = _coerce_payment_status(a.get("payment_status"))
+    return {"applications": apps}
 
-    safe_doc_id = (doc_id or "").strip() or "doc"
-    original_name = file.filename or "upload"
-    safe_name = _safe_filename(original_name)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    out_name = (
-        f"app{int(application_id)}_{_safe_filename(safe_doc_id)}_{ts}_{safe_name}"
+# -----------------------------------------------------------------------------
+# Organizer: Approve / Reject / Delete
+# -----------------------------------------------------------------------------
+
+
+@router.post("/organizer/applications/{app_id}/approve")
+def organizer_approve_application(app_id: int):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+    _set_status(app, "approved")
+
+    # Do NOT assign booth here (Policy 2)
+    if _coerce_payment_status(app.get("payment_status")) == "expired":
+        # keep expired if they lost a hold; remain eligible
+        pass
+    elif not app.get("payment_status"):
+        app["payment_status"] = "unpaid"
+
+    save_store()
+    return {"ok": True, "application": app}
+
+
+@router.post("/organizer/applications/{app_id}/reject")
+def organizer_reject_application(app_id: int):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+    _set_status(app, "rejected")
+
+    # Rejection releases any hold
+    app["payment_status"] = "expired"
+    app["booth_id"] = None
+    app["booth_reserved_until"] = None
+
+    save_store()
+    return {"ok": True, "application": app}
+
+
+@router.delete("/organizer/applications/{app_id}")
+def organizer_delete_application(app_id: int):
+    expire_reservations_if_needed()
+    get_application_or_404(app_id)
+    _APPLICATIONS.pop(int(app_id), None)
+    save_store()
+    return {"ok": True, "deleted": int(app_id)}
+
+
+# -----------------------------------------------------------------------------
+# Organizer: Policy 2 reservation controls
+# -----------------------------------------------------------------------------
+
+
+@router.post("/organizer/applications/{app_id}/reserve-booth")
+def organizer_reserve_booth(app_id: int, body: ReserveBoothBody = Body(...)):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400, detail="Only approved applications can reserve a booth."
+        )
+
+    pay = _coerce_payment_status(app.get("payment_status"))
+    if pay == "paid":
+        raise HTTPException(
+            status_code=400, detail="Cannot reserve: already paid/occupied."
+        )
+    if pay == "pending":
+        raise HTTPException(
+            status_code=400, detail="Cannot reserve while payment is pending."
+        )
+
+    event_id = int(app.get("event_id") or 0)
+    get_event_or_404(event_id)
+
+    booth_id = str(body.booth_id or "").strip()
+    if not booth_id:
+        raise HTTPException(status_code=400, detail="booth_id is required")
+
+    conflict = _booth_conflict(
+        event_id=event_id, booth_id=booth_id, exclude_app_id=int(app_id)
     )
-    out_path = UPLOAD_DIR / out_name
+    if conflict:
+        raise HTTPException(
+            status_code=409, detail="Booth is not available (reserved or occupied)."
+        )
 
-    data = await file.read()
-    out_path.write_bytes(data)
+    hold_hours = int(body.hold_hours or 48)
+    hold_hours = max(1, min(168, hold_hours))  # 1h..7d guardrail
 
-    meta = {
-        "doc_id": safe_doc_id,
-        "original_name": original_name,
-        "filename": out_name,
-        "size": len(data),
-        "content_type": file.content_type or "",
-        "url": f"/uploads/{out_name}",
-        "uploaded_at": utc_now_iso(),
-    }
+    app["booth_id"] = booth_id
+    app["booth_reserved_until"] = (utc_now() + timedelta(hours=hold_hours)).isoformat()
+    app["payment_status"] = "unpaid"
+    app["updated_at"] = utc_now_iso()
 
-    docs = app.get("documents")
-    if not isinstance(docs, dict):
-        docs = {}
-        app["documents"] = docs
-    docs[str(safe_doc_id)] = meta
+    save_store()
+    return {"ok": True, "application": app}
 
+
+@router.post("/organizer/applications/{app_id}/extend-reservation")
+def organizer_extend_reservation(
+    app_id: int, body: ExtendReservationBody = Body(default={})
+):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400, detail="Only approved applications can extend reservation."
+        )
+
+    pay = _coerce_payment_status(app.get("payment_status"))
+    if pay == "paid":
+        raise HTTPException(
+            status_code=400, detail="Cannot extend after payment (occupied)."
+        )
+    if pay not in ("unpaid", "pending"):
+        raise HTTPException(
+            status_code=400, detail="Only unpaid/pending reservations can be extended."
+        )
+
+    if not app.get("booth_id") or not app.get("booth_reserved_until"):
+        raise HTTPException(status_code=400, detail="No active reservation to extend.")
+
+    if _reservation_is_expired(app):
+        raise HTTPException(status_code=400, detail="Reservation already expired.")
+
+    extend_hours = int(body.extend_hours or 48)
+    extend_hours = max(1, min(168, extend_hours))
+
+    until = parse_iso_dt(app.get("booth_reserved_until")) or utc_now()
+    app["booth_reserved_until"] = (until + timedelta(hours=extend_hours)).isoformat()
+    app["updated_at"] = utc_now_iso()
+
+    save_store()
+    return {"ok": True, "application": app}
+
+
+@router.post("/organizer/applications/{app_id}/change-booth")
+def organizer_change_booth(app_id: int, body: ChangeBoothBody = Body(...)):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400, detail="Only approved applications can change booth."
+        )
+
+    pay = _coerce_payment_status(app.get("payment_status"))
+    if pay == "paid":
+        raise HTTPException(
+            status_code=400, detail="Cannot change booth after payment."
+        )
+    if pay == "pending":
+        raise HTTPException(
+            status_code=400, detail="Cannot change booth while payment is pending."
+        )
+    if pay not in ("unpaid", "expired"):
+        raise HTTPException(
+            status_code=400, detail="Invalid payment_status for booth change."
+        )
+
+    # Must have an active reservation to change
+    if not app.get("booth_id") or not app.get("booth_reserved_until"):
+        raise HTTPException(status_code=400, detail="No active reservation to change.")
+
+    if _reservation_is_expired(app):
+        raise HTTPException(status_code=400, detail="Reservation expired.")
+
+    event_id = int(app.get("event_id") or 0)
+    get_event_or_404(event_id)
+
+    new_booth_id = str(body.booth_id or "").strip()
+    if not new_booth_id:
+        raise HTTPException(status_code=400, detail="booth_id is required")
+
+    conflict = _booth_conflict(
+        event_id=event_id, booth_id=new_booth_id, exclude_app_id=int(app_id)
+    )
+    if conflict:
+        raise HTTPException(
+            status_code=409, detail="Booth is not available (reserved or occupied)."
+        )
+
+    app["booth_id"] = new_booth_id
+    app["updated_at"] = utc_now_iso()
+    save_store()
+    return {"ok": True, "application": app}
+
+
+@router.post("/organizer/applications/{app_id}/release-reservation")
+def organizer_release_reservation(app_id: int):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail="Only approved applications can release reservation.",
+        )
+
+    pay = _coerce_payment_status(app.get("payment_status"))
+    if pay == "paid":
+        raise HTTPException(
+            status_code=400, detail="Cannot release after payment (occupied)."
+        )
+    if pay == "pending":
+        raise HTTPException(
+            status_code=400, detail="Cannot release while payment is pending."
+        )
+
+    app["payment_status"] = "expired"
+    app["booth_id"] = None
+    app["booth_reserved_until"] = None
+    app["updated_at"] = utc_now_iso()
+
+    save_store()
+    return {"ok": True, "application": app}
+
+
+# -----------------------------------------------------------------------------
+# Vendor: Pay Now (Stripe Checkout)
+# -----------------------------------------------------------------------------
+
+
+def _ensure_can_pay_now(app: Dict[str, Any]):
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400, detail="Application must be approved before payment."
+        )
+    if not app.get("booth_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="No booth reserved yet. Waiting for organizer assignment.",
+        )
+    if not app.get("booth_reserved_until"):
+        raise HTTPException(status_code=400, detail="No reservation deadline set.")
+    if _reservation_is_expired(app):
+        raise HTTPException(
+            status_code=400,
+            detail="Reservation expired. Waiting for organizer to reassign.",
+        )
+    pay = _coerce_payment_status(app.get("payment_status"))
+    if pay == "paid":
+        raise HTTPException(status_code=400, detail="Already paid.")
+    return pay
+
+
+@router.post("/vendor/applications/{app_id}/pay-now")
+def vendor_pay_now(
+    app_id: int,
+    body: CheckoutCreateBody = Body(default={}),
+    user: dict = Depends(get_current_user),
+):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    email = _norm_email(user.get("email"))
+    if _norm_email(app.get("vendor_email")) != email:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    pay = _ensure_can_pay_now(app)
+
+    # Determine amount (dev-safe default)
+    amount_cents = int(body.amount_cents or app.get("amount_cents") or 0)
+    if amount_cents <= 0:
+        amount_cents = 50000  # $500.00 dev default
+
+    success_url = (
+        body.success_url or "http://localhost:5173/vendor/applications?payment=success"
+    ).strip()
+    cancel_url = (
+        body.cancel_url or "http://localhost:5173/vendor/applications?payment=cancel"
+    ).strip()
+    desc = (body.description or f"Booth payment for application #{app_id}").strip()
+    currency = (body.currency or "usd").strip().lower()
+
+    # Create Stripe session
+    try:
+        import os
+
+        import stripe  # type: ignore
+
+        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if not secret:
+            raise RuntimeError("STRIPE_SECRET_KEY not set")
+
+        stripe.api_key = secret
+
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "product_data": {"name": desc},
+                        "unit_amount": amount_cents,
+                    },
+                    "quantity": 1,
+                }
+            ],
+            metadata={
+                "application_id": str(app_id),
+                "event_id": str(app.get("event_id") or ""),
+                "vendor_email": str(app.get("vendor_email") or ""),
+                "vendor_id": str(app.get("vendor_id") or ""),
+                "booth_id": str(app.get("booth_id") or ""),
+            },
+        )
+
+        # mark pending (optional but useful)
+        app["payment_status"] = "pending"
+        app["updated_at"] = utc_now_iso()
+        save_store()
+
+        return {"ok": True, "url": session.url, "session_id": session.id}
+    except Exception as e:
+        # If Stripe not installed or not configured, return mock response
+        # (frontend can show a dev message)
+        return {
+            "ok": False,
+            "mock": True,
+            "detail": f"Stripe not configured: {str(e)}",
+            "amount_cents": amount_cents,
+        }
+
+
+# Keep legacy route used by older frontend code
+@router.post("/vendor/applications/{app_id}/checkout")
+def vendor_create_checkout_session_legacy(
+    app_id: int,
+    body: CheckoutCreateBody = Body(default={}),
+    user: dict = Depends(get_current_user),
+):
+    return vendor_pay_now(app_id=app_id, body=body, user=user)
+
+
+# DEV helper: manual mark-paid
+@router.post("/vendor/applications/{app_id}/mark-paid")
+def vendor_mark_paid_dev_only(app_id: int, user: dict = Depends(get_current_user)):
+    expire_reservations_if_needed()
+    app = get_application_or_404(app_id)
+
+    email = _norm_email(user.get("email"))
+    if _norm_email(app.get("vendor_email")) != email:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if str(app.get("status") or "").lower() != "approved":
+        raise HTTPException(
+            status_code=400, detail="Application must be approved before payment."
+        )
+    if not app.get("booth_id") or not app.get("booth_reserved_until"):
+        raise HTTPException(status_code=400, detail="No reserved booth to pay for.")
+    if _reservation_is_expired(app):
+        raise HTTPException(status_code=400, detail="Reservation expired.")
+
+    app["payment_status"] = "paid"
+    app["paid_at"] = utc_now_iso()
     app["updated_at"] = utc_now_iso()
     save_store()
 
-    return {"ok": True, "doc": meta, "application_id": int(application_id)}
+    return {"ok": True, "application": app}
 
 
-# -------------------------------------------------------------------
-# Organizer: DELETE application
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Stripe webhook (success => paid)
+# -----------------------------------------------------------------------------
 
 
-@router.delete("/organizer/applications/{application_id}")
-def delete_application(application_id: int):
-    application_id = int(application_id)
+@router.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Accepts Stripe webhook events.
+    If STRIPE_WEBHOOK_SECRET is set, we verify signature. Otherwise we parse JSON directly.
+    On checkout.session.completed => payment_status='paid'.
+    """
+    import os
 
-    if application_id not in _APPLICATIONS:
-        raise HTTPException(status_code=404, detail="Application not found")
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
 
-    del _APPLICATIONS[application_id]
-    save_store()
+    evt = None
+    webhook_secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 
-    return {"ok": True}
+    try:
+        import stripe  # type: ignore
+
+        if webhook_secret and sig:
+            evt = stripe.Webhook.construct_event(
+                payload=payload, sig_header=sig, secret=webhook_secret
+            )
+        else:
+            evt = await request.json()
+    except Exception:
+        # fallback: try json
+        try:
+            evt = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid webhook payload")
+
+    etype = str(evt.get("type") or "").strip()
+    data_obj = (evt.get("data") or {}).get("object") or {}
+
+    if etype == "checkout.session.completed":
+        meta = data_obj.get("metadata") or {}
+        app_id_raw = meta.get("application_id") or ""
+        try:
+            app_id = int(app_id_raw)
+        except Exception:
+            return {"ok": True, "ignored": True, "reason": "missing application_id"}
+
+        expire_reservations_if_needed()
+        app = _APPLICATIONS.get(int(app_id))
+        if not app:
+            return {"ok": True, "ignored": True, "reason": "application not found"}
+
+        # Lock it
+        app["payment_status"] = "paid"
+        app["paid_at"] = utc_now_iso()
+        app["updated_at"] = utc_now_iso()
+
+        # Once paid, you may optionally clear reserved_until (record not required for logic)
+        # app["booth_reserved_until"] = None
+
+        save_store()
+        return {"ok": True}
+
+    # ignore other events
+    return {"ok": True, "ignored": True, "type": etype}

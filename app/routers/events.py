@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.store import _APPLICATIONS, _EVENTS, _REQUIREMENTS, next_event_id, save_store
+from app.store import _EVENTS, _REQUIREMENTS, next_event_id, save_store
 
 router = APIRouter(tags=["Events"])
 
@@ -32,19 +32,42 @@ class EventCreate(BaseModel):
     state: Optional[str] = None
     zip_code: Optional[str] = None
 
+    ticket_sales_url: Optional[str] = None
+    google_maps_url: Optional[str] = None
     category: Optional[str] = None
 
+    heroImageUrl: Optional[str] = None
+    imageUrls: Optional[list[str]] = None
+    videoUrls: Optional[list[str]] = None
 
-class Event(EventCreate):
-    id: int
-    created_at: str
-    updated_at: str
 
-    published: bool = False
-    archived: bool = False
+class EventUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
-    requirements_published: bool = False
-    layout_published: bool = False
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+    venue_name: Optional[str] = None
+    street_address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zip_code: Optional[str] = None
+
+    ticket_sales_url: Optional[str] = None
+    google_maps_url: Optional[str] = None
+    category: Optional[str] = None
+
+    heroImageUrl: Optional[str] = None
+    imageUrls: Optional[list[str]] = None
+    videoUrls: Optional[list[str]] = None
+
+    published: Optional[bool] = None
+    archived: Optional[bool] = None
+    requirements_published: Optional[bool] = None
+    layout_published: Optional[bool] = None
 
 
 # -------------------------------------------------------------------
@@ -56,286 +79,309 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def normalize_event(ev: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(ev)
-
-    try:
-        out["id"] = int(out.get("id"))
-    except Exception:
-        out["id"] = out.get("id")
-
-    out.setdefault("created_at", utc_now_iso())
-    out.setdefault("updated_at", utc_now_iso())
-
-    out["published"] = bool(out.get("published", False))
-    out["archived"] = bool(out.get("archived", False))
-
-    out["requirements_published"] = bool(out.get("requirements_published", False))
-    out["layout_published"] = bool(out.get("layout_published", False))
-
-    return out
-
-
-def get_event_or_404(event_id: int) -> Dict[str, Any]:
+def _get_event_or_404(event_id: int) -> Dict[str, Any]:
     ev = _EVENTS.get(int(event_id))
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
     return ev
 
 
-def ensure_requirements_slot(event_id: int) -> Dict[str, Any]:
+def _as_event_dict(e: Dict[str, Any]) -> Dict[str, Any]:
+    return dict(e)
+
+
+def _looks_like_diagram_doc(d: Dict[str, Any]) -> bool:
     """
-    Stored in app.store._REQUIREMENTS:
-      event_id -> { "version": 2, "requirements": {...} }
-
-    IMPORTANT:
-      - organizer UI sets booth category pricing (base_price/base_price_cents, etc.)
-      - we keep the slot flexible (no strict schema enforcement) so UI can evolve
+    Heuristic: if diagram doc is stored raw, it usually has levels/booths/etc.
     """
-    eid = int(event_id)
+    if not isinstance(d, dict):
+        return False
+    if "levels" in d:
+        return True
+    if "booths" in d:
+        return True
+    # Some editors store "floors"
+    if "floors" in d:
+        return True
+    return False
 
-    slot = _REQUIREMENTS.get(eid)
-    if not isinstance(slot, dict):
-        slot = {
-            "version": 2,
-            "requirements": {
-                "event_id": eid,
-                "booth_categories": [],  # organizer sets pricing here
-                "custom_restrictions": [],
-                "compliance_items": [],
-                "document_requirements": [],
-                "payment_settings": {
-                    "require_deposit": True,
-                    "deposit_percent": 50,
-                    "late_fee": 0,
-                    "refund_policy": "No Refunds",
-                    "payment_notes": "",
-                    # checkout fallback
-                    "default_amount_cents": 0,
-                },
-                "updated_at": utc_now_iso(),
-            },
-        }
-        _REQUIREMENTS[eid] = slot
 
-    # Normalize minimal shape (do NOT overwrite organizer-provided values)
-    slot.setdefault("version", 2)
-    slot.setdefault("requirements", {})
-    if not isinstance(slot["requirements"], dict):
-        slot["requirements"] = {}
+def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
+    """
+    Persisted storage is a wrapper:
+      event["diagram"] = { "diagram": <doc>, "version": <int> }
 
-    req = slot["requirements"]
-    req.setdefault("event_id", eid)
-    req.setdefault("booth_categories", [])
-    req.setdefault("custom_restrictions", [])
-    req.setdefault("compliance_items", [])
-    req.setdefault("document_requirements", [])
+    ✅ MIGRATION:
+    If event["diagram"] is a raw doc (dict with levels/booths) we wrap it
+    instead of wiping it.
+    """
+    ev = _get_event_or_404(event_id)
+    slot = ev.get("diagram")
 
-    ps = req.get("payment_settings")
-    if not isinstance(ps, dict):
-        ps = {}
-        req["payment_settings"] = ps
+    # Case 1: already wrapped correctly
+    if isinstance(slot, dict) and "diagram" in slot:
+        if not isinstance(slot.get("version"), int):
+            slot["version"] = 1
+        if slot.get("diagram") is None:
+            slot["diagram"] = {}
+        ev["diagram"] = slot
+        return slot
 
-    ps.setdefault("require_deposit", True)
-    ps.setdefault("deposit_percent", 50)
-    ps.setdefault("late_fee", 0)
-    ps.setdefault("refund_policy", "No Refunds")
-    ps.setdefault("payment_notes", "")
-    ps.setdefault("default_amount_cents", 0)
+    # Case 2: raw doc stored directly in event["diagram"]  ✅ migrate
+    if isinstance(slot, dict) and _looks_like_diagram_doc(slot):
+        migrated = {"diagram": slot, "version": 1}
+        ev["diagram"] = migrated
+        ev["updated_at"] = utc_now_iso()
+        save_store()
+        return migrated
 
-    # NOTE: this updates in-memory on read; leaving as-is
-    req["updated_at"] = utc_now_iso()
-    return slot
+    # Case 3: missing/unknown → initialize empty
+    new_slot = {"diagram": {}, "version": 1}
+    ev["diagram"] = new_slot
+    ev["updated_at"] = utc_now_iso()
+    save_store()
+    return new_slot
+
+
+def _next_diagram_version(current: Optional[int], incoming: Optional[int]) -> int:
+    if isinstance(current, int) and current >= 1:
+        return current + 1
+    if isinstance(incoming, int) and incoming >= 1:
+        return incoming
+    return 1
+
+
+def _coerce_incoming_diagram_payload(
+    payload: Any,
+) -> Tuple[Dict[str, Any], Optional[int]]:
+    """
+    Accept BOTH payload shapes:
+      A) { "diagram": <doc>, "version": <int> }
+      B) <doc>   (raw diagram doc)
+    Return: (doc, incoming_version)
+    """
+    if not isinstance(payload, dict):
+        return {}, None
+
+    incoming_version = (
+        payload.get("version") if isinstance(payload.get("version"), int) else None
+    )
+
+    # Wrapped
+    if "diagram" in payload and isinstance(payload.get("diagram"), dict):
+        return payload.get("diagram") or {}, incoming_version
+
+    # Raw doc
+    return payload, incoming_version
+
+
+def _is_effectively_empty_diagram(doc: Dict[str, Any]) -> bool:
+    """
+    Prevent accidental wipes. We treat these as empty:
+      - {}
+      - {"levels": []}
+      - {"levels": [{... empty ...}] }  (optional, keep simple)
+    """
+    if not isinstance(doc, dict):
+        return True
+    if doc == {}:
+        return True
+    if (
+        "levels" in doc
+        and isinstance(doc.get("levels"), list)
+        and len(doc.get("levels")) == 0
+    ):
+        return True
+    return False
+
+
+def _apply_event_patch(ev: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    for k, v in patch.items():
+        if k in ("start_date", "end_date") and isinstance(v, datetime):
+            ev[k] = v.isoformat()
+        else:
+            ev[k] = v
+    ev["updated_at"] = utc_now_iso()
+    save_store()
+    return _as_event_dict(ev)
 
 
 # -------------------------------------------------------------------
-# Routes (Events)
+# Organizer endpoints
 # -------------------------------------------------------------------
 
 
-@router.get("/organizer/events", response_model=List[Event])
-def list_organizer_events():
-    return [normalize_event(e) for e in _EVENTS.values()]
+@router.get("/organizer/events")
+def organizer_list_events():
+    return {"events": [_as_event_dict(e) for e in _EVENTS.values()]}
 
 
-@router.get("/events", response_model=List[Event])
-def list_events_compat():
-    # legacy compatibility
-    return [normalize_event(e) for e in _EVENTS.values()]
-
-
-@router.get("/public/events", response_model=List[Event])
-def list_public_events():
-    """
-    Vendor browsing endpoint.
-    Prefer published + not archived.
-    If none are published yet (dev), return all non-archived so the UI works.
-    """
-    all_events = [normalize_event(e) for e in _EVENTS.values()]
-    published = [e for e in all_events if e.get("published") and not e.get("archived")]
-    if published:
-        return published
-    return [e for e in all_events if not e.get("archived")]
-
-
-@router.get("/vendor/events", response_model=List[Event])
-def list_vendor_events_alias():
-    # Back-compat alias for vendor UI
-    return list_public_events()
-
-
-@router.post("/organizer/events", response_model=Event)
-def create_event(payload: EventCreate):
-    event_id = next_event_id()
-    now = utc_now_iso()
-
-    event = {
-        "id": event_id,
-        **payload.model_dump(),
-        "created_at": now,
-        "updated_at": now,
+@router.post("/organizer/events")
+def organizer_create_event(payload: EventCreate):
+    eid = next_event_id()
+    e = {
+        "id": eid,
+        "title": payload.title,
+        "description": payload.description,
+        "start_date": payload.start_date.isoformat() if payload.start_date else None,
+        "end_date": payload.end_date.isoformat() if payload.end_date else None,
+        "venue_name": payload.venue_name,
+        "street_address": payload.street_address,
+        "city": payload.city,
+        "state": payload.state,
+        "zip_code": payload.zip_code,
+        "ticket_sales_url": payload.ticket_sales_url,
+        "google_maps_url": payload.google_maps_url,
+        "category": payload.category,
+        "heroImageUrl": payload.heroImageUrl,
+        "imageUrls": payload.imageUrls or [],
+        "videoUrls": payload.videoUrls or [],
         "published": False,
         "archived": False,
         "requirements_published": False,
         "layout_published": False,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "diagram": {"diagram": {}, "version": 1},
     }
-
-    _EVENTS[event_id] = event
-    ensure_requirements_slot(event_id)
-
+    _EVENTS[eid] = e
     save_store()
-    return normalize_event(event)
+    return _as_event_dict(e)
 
 
-# legacy create alias (fixes “Method Not Allowed” if UI still POSTs /events)
-@router.post("/events", response_model=Event)
-def create_event_compat(payload: EventCreate):
-    return create_event(payload)
+@router.get("/organizer/events/{event_id}")
+def organizer_get_event(event_id: int):
+    return _as_event_dict(_get_event_or_404(event_id))
 
 
-@router.get("/organizer/events/{event_id}", response_model=Event)
-def get_event(event_id: int):
-    ev = get_event_or_404(event_id)
-    return normalize_event(ev)
+@router.put("/organizer/events/{event_id}")
+def organizer_update_event(event_id: int, payload: EventUpdate):
+    ev = _get_event_or_404(event_id)
+    patch = payload.model_dump(exclude_unset=True)
+    return _apply_event_patch(ev, patch)
 
 
-@router.put("/organizer/events/{event_id}", response_model=Event)
-def update_event(event_id: int, payload: EventCreate):
-    ev = get_event_or_404(event_id)
-    for k, v in payload.model_dump().items():
-        ev[k] = v
-    ev["updated_at"] = utc_now_iso()
-    save_store()
-    return normalize_event(ev)
-
-
-@router.post("/organizer/events/{event_id}/publish", response_model=Event)
-def publish_event(event_id: int):
-    ev = get_event_or_404(event_id)
-    if ev.get("archived"):
-        raise HTTPException(status_code=400, detail="Cannot publish archived event")
-
-    ev["published"] = True
-    ev["updated_at"] = utc_now_iso()
-    save_store()
-    return normalize_event(ev)
-
-
-@router.post("/organizer/events/{event_id}/unpublish", response_model=Event)
-def unpublish_event(event_id: int):
-    ev = get_event_or_404(event_id)
-    ev["published"] = False
-    ev["updated_at"] = utc_now_iso()
-    save_store()
-    return normalize_event(ev)
-
-
-@router.post("/organizer/events/{event_id}/archive", response_model=Event)
-def archive_event(event_id: int):
-    ev = get_event_or_404(event_id)
-    ev["archived"] = True
-    ev["updated_at"] = utc_now_iso()
-    save_store()
-    return normalize_event(ev)
+@router.patch("/organizer/events/{event_id}")
+def organizer_patch_event(event_id: int, payload: Dict[str, Any] = Body(default={})):
+    ev = _get_event_or_404(event_id)
+    return _apply_event_patch(ev, dict(payload or {}))
 
 
 @router.delete("/organizer/events/{event_id}")
-def delete_event(event_id: int):
-    """
-    Delete an event and cascade-delete its applications (dev store).
-    Also removes the requirements slot if present.
-    """
+def organizer_delete_event(event_id: int):
     eid = int(event_id)
-
-    ev = _EVENTS.get(eid)
-    if not ev:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    to_delete = [
-        app_id
-        for app_id, app in _APPLICATIONS.items()
-        if int(app.get("event_id", -1)) == eid
-    ]
-    for app_id in to_delete:
-        _APPLICATIONS.pop(int(app_id), None)
-
-    _REQUIREMENTS.pop(eid, None)
-    _EVENTS.pop(eid, None)
-
+    if eid in _EVENTS:
+        del _EVENTS[eid]
+    if eid in _REQUIREMENTS:
+        del _REQUIREMENTS[eid]
     save_store()
-    return {"ok": True, "deleted_event_id": eid, "deleted_applications": len(to_delete)}
-
-
-# -------------------------------------------------------------------
-# Requirements
-# Shape: { "version": int, "requirements": {...} }
-# -------------------------------------------------------------------
+    return {"ok": True}
 
 
 @router.get("/organizer/events/{event_id}/requirements")
-def get_event_requirements_organizer(event_id: int):
-    get_event_or_404(event_id)
-    return ensure_requirements_slot(event_id)
+def organizer_get_requirements(event_id: int):
+    _get_event_or_404(event_id)
+    return _REQUIREMENTS.get(int(event_id), {}) or {}
 
 
 @router.put("/organizer/events/{event_id}/requirements")
-def save_event_requirements_organizer(
-    event_id: int, payload: Dict[str, Any] = Body(...)
-):
-    get_event_or_404(event_id)
-
-    version = payload.get("version", 2)
-    try:
-        version = int(version or 2)
-    except Exception:
-        version = 2
-
-    requirements = payload.get("requirements", {}) or {}
-    if not isinstance(requirements, dict):
-        requirements = {}
-
-    requirements["event_id"] = int(event_id)
-    requirements["updated_at"] = utc_now_iso()
-
-    _REQUIREMENTS[int(event_id)] = {"version": version, "requirements": requirements}
-
-    ev = _EVENTS.get(int(event_id))
-    if ev is not None:
-        ev["requirements_published"] = True
-        ev["updated_at"] = utc_now_iso()
-
+def organizer_put_requirements(event_id: int, payload: Dict[str, Any]):
+    _get_event_or_404(event_id)
+    _REQUIREMENTS[int(event_id)] = payload or {}
     save_store()
-    return _REQUIREMENTS[int(event_id)]
+    return {"ok": True}
 
 
-@router.post("/organizer/events/{event_id}/requirements")
-def save_event_requirements_organizer_post(
-    event_id: int, payload: Dict[str, Any] = Body(...)
-):
-    return save_event_requirements_organizer(event_id, payload)
+@router.post("/organizer/events/{event_id}/publish")
+def organizer_publish_event(event_id: int):
+    ev = _get_event_or_404(event_id)
+    ev["published"] = True
+    ev["archived"] = False
+    ev["updated_at"] = utc_now_iso()
+    save_store()
+    return _as_event_dict(ev)
+
+
+# ✅ Organizer diagram endpoints — RETURN RAW DOC
+@router.get("/organizer/events/{event_id}/diagram")
+def organizer_get_event_diagram(event_id: int):
+    slot = _ensure_diagram_slot(event_id)
+    doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
+    return doc or {}
+
+
+@router.put("/organizer/events/{event_id}/diagram")
+def organizer_put_event_diagram(event_id: int, payload: Dict[str, Any]):
+    ev = _get_event_or_404(event_id)
+    slot = _ensure_diagram_slot(event_id)
+
+    incoming_doc, incoming_version = _coerce_incoming_diagram_payload(payload)
+    existing_doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
+
+    # ✅ Overwrite guard: don't wipe a non-empty diagram with empty payload
+    if _is_effectively_empty_diagram(
+        incoming_doc
+    ) and not _is_effectively_empty_diagram(existing_doc):
+        # just return existing doc (no-op)
+        return existing_doc or {}
+
+    current_version = slot.get("version") if isinstance(slot, dict) else None
+    next_version = _next_diagram_version(current_version, incoming_version)
+
+    ev["diagram"] = {"diagram": incoming_doc or {}, "version": next_version}
+    ev["updated_at"] = utc_now_iso()
+    save_store()
+
+    return incoming_doc or {}
+
+
+# -------------------------------------------------------------------
+# Public endpoints
+# -------------------------------------------------------------------
+
+
+@router.get("/public/events")
+def public_list_events():
+    out = []
+    for e in _EVENTS.values():
+        if e.get("published") and not e.get("archived"):
+            out.append(_as_event_dict(e))
+    return {"events": out}
+
+
+@router.get("/public/events/{event_id}")
+def public_get_event(event_id: int):
+    ev = _get_event_or_404(event_id)
+    if not ev.get("published") or ev.get("archived"):
+        raise HTTPException(status_code=404, detail="Event not found")
+    return _as_event_dict(ev)
+
+
+@router.get("/events/{event_id}")
+def public_get_event_alias(event_id: int):
+    return public_get_event(event_id)
 
 
 @router.get("/events/{event_id}/requirements")
-def get_event_requirements_public(event_id: int):
-    get_event_or_404(event_id)
-    return ensure_requirements_slot(event_id)
+def public_get_event_requirements(event_id: int):
+    _get_event_or_404(event_id)
+    return _REQUIREMENTS.get(int(event_id), {}) or {}
+
+
+@router.get("/events/{event_id}/diagram")
+def public_get_event_diagram(event_id: int):
+    _get_event_or_404(event_id)
+    slot = _ensure_diagram_slot(event_id)
+    doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
+    return doc or {}
+
+
+@router.get("/vendor/events")
+def vendor_list_events_alias():
+    return public_list_events()
+
+
+@router.patch("/events/{event_id}")
+def public_patch_event_alias(event_id: int, payload: Dict[str, Any] = Body(default={})):
+    ev = _get_event_or_404(event_id)
+    return _apply_event_patch(ev, dict(payload or {}))

@@ -5,9 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/events": "http://localhost:8002",
+      // ✅ only proxy API/auth paths (not SPA routes)
+      "/api": "http://localhost:8002",
       "/auth": "http://localhost:8002",
-      // DO NOT proxy "/organizer" because your SPA routes live there
     },
   },
 });

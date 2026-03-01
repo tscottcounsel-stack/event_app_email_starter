@@ -1,8 +1,14 @@
+// src/pages/OrganizerCreateEventPage.tsx
 import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../auth/AuthContext";
+import { buildAuthHeaders } from "../auth/authHeaders";
 
-type CreateEventPayload = {
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+
+type NextStep = "requirements" | "layout" | "details";
+
+type CreatePayload = {
   title: string;
   description?: string;
 
@@ -10,130 +16,101 @@ type CreateEventPayload = {
   end_date?: string;
 
   venue_name?: string;
-  street_address?: string;
+  street_address?: string; // ✅ Address
   city?: string;
   state?: string;
-  zip_code?: string;
-  google_maps_url?: string;
 
-  category?: string;
-  expected_attendees?: number;
-  setup_time?: string;
-  additional_notes?: string;
+  // ✅ Public flyer links
+  ticketSalesUrl?: string;
+  googleMapsLink?: string;
 
-  image_urls?: string[];
-  video_urls?: string[];
-  ticket_urls?: string[];
+  // ✅ Media
+  heroImageUrl?: string;
+  imageUrls?: string[];
+  videoUrls?: string[];
 };
 
-type NextStep = "requirements" | "review" | "layout";
-
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
-
-async function postJson<T>(
-  path: string,
-  body: any,
-  opts?: { accessToken?: string }
-): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-
-  // If your backend expects JWT auth, include it when available.
-  if (opts?.accessToken) {
-    headers.Authorization = `Bearer ${opts.accessToken}`;
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const ct = res.headers.get("content-type") || "";
-  const isJson = ct.includes("application/json");
-  const data = isJson ? await res.json().catch(() => null) : await res.text().catch(() => null);
-
-  if (!res.ok) {
-    const msg =
-      (isJson && data && (data.detail || data.message || data.error)) ||
-      (typeof data === "string" ? data : null) ||
-      `Request failed (${res.status})`;
-    throw new Error(msg);
-  }
-
-  return data as T;
-}
-
 function cleanStr(v?: string) {
-  const s = (v ?? "").trim();
+  const s = String(v ?? "").trim();
   return s.length ? s : undefined;
 }
 
-function asIntOrUndefined(v: string) {
-  const s = v.trim();
-  if (!s) return undefined;
-  const n = Number(s);
-  if (!Number.isFinite(n)) return undefined;
-  return Math.max(0, Math.floor(n));
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error("Failed to read file"));
+    r.onload = () => resolve(String(r.result || ""));
+    r.readAsDataURL(file);
+  });
 }
 
 function buildNextUrl(eventId: string | number, next: NextStep) {
-  if (next === "review") return `/organizer/events/${eventId}/review`;
   if (next === "layout") return `/organizer/events/${eventId}/layout`;
+  if (next === "details") return `/organizer/events/${eventId}/details`;
   return `/organizer/events/${eventId}/requirements`;
 }
 
 export default function OrganizerCreateEventPage() {
   const navigate = useNavigate();
-  const { accessToken } = useAuth();
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ choose where "Continue" goes after create
+  // ✅ v1 behavior: create -> requirements
   const [nextStep, setNextStep] = useState<NextStep>("requirements");
 
-  const [form, setForm] = useState<CreateEventPayload>({
-    title: "",
-    description: "",
+  // core
+  const [title, setTitle] = useState("");
+  const [venue, setVenue] = useState("");
+  const [address, setAddress] = useState("");
+  const [city, setCity] = useState("");
+  const [stateCode, setStateCode] = useState("");
 
-    start_date: "",
-    end_date: "",
+  const [startDate, setStartDate] = useState(""); // YYYY-MM-DD or ISO
+  const [endDate, setEndDate] = useState("");
+  const [description, setDescription] = useState("");
 
-    venue_name: "",
-    street_address: "",
-    city: "",
-    state: "",
-    zip_code: "",
-    google_maps_url: "",
+  // flyer links
+  const [ticketSalesUrl, setTicketSalesUrl] = useState("");
+  const [googleMapsLink, setGoogleMapsLink] = useState("");
 
-    category: "",
-    expected_attendees: undefined,
-    setup_time: "",
-    additional_notes: "",
-
-    image_urls: [],
-    video_urls: [],
-    ticket_urls: [],
-  });
+  // media
+  const [heroImageUrl, setHeroImageUrl] = useState("");
+  const [imageUrls, setImageUrls] = useState<string[]>([]);
+  const [videoUrls, setVideoUrls] = useState<string[]>([]);
+  const [videoDraft, setVideoDraft] = useState("");
 
   const validationError = useMemo(() => {
-    const title = (form.title || "").trim();
-    if (!title) return "Event title is required.";
-    if (title.length < 3) return "Event title must be at least 3 characters.";
-
-    const sd = (form.start_date || "").trim();
-    const ed = (form.end_date || "").trim();
-    if (sd && ed && ed < sd) return "End date cannot be before start date.";
-
+    const t = title.trim();
+    if (!t) return "Event title is required.";
+    if (t.length < 3) return "Event title must be at least 3 characters.";
+    if (startDate && endDate && endDate < startDate) return "End date cannot be before start date.";
     return null;
-  }, [form.title, form.start_date, form.end_date]);
+  }, [title, startDate, endDate]);
 
-  const update = <K extends keyof CreateEventPayload>(key: K, value: CreateEventPayload[K]) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  };
+  async function createEvent(payload: CreatePayload) {
+    const headers = { ...buildAuthHeaders(), "Content-Type": "application/json" };
+
+    const res = await fetch(`${API_BASE}/organizer/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    const ct = res.headers.get("content-type") || "";
+    const isJson = ct.includes("application/json");
+    const data = isJson ? await res.json().catch(() => null) : await res.text().catch(() => null);
+
+    if (!res.ok) {
+      const msg =
+        (isJson && data && (data.detail || data.message || data.error)) ||
+        (typeof data === "string" ? data : null) ||
+        `Request failed (${res.status})`;
+      throw new Error(msg);
+    }
+
+    return data;
+  }
 
   const onCreate = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -147,42 +124,37 @@ export default function OrganizerCreateEventPage() {
     try {
       setSaving(true);
 
-      const payload: CreateEventPayload = {
-        title: form.title.trim(),
-        description: cleanStr(form.description),
+      const payload: CreatePayload = {
+        title: title.trim(),
+        description: cleanStr(description),
 
-        start_date: cleanStr(form.start_date),
-        end_date: cleanStr(form.end_date),
+        venue_name: cleanStr(venue),
+        street_address: cleanStr(address),
+        city: cleanStr(city),
+        state: cleanStr(stateCode),
 
-        venue_name: cleanStr(form.venue_name),
-        street_address: cleanStr(form.street_address),
-        city: cleanStr(form.city),
-        state: cleanStr(form.state),
-        zip_code: cleanStr(form.zip_code),
-        google_maps_url: cleanStr(form.google_maps_url),
+        start_date: cleanStr(startDate),
+        end_date: cleanStr(endDate),
 
-        category: cleanStr(form.category),
-        expected_attendees: form.expected_attendees,
-        setup_time: cleanStr(form.setup_time),
-        additional_notes: cleanStr(form.additional_notes),
+        ticketSalesUrl: cleanStr(ticketSalesUrl),
+        googleMapsLink: cleanStr(googleMapsLink),
 
-        image_urls: Array.isArray(form.image_urls) ? form.image_urls.filter(Boolean) : [],
-        video_urls: Array.isArray(form.video_urls) ? form.video_urls.filter(Boolean) : [],
-        ticket_urls: Array.isArray(form.ticket_urls) ? form.ticket_urls.filter(Boolean) : [],
+        heroImageUrl: cleanStr(heroImageUrl),
+        imageUrls: imageUrls.filter(Boolean),
+        videoUrls: videoUrls.filter(Boolean),
       };
 
-      const created: any = await postJson("/events", payload, { accessToken });
+      // ✅ FIX: correct endpoint
+      const created: any = await createEvent(payload);
 
       const eventId =
+        created?.event?.id ??
         created?.id ??
         created?.event_id ??
-        created?.eventId ??
-        created?.event?.id ??
-        created?.event?.event_id;
+        created?.eventId;
 
       if (!eventId) throw new Error("Event created, but no event id was returned by the API.");
 
-      // ✅ Navigate to whichever next step you selected
       navigate(buildNextUrl(eventId, nextStep));
     } catch (err: any) {
       setError(err?.message || "Unable to create event. Please try again.");
@@ -191,279 +163,371 @@ export default function OrganizerCreateEventPage() {
     }
   };
 
+  async function onUploadHero(file: File | null) {
+    if (!file) return;
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      setHeroImageUrl(dataUrl);
+    } catch (e: any) {
+      setError(e?.message || "Failed to upload hero image.");
+    }
+  }
+
+  async function onAddImages(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    try {
+      const list = Array.from(files);
+      const urls = await Promise.all(list.map(fileToDataUrl));
+      setImageUrls((prev) => [...prev, ...urls]);
+    } catch (e: any) {
+      setError(e?.message || "Failed to upload images.");
+    }
+  }
+
+  function removeImage(idx: number) {
+    setImageUrls((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function addVideoUrl() {
+    const v = videoDraft.trim();
+    if (!v) return;
+    setVideoUrls((prev) => Array.from(new Set([...prev, v])));
+    setVideoDraft("");
+  }
+
+  function removeVideo(idx: number) {
+    setVideoUrls((prev) => prev.filter((_, i) => i !== idx));
+  }
+
   return (
-    <div style={{ padding: 32, maxWidth: 1100, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+    <div className="mx-auto max-w-4xl p-6">
+      <div className="mb-5 flex items-start justify-between gap-3">
         <div>
-          <h1 style={{ fontSize: 36, fontWeight: 900, margin: 0 }}>Create Event</h1>
-          <p style={{ marginTop: 8, opacity: 0.7 }}>
-            Add general event details. Choose where you want to go next after creating the event.
+          <h1 className="text-3xl font-extrabold">Create Event</h1>
+          <p className="mt-2 text-sm text-gray-600">
+            Create the event, then continue to the next step (v1 defaults to Requirements).
           </p>
 
-          <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7 }}>Next step:</div>
-            <label style={pill(nextStep === "requirements")}>
-              <input
-                type="radio"
-                name="nextStep"
-                value="requirements"
-                checked={nextStep === "requirements"}
-                onChange={() => setNextStep("requirements")}
-                style={{ display: "none" }}
-              />
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="text-xs font-bold text-gray-500">Next step:</div>
+
+            <button
+              type="button"
+              className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                nextStep === "requirements" ? "bg-black text-white" : "bg-white"
+              }`}
+              onClick={() => setNextStep("requirements")}
+            >
               Requirements
-            </label>
-            <label style={pill(nextStep === "review")}>
-              <input
-                type="radio"
-                name="nextStep"
-                value="review"
-                checked={nextStep === "review"}
-                onChange={() => setNextStep("review")}
-                style={{ display: "none" }}
-              />
-              Review
-            </label>
-            <label style={pill(nextStep === "layout")}>
-              <input
-                type="radio"
-                name="nextStep"
-                value="layout"
-                checked={nextStep === "layout"}
-                onChange={() => setNextStep("layout")}
-                style={{ display: "none" }}
-              />
-              Map / Layout
-            </label>
+            </button>
+
+            <button
+              type="button"
+              className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                nextStep === "layout" ? "bg-black text-white" : "bg-white"
+              }`}
+              onClick={() => setNextStep("layout")}
+            >
+              Layout
+            </button>
+
+            <button
+              type="button"
+              className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                nextStep === "details" ? "bg-black text-white" : "bg-white"
+              }`}
+              onClick={() => setNextStep("details")}
+            >
+              Details
+            </button>
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
-          <button type="button" onClick={() => navigate("/organizer/events")} style={secondaryBtn} disabled={saving}>
-            ← Back to Events
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="rounded-lg border bg-white px-4 py-2 text-sm font-semibold"
+            onClick={() => navigate("/organizer/events")}
+            disabled={saving}
+          >
+            Cancel
           </button>
-          <button type="button" onClick={onCreate} style={primaryBtn} disabled={saving}>
+
+          <button
+            type="button"
+            className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+            onClick={onCreate}
+            disabled={saving}
+          >
             {saving ? "Creating…" : "Create & Continue →"}
           </button>
         </div>
       </div>
 
-      {error && <div style={{ marginTop: 14, ...errorBox }}>{error}</div>}
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          {error}
+        </div>
+      )}
 
-      <form onSubmit={onCreate} style={{ marginTop: 22, display: "grid", gap: 18 }}>
-        <div style={card}>
-          <h2 style={cardTitle}>General</h2>
+      <form onSubmit={onCreate} className="space-y-6">
+        {/* Core */}
+        <div className="rounded-xl border bg-white p-5">
+          <div className="text-lg font-bold">Core Info</div>
 
-          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div>
-              <div style={label}>Event title *</div>
+              <div className="text-xs font-bold text-gray-600">Title *</div>
               <input
-                style={input}
-                value={form.title}
-                onChange={(e) => update("title", e.target.value)}
-                placeholder="e.g., Atlanta Summer Makers Expo"
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Event title"
               />
             </div>
 
             <div>
-              <div style={label}>Category</div>
+              <div className="text-xs font-bold text-gray-600">Venue Name</div>
               <input
-                style={input}
-                value={form.category ?? ""}
-                onChange={(e) => update("category", e.target.value)}
-                placeholder="e.g., Tech, Art, Food, Music"
-              />
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <div style={label}>Description</div>
-            <textarea
-              style={{ ...input, minHeight: 90 }}
-              value={form.description ?? ""}
-              onChange={(e) => update("description", e.target.value)}
-              placeholder="What is this event about?"
-            />
-          </div>
-
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-            <div>
-              <div style={label}>Start date</div>
-              <input
-                type="date"
-                style={input}
-                value={form.start_date ?? ""}
-                onChange={(e) => update("start_date", e.target.value)}
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={venue}
+                onChange={(e) => setVenue(e.target.value)}
+                placeholder="Venue / location name"
               />
             </div>
 
-            <div>
-              <div style={label}>End date</div>
+            <div className="md:col-span-2">
+              <div className="text-xs font-bold text-gray-600">Address</div>
               <input
-                type="date"
-                style={input}
-                value={form.end_date ?? ""}
-                onChange={(e) => update("end_date", e.target.value)}
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="Street address (e.g., 123 Main St)"
+              />
+              <div className="mt-1 text-xs text-gray-500">
+                Used for your flyer and for generating the map link (if you don’t paste one).
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-bold text-gray-600">City</div>
+              <input
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="City"
               />
             </div>
 
             <div>
-              <div style={label}>Expected attendees</div>
+              <div className="text-xs font-bold text-gray-600">State</div>
               <input
-                style={input}
-                value={form.expected_attendees?.toString() ?? ""}
-                onChange={(e) => update("expected_attendees", asIntOrUndefined(e.target.value))}
-                placeholder="e.g., 2500"
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={stateCode}
+                onChange={(e) => setStateCode(e.target.value)}
+                placeholder="State (e.g., GA)"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs font-bold text-gray-600">Start Date</div>
+              <input
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                placeholder="YYYY-MM-DD or ISO"
+              />
+            </div>
+
+            <div>
+              <div className="text-xs font-bold text-gray-600">End Date</div>
+              <input
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                placeholder="YYYY-MM-DD or ISO"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <div className="text-xs font-bold text-gray-600">Description</div>
+              <textarea
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                rows={4}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What is this event about?"
               />
             </div>
           </div>
         </div>
 
-        <div style={card}>
-          <h2 style={cardTitle}>Location</h2>
+        {/* Public Links */}
+        <div className="rounded-xl border bg-white p-5">
+          <div className="text-lg font-bold">Public Links</div>
 
-          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div>
-              <div style={label}>Venue name</div>
+              <div className="text-xs font-bold text-gray-600">Ticket Sales URL</div>
               <input
-                style={input}
-                value={form.venue_name ?? ""}
-                onChange={(e) => update("venue_name", e.target.value)}
-                placeholder="e.g., Georgia World Congress Center"
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={ticketSalesUrl}
+                onChange={(e) => setTicketSalesUrl(e.target.value)}
+                placeholder="https://tickets.example.com/your-event"
               />
             </div>
 
             <div>
-              <div style={label}>Google Maps URL</div>
+              <div className="text-xs font-bold text-gray-600">Google Maps Link</div>
               <input
-                style={input}
-                value={form.google_maps_url ?? ""}
-                onChange={(e) => update("google_maps_url", e.target.value)}
-                placeholder="https://maps.google.com/..."
+                className="mt-1 w-full rounded-lg border px-3 py-2"
+                value={googleMapsLink}
+                onChange={(e) => setGoogleMapsLink(e.target.value)}
+                placeholder="https://maps.google.com/?q=..."
               />
+              <div className="mt-1 text-xs text-gray-500">
+                If blank, your public page can generate one from Address + City/State.
+              </div>
             </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <div style={label}>Street address</div>
-            <input
-              style={input}
-              value={form.street_address ?? ""}
-              onChange={(e) => update("street_address", e.target.value)}
-              placeholder="123 Main St"
-            />
-          </div>
-
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 160px 160px 160px", gap: 12 }}>
-            <div>
-              <div style={label}>City</div>
-              <input style={input} value={form.city ?? ""} onChange={(e) => update("city", e.target.value)} />
-            </div>
-            <div>
-              <div style={label}>State</div>
-              <input style={input} value={form.state ?? ""} onChange={(e) => update("state", e.target.value)} />
-            </div>
-            <div>
-              <div style={label}>ZIP</div>
-              <input style={input} value={form.zip_code ?? ""} onChange={(e) => update("zip_code", e.target.value)} />
-            </div>
-            <div>
-              <div style={label}>Setup time</div>
-              <input
-                style={input}
-                value={form.setup_time ?? ""}
-                onChange={(e) => update("setup_time", e.target.value)}
-                placeholder="e.g., 8:00 AM"
-              />
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <div style={label}>Additional notes</div>
-            <textarea
-              style={{ ...input, minHeight: 80 }}
-              value={form.additional_notes ?? ""}
-              onChange={(e) => update("additional_notes", e.target.value)}
-              placeholder="Anything vendors should know (parking, load-in, rules, etc.)"
-            />
           </div>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-          <button type="button" onClick={() => navigate("/organizer/events")} style={secondaryBtn} disabled={saving}>
+        {/* Media */}
+        <div className="rounded-xl border bg-white p-5">
+          <div className="text-lg font-bold">Media</div>
+
+          <div className="mt-4 space-y-4">
+            {/* Hero */}
+            <div>
+              <div className="text-xs font-bold text-gray-600">Hero Image</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  className="w-full rounded-lg border px-3 py-2 md:flex-1"
+                  value={heroImageUrl}
+                  onChange={(e) => setHeroImageUrl(e.target.value)}
+                  placeholder="(auto-filled on upload) or paste a URL/dataURL"
+                />
+                <label className="cursor-pointer rounded-lg border bg-white px-4 py-2 text-sm font-semibold">
+                  Upload Hero
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => onUploadHero(e.target.files?.[0] || null)}
+                  />
+                </label>
+              </div>
+
+              {heroImageUrl ? (
+                <div className="mt-3 overflow-hidden rounded-xl border">
+                  <img
+                    src={heroImageUrl}
+                    alt="Hero preview"
+                    className="h-56 w-full object-cover"
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            {/* Gallery Images */}
+            <div>
+              <div className="text-xs font-bold text-gray-600">Gallery Images</div>
+
+              <div className="mt-2">
+                <label className="cursor-pointer rounded-lg border bg-white px-4 py-2 text-sm font-semibold">
+                  Upload Images
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => onAddImages(e.target.files)}
+                  />
+                </label>
+              </div>
+
+              {imageUrls.length > 0 ? (
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  {imageUrls.map((u, idx) => (
+                    <div key={`${u}-${idx}`} className="overflow-hidden rounded-xl border bg-white">
+                      <img src={u} alt={`img-${idx}`} className="h-32 w-full object-cover" />
+                      <button
+                        type="button"
+                        className="w-full border-t px-3 py-2 text-sm font-semibold text-red-700"
+                        onClick={() => removeImage(idx)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-2 text-sm text-gray-500">No images uploaded yet.</div>
+              )}
+            </div>
+
+            {/* Videos */}
+            <div>
+              <div className="text-xs font-bold text-gray-600">Video URLs</div>
+              <div className="mt-2 flex gap-2">
+                <input
+                  className="w-full rounded-lg border px-3 py-2"
+                  value={videoDraft}
+                  onChange={(e) => setVideoDraft(e.target.value)}
+                  placeholder="https://youtube.com/..."
+                />
+                <button
+                  type="button"
+                  className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                  onClick={addVideoUrl}
+                >
+                  Add
+                </button>
+              </div>
+
+              {videoUrls.length > 0 ? (
+                <ul className="mt-3 space-y-2">
+                  {videoUrls.map((v, idx) => (
+                    <li key={`${v}-${idx}`} className="flex items-center justify-between gap-2 rounded-lg border p-2">
+                      <a className="truncate text-sm text-blue-700 underline" href={v} target="_blank" rel="noreferrer">
+                        {v}
+                      </a>
+                      <button
+                        type="button"
+                        className="rounded-lg border px-3 py-1 text-xs font-semibold text-red-700"
+                        onClick={() => removeVideo(idx)}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 text-sm text-gray-500">No video URLs added yet.</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            className="rounded-lg border bg-white px-4 py-2 text-sm font-semibold"
+            onClick={() => navigate("/organizer/events")}
+            disabled={saving}
+          >
             Cancel
           </button>
-          <button type="submit" style={primaryBtn} disabled={saving}>
+
+          <button
+            type="submit"
+            className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+            disabled={saving}
+          >
             {saving ? "Creating…" : "Create & Continue →"}
           </button>
         </div>
       </form>
     </div>
   );
-}
-
-/* ---------------- styles ---------------- */
-
-const card: React.CSSProperties = {
-  background: "white",
-  borderRadius: 16,
-  padding: 22,
-  border: "1px solid rgba(0,0,0,0.06)",
-  boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
-};
-
-const cardTitle: React.CSSProperties = { margin: 0, fontSize: 18, fontWeight: 900 };
-
-const label: React.CSSProperties = { fontSize: 12, fontWeight: 900, opacity: 0.7 };
-
-const input: React.CSSProperties = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: 10,
-  border: "1px solid rgba(0,0,0,0.12)",
-  fontSize: 14,
-  marginTop: 8,
-  background: "white",
-};
-
-const primaryBtn: React.CSSProperties = {
-  background: "#0f172a",
-  color: "white",
-  borderRadius: 12,
-  padding: "10px 18px",
-  border: "none",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const secondaryBtn: React.CSSProperties = {
-  background: "white",
-  borderRadius: 12,
-  padding: "10px 18px",
-  border: "1px solid rgba(0,0,0,0.15)",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const errorBox: React.CSSProperties = {
-  padding: 12,
-  borderRadius: 12,
-  border: "1px solid rgba(220, 38, 38, 0.25)",
-  background: "rgba(220, 38, 38, 0.06)",
-  color: "rgb(153,27,27)",
-  fontSize: 14,
-  whiteSpace: "pre-wrap",
-};
-
-function pill(active: boolean): React.CSSProperties {
-  return {
-    padding: "8px 12px",
-    borderRadius: 999,
-    border: active ? "1px solid rgba(99,102,241,0.6)" : "1px solid rgba(0,0,0,0.12)",
-    background: active ? "rgba(99,102,241,0.12)" : "white",
-    fontWeight: 900,
-    fontSize: 12,
-    cursor: "pointer",
-    userSelect: "none",
-  };
 }

@@ -129,6 +129,8 @@ export default function VendorPublicProfilePage() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
+  const [logoFailed, setLogoFailed] = useState(false);
+
   // localStorage mode (vendor self)
   const localProfile = useMemo(() => {
     return safeJsonParse<VendorProfile>(localStorage.getItem(LS_PROFILE_KEY)) || {};
@@ -233,7 +235,30 @@ export default function VendorPublicProfilePage() {
   }, [isOrganizerView, vendorId]);
 
   const profile = isOrganizerView ? remoteProfile || {} : localProfile;
+
+const logoSrc = useMemo(() => {
+  if (logoFailed) return "";
+
+  // 1) data URI logo (older style)
+  const dataUrl = String((profile as any).logoDataUrl || (profile as any).logo_data_url || "").trim();
+  if (dataUrl) return dataUrl;
+
+  // 2) file-path logo (backend style)
+  const fileUrl = String((profile as any).logoUrl || (profile as any).logo_url || "").trim();
+  if (fileUrl) {
+    if (fileUrl.startsWith("http://") || fileUrl.startsWith("https://")) return fileUrl;
+    if (fileUrl.startsWith("/")) return `${API_BASE}${fileUrl}`;
+    return `${API_BASE}/${fileUrl}`;
+  }
+
+  return "";
+}, [profile, logoFailed]);
+
   const isVerified = isOrganizerView ? !!profile.verified : localVerified;
+
+  useEffect(() => {
+    setLogoFailed(false);
+  }, [vendorId, (profile as any).logoDataUrl, (profile as any).logoUrl]);
 
   const name = (profile.businessName || (isOrganizerView ? "Vendor Business" : "Your Business")).trim();
   const desc = (profile.businessDescription || "").trim();
@@ -318,8 +343,13 @@ export default function VendorPublicProfilePage() {
               <div className="flex items-center gap-6">
                 {/* Logo */}
                 <div className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-                  {profile.logoDataUrl ? (
-                    <img src={profile.logoDataUrl} alt="Logo" className="h-full w-full object-cover" />
+                  {logoSrc ? (
+                    <img
+                      src={logoSrc}
+                      alt="Logo"
+                      className="h-full w-full object-cover"
+                      onError={() => setLogoFailed(true)}
+                    />
                   ) : (
                     <div className="text-4xl font-extrabold text-indigo-600">{initials(name)}</div>
                   )}

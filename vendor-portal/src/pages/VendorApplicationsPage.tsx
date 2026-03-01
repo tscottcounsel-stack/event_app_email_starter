@@ -49,6 +49,12 @@ type ServerApplication = {
 
   notes?: string | null;
   checked?: Record<string, boolean> | null;
+
+  // IMPORTANT: backend may store docs under either key; this page only counts local docs,
+  // but keep these for future display/debug.
+  documents?: Record<string, any> | null;
+  docs?: Record<string, any> | null;
+
   status?: string | null;
   submitted_at?: string | null;
   updated_at?: string | null;
@@ -112,24 +118,24 @@ function parseStatus(raw: any): "draft" | "submitted" | "approved" | "rejected" 
 
 function normalizeRequirements(raw: any): { compliance: RequirementItem[]; documents: DocumentItem[] } {
   if (!raw || typeof raw !== "object") return { compliance: [], documents: [] };
-  const parsed = raw?.requirements ?? raw;
+  const parsed = (raw as any)?.requirements ?? raw;
 
   const complianceRaw =
-    parsed?.compliance ??
-    parsed?.complianceItems ??
-    parsed?.compliance_items ??
-    parsed?.compliance_items_list ??
+    (parsed as any)?.compliance ??
+    (parsed as any)?.complianceItems ??
+    (parsed as any)?.compliance_items ??
+    (parsed as any)?.compliance_items_list ??
     [];
 
   const documentsRaw =
-    parsed?.documents ??
-    parsed?.documentRequirements ??
-    parsed?.document_requirements ??
-    parsed?.document_requirements_list ??
+    (parsed as any)?.documents ??
+    (parsed as any)?.documentRequirements ??
+    (parsed as any)?.document_requirements ??
+    (parsed as any)?.document_requirements_list ??
     [];
 
   const compliance: RequirementItem[] = Array.isArray(complianceRaw)
-    ? complianceRaw
+    ? (complianceRaw as any[])
         .map((c: any) => {
           const id = normalizeId(c?.id || c?.text || c?.label);
           const text = String(c?.text || c?.label || "").trim();
@@ -140,7 +146,7 @@ function normalizeRequirements(raw: any): { compliance: RequirementItem[]; docum
     : [];
 
   const documents: DocumentItem[] = Array.isArray(documentsRaw)
-    ? documentsRaw
+    ? (documentsRaw as any[])
         .map((d: any) => {
           const id = normalizeId(d?.id || d?.name);
           const name = String(d?.name || "").trim();
@@ -233,8 +239,14 @@ function calcCompletion(
   const compTotal = reqCompliance.length;
   const docsTotal = reqDocs.length;
 
-  const compDone = reqCompliance.reduce((acc, c) => acc + (checked[normalizeId(c.id || c.text)] ? 1 : 0), 0);
-  const docsDone = reqDocs.reduce((acc, d) => acc + (docs[normalizeId(d.id || d.name)] ? 1 : 0), 0);
+  const compDone = reqCompliance.reduce(
+    (acc, c) => acc + (checked[normalizeId((c as any).id || c.text)] ? 1 : 0),
+    0
+  );
+  const docsDone = reqDocs.reduce(
+    (acc, d) => acc + (docs[normalizeId((d as any).id || d.name)] ? 1 : 0),
+    0
+  );
 
   const done = compDone + docsDone;
   const total = compTotal + docsTotal;
@@ -252,12 +264,54 @@ function normalizeServerToCard(a: ServerApplication): VendorProgressCard {
     appId,
     applicationId,
     boothId: a.booth_id ? String(a.booth_id) : undefined,
-    checked: (a.checked && typeof a.checked === "object") ? a.checked : {},
+    checked: a.checked && typeof a.checked === "object" ? a.checked : {},
     notes: String(a.notes ?? "").trim(),
     updatedAt: String(a.updated_at || a.submitted_at || new Date().toISOString()),
     status: parseStatus(a.status),
     submittedAt: a.submitted_at ? String(a.submitted_at) : undefined,
   };
+}
+
+/**
+ * Dedup logic:
+ * - Show ONE card per event (prevents “Event #4” from repeating forever).
+ * - Pick the "best" app for that event:
+ *   1) latest by submitted_at/updated_at
+ *   2) if tie, prefer non-draft (submitted/approved/rejected) over draft
+ */
+function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
+  const byEvent: Record<string, VendorProgressCard[]> = {};
+  for (const a of apps) {
+    const eid = normalizeId(a.eventId);
+    if (!eid) continue;
+    byEvent[eid] = byEvent[eid] || [];
+    byEvent[eid].push(a);
+  }
+
+  const primary: VendorProgressCard[] = [];
+  for (const eid of Object.keys(byEvent)) {
+    const list = byEvent[eid].slice();
+    list.sort((a, b) => {
+      const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
+      const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
+      if (tb !== ta) return tb - ta;
+
+      const sa = a.status || "draft";
+      const sb = b.status || "draft";
+      const score = (s: string) => (s === "draft" ? 0 : 1);
+      return score(sb) - score(sa);
+    });
+    primary.push(list[0]);
+  }
+
+  // order events by most recent primary activity
+  primary.sort((a, b) => {
+    const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
+    const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
+    return tb - ta;
+  });
+
+  return primary;
 }
 
 /* ---------------- Page ---------------- */
@@ -267,7 +321,7 @@ export default function VendorApplicationsPage() {
 
   const [loading, setLoading] = useState(true);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [serverApps, setServerApps] = useState<VendorProgressCard[]>([]);
+  const [serverAppsRaw, setServerAppsRaw] = useState<VendorProgressCard[]>([]);
 
   const [reqByEventId, setReqByEventId] = useState<Record<string, LoadedRequirements | null>>({});
   const [localByKey, setLocalByKey] = useState<Record<string, VendorApplyProgress | null>>({});
@@ -309,9 +363,9 @@ export default function VendorApplicationsPage() {
 
         if (cancelled) return;
 
-        setServerApps(normalized);
+        setServerAppsRaw(normalized);
 
-        // Requirements per event
+        // Requirements per event (unique event ids)
         const uniqueEventIds = Array.from(new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean)));
         const nextReq: Record<string, LoadedRequirements | null> = {};
 
@@ -339,7 +393,7 @@ export default function VendorApplicationsPage() {
       } catch (e: any) {
         if (!cancelled) {
           setServerError(e?.message || "Failed to load applications from server.");
-          setServerApps([]);
+          setServerAppsRaw([]);
           setReqByEventId({});
           setLocalByKey({});
         }
@@ -354,15 +408,8 @@ export default function VendorApplicationsPage() {
     };
   }, []);
 
-  const sorted = useMemo(() => {
-    const list = serverApps.slice();
-    list.sort((a, b) => {
-      const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
-      const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
-      return tb - ta;
-    });
-    return list;
-  }, [serverApps]);
+  // ✅ DEDUP: one card per event (prevents endless Event #4 repeats)
+  const cards = useMemo(() => pickPrimaryPerEvent(serverAppsRaw), [serverAppsRaw]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -371,7 +418,7 @@ export default function VendorApplicationsPage() {
           <div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
             <p className="mt-2 text-sm font-semibold text-slate-600">
-              Submissions are loaded from the server. Draft progress is shown from your browser.
+              One card per event (most recent application). Draft progress shown from your browser.
             </p>
           </div>
 
@@ -402,12 +449,13 @@ export default function VendorApplicationsPage() {
             </div>
           ) : (
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
-              Loaded server applications: <span className="font-black">{serverApps.length}</span>
+              Loaded server applications: <span className="font-black">{serverAppsRaw.length}</span>{" "}
+              <span className="ml-2 text-emerald-800/80">(showing {cards.length} event cards)</span>
             </div>
           )}
         </div>
 
-        {sorted.length === 0 ? (
+        {cards.length === 0 ? (
           <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
             <div className="text-xl font-black text-slate-900">No applications yet</div>
             <div className="mt-2 text-sm font-semibold text-slate-600">
@@ -426,7 +474,7 @@ export default function VendorApplicationsPage() {
           </div>
         ) : (
           <div className="mt-10 grid gap-4">
-            {sorted.map((it) => {
+            {cards.map((it) => {
               const eid = normalizeId(it.eventId);
               const req = reqByEventId[eid] ?? null;
 
@@ -441,9 +489,15 @@ export default function VendorApplicationsPage() {
 
               const status = it.status || "draft";
 
-              // ✅ IMPORTANT: appId in URL is numeric application.id (required for uploads/progress)
+              /**
+               * ✅ IMPORTANT:
+               * View should NOT go through an "apply" route that might create a new draft.
+               * Route directly to the Vendor Requirements page with the existing applicationId.
+               *
+               * Your app supports the legacy typo key "appld"; we will still write the correct one.
+               */
               const viewUrl =
-                `/vendor/events/${encodeURIComponent(it.eventId)}/apply?` +
+                `/vendor/events/${encodeURIComponent(it.eventId)}?` +
                 new URLSearchParams({
                   appId: String(it.applicationId),
                   ...(it.boothId ? { boothId: it.boothId } : {}),
@@ -508,7 +562,10 @@ export default function VendorApplicationsPage() {
                   </div>
 
                   <div className="mt-5 flex flex-wrap gap-3">
-                    <Link to={viewUrl} className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700">
+                    <Link
+                      to={viewUrl}
+                      className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700"
+                    >
                       View
                     </Link>
 

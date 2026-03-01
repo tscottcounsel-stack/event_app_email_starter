@@ -4,242 +4,281 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 import * as ApplicationsAPI from "../components/api/applications";
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
-/* ---------------- Types ---------------- */
-
-type BoothCategory = {
-  id: string;
-  name: string;
-  baseSize?: string;
-  basePrice?: number;
-  additionalPerFt?: number;
-  cornerPremium?: number;
-};
-
-type RequirementsResponse = {
-  version?: number | string;
-  requirements?: {
-    booth_categories?: any[];
-  };
-};
+/* ---------------- Helpers ---------------- */
 
 function normalizeId(v: any) {
   return String(v ?? "").trim();
 }
 
-async function loadBoothCategories(eventId: string): Promise<BoothCategory[]> {
-  const url = `${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`;
-  const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
-  if (!res.ok) return [];
-  const data = (await res.json().catch(() => null)) as RequirementsResponse | null;
-  const root = data?.requirements ? data : ({ requirements: data } as any);
-  const items = Array.isArray(root?.requirements?.booth_categories) ? root!.requirements!.booth_categories! : [];
+/**
+ * Some older links pass app_ref like: app_71_1771975163
+ * Backend endpoints expect numeric application id (e.g., 71).
+ */
+function coerceNumericAppId(raw: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (/^\d+$/.test(s)) return s;
 
-  return items
-    .map((b: any, i: number) => ({
-      id: normalizeId(b?.id) || `booth-${i + 1}`,
-      name: String(b?.name ?? b?.label ?? `Booth ${i + 1}`).trim(),
-      baseSize: b?.base_size ?? b?.baseSize ?? b?.size,
-      basePrice: typeof b?.base_price === "number" ? b.base_price : typeof b?.basePrice === "number" ? b.basePrice : undefined,
-      additionalPerFt:
-        typeof b?.additional_per_ft === "number"
-          ? b.additional_per_ft
-          : typeof b?.additionalPerFt === "number"
-          ? b.additionalPerFt
-          : undefined,
-      cornerPremium:
-        typeof b?.corner_premium === "number"
-          ? b.corner_premium
-          : typeof b?.cornerPremium === "number"
-          ? b.cornerPremium
-          : undefined,
-    }))
-    .filter((b: BoothCategory) => !!b.id && !!b.name);
+  const m =
+    s.match(/^app_(\d+)_/i) ||
+    s.match(/^app(\d+)_/i) ||
+    s.match(/^app(\d+)$/i);
+
+  return m?.[1] ? String(m[1]) : s;
+}
+
+type BoothCategory = {
+  id: string;
+  name: string;
+  baseSize?: string;
+  basePrice?: number; // dollars
+  additionalPerFt?: number;
+  cornerPremium?: number;
+  fireMarshalFee?: number;
+  electricalNote?: string;
+  [k: string]: any;
+};
+
+function money(n?: number) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "";
+  const v = Number(n);
+  return `$${v.toFixed(0)}`;
+}
+
+async function fetchRequirements(eventId: string): Promise<{ boothCategories: BoothCategory[] }> {
+  const s = readSession();
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+
+  // If your backend requires identity on this endpoint, include it.
+  if (s?.accessToken) headers["Authorization"] = `Bearer ${s.accessToken}`;
+  if (s?.email) headers["x-user-email"] = s.email;
+
+  const res = await fetch(`${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`, {
+    method: "GET",
+    headers,
+  });
+
+  const text = await res.text();
+  const data = text
+    ? (() => {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { detail: text };
+        }
+      })()
+    : {};
+
+  if (!res.ok) {
+    const msg = (data as any)?.detail || "Failed to load requirements.";
+    throw new Error(String(msg));
+  }
+
+  // Accept multiple shapes:
+  // 1) { requirements: { booth_categories: [...] } }
+  // 2) { booth_categories: [...] }
+  // 3) { boothCategories: [...] }
+  const req = (data as any)?.requirements && typeof (data as any).requirements === "object" ? (data as any).requirements : data;
+  const rawCats =
+    (req as any)?.booth_categories ||
+    (req as any)?.boothCategories ||
+    (data as any)?.booth_categories ||
+    (data as any)?.boothCategories ||
+    [];
+
+  const boothCategories = Array.isArray(rawCats) ? (rawCats as BoothCategory[]) : [];
+
+  // Normalize ids if missing
+  const normalized = boothCategories.map((c, i) => ({
+    id: String((c as any).id ?? `cat_${i + 1}`),
+    name: String((c as any).name ?? (c as any).label ?? `Category ${i + 1}`),
+    baseSize: (c as any).baseSize ?? (c as any).base_size,
+    basePrice:
+      (c as any).basePrice ??
+      (c as any).base_price ??
+      // support cents if present
+      ((c as any).base_price_cents != null ? Number((c as any).base_price_cents) / 100 : undefined),
+    additionalPerFt:
+      (c as any).additionalPerFt ??
+      (c as any).additional_per_ft ??
+      ((c as any).additional_per_ft_cents != null ? Number((c as any).additional_per_ft_cents) / 100 : undefined),
+    cornerPremium:
+      (c as any).cornerPremium ??
+      (c as any).corner_premium ??
+      ((c as any).corner_premium_cents != null ? Number((c as any).corner_premium_cents) / 100 : undefined),
+    fireMarshalFee:
+      (c as any).fireMarshalFee ??
+      (c as any).fire_marshal_fee ??
+      ((c as any).fire_marshal_fee_cents != null ? Number((c as any).fire_marshal_fee_cents) / 100 : undefined),
+    electricalNote: (c as any).electricalNote ?? (c as any).electrical_note,
+    ...c,
+  }));
+
+  return { boothCategories: normalized };
 }
 
 /* ---------------- Page ---------------- */
 
 export default function VendorEventApplyPage() {
-  const navigate = useNavigate();
+  const nav = useNavigate();
   const location = useLocation();
   const params = useParams();
 
-  const eventId = useMemo(() => normalizeId((params as any).eventId), [(params as any).eventId]);
+  const eventId = useMemo(() => normalizeId((params as any).eventId), [params]);
+
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [appId, setAppId] = useState<string>(() => normalizeId(searchParams.get("appId") || ""));
-  const [booths, setBooths] = useState<BoothCategory[]>([]);
-  const [selectedBoothId, setSelectedBoothId] = useState<string>(() => normalizeId(searchParams.get("boothId") || ""));
+  // support both appId and appld (typo seen in screenshots)
+  const rawAppId = useMemo(
+    () => normalizeId(searchParams.get("appId") || searchParams.get("appld") || ""),
+    [searchParams]
+  );
+  const appIdFromUrl = useMemo(() => coerceNumericAppId(rawAppId), [rawAppId]);
 
-  const session = useMemo(() => readSession(), []);
-  const accessToken = session?.accessToken || "";
+  const [appId, setAppId] = useState<string>(appIdFromUrl);
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [boothCategories, setBoothCategories] = useState<BoothCategory[]>([]);
 
   useEffect(() => {
-    let alive = true;
+    let cancelled = false;
 
-    async function run() {
+    async function boot() {
+      if (!eventId) return;
+
       setLoading(true);
-      setError("");
-
-      if (!eventId) {
-        setError("Missing eventId.");
-        setLoading(false);
-        return;
-      }
+      setError(null);
 
       try {
-        // 1) Load booth categories for selection UX
-        const list = await loadBoothCategories(eventId);
-        if (!alive) return;
-        setBooths(list);
+        // Ensure we have a numeric application id
+        let nextAppId = appIdFromUrl;
 
-        // 2) Ensure appId (draft) so Requirements page always has stable id
-        const draft = await ApplicationsAPI.vendorGetOrCreateDraftApplication({
-          apiBase: API_BASE,
-          eventId,
-          accessToken,
-        });
-
-        if (!alive) return;
-
-        const draftId = normalizeId(draft?.id ?? draft?.appId);
-        if (!draftId) throw new Error("Draft application missing id.");
-
-        setAppId(draftId);
-
-        // Keep URL synced
-        const q = new URLSearchParams(location.search);
-        if (normalizeId(q.get("appId") || "") !== draftId) q.set("appId", draftId);
-        if (normalizeId(q.get("boothId") || "") !== selectedBoothId && selectedBoothId) q.set("boothId", selectedBoothId);
-        navigate({ pathname: location.pathname, search: `?${q.toString()}` }, { replace: true });
-
-        // If boothId exists in URL, persist it to the application immediately
-        if (selectedBoothId) {
-          await ApplicationsAPI.vendorUpdateApplication({
-            apiBase: API_BASE,
-            appId: draftId,
-            accessToken,
-            body: { booth_id: selectedBoothId },
-          });
+        if (!nextAppId) {
+          const draftId = await ApplicationsAPI.vendorGetOrCreateDraftApplication(Number(eventId));
+          nextAppId = String(draftId);
         }
+
+        // Normalize URL (replace legacy app_ref with numeric id, and unify param name to appId)
+        const q = new URLSearchParams(location.search);
+        q.delete("appld");
+        q.set("appId", nextAppId);
+        if (!cancelled) {
+          setAppId(nextAppId);
+          nav({ pathname: location.pathname, search: `?${q.toString()}` }, { replace: true });
+        }
+
+        // Load booth categories from requirements
+        const req = await fetchRequirements(eventId);
+        if (!cancelled) setBoothCategories(req.boothCategories || []);
       } catch (e: any) {
-        if (!alive) return;
-        setError(e?.message ? String(e.message) : "Failed to start application.");
+        if (!cancelled) setError(e?.message ? String(e.message) : "Failed to load apply screen.");
       } finally {
-        if (!alive) return;
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
-    run();
+    boot();
     return () => {
-      alive = false;
+      cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventId]);
+  }, [eventId, appIdFromUrl, location.pathname, location.search, nav]);
 
-  async function continueToRequirements() {
-    if (!eventId || !appId) return;
+  async function chooseCategory(cat: BoothCategory) {
+    if (!appId) return;
+    setSaving(true);
+    setError(null);
 
     try {
-      if (selectedBoothId) {
-        await ApplicationsAPI.vendorUpdateApplication({
-          apiBase: API_BASE,
-          appId,
-          accessToken,
-          body: { booth_id: selectedBoothId },
-        });
-      }
+      // Our backend uses applications.booth_id to store the vendor's booth category choice.
+      // We'll store the category id (string) there. (This matches your prior UX text.)
+      await ApplicationsAPI.vendorUpdateApplication(Number(appId), {
+        booth_id: String(cat.id),
+        booth_category_id: String(cat.id),
+      });
 
-      navigate(`/vendor/events/${encodeURIComponent(eventId)}/requirements?appId=${encodeURIComponent(appId)}`);
+      nav(`/vendor/events/${encodeURIComponent(eventId)}/requirements?appId=${encodeURIComponent(appId)}`);
     } catch (e: any) {
-      setError(e?.message ? String(e.message) : "Failed to continue.");
+      setError(e?.message ? String(e.message) : "Failed to save selection.");
+    } finally {
+      setSaving(false);
     }
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-white text-slate-900">
-        <div className="mx-auto max-w-5xl p-6">
-          <div className="text-sm text-slate-600">Loading…</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen bg-white text-slate-900">
-        <div className="mx-auto max-w-5xl p-6">
-          <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-900">{error}</div>
-        </div>
-      </div>
-    );
   }
 
   return (
-    <div className="min-h-screen bg-white text-slate-900">
-      <div className="mx-auto max-w-5xl p-6">
-        <div className="mb-6">
-          <h1 className="text-2xl font-semibold tracking-tight">Apply</h1>
-          <div className="mt-1 text-sm text-slate-600">
-            Event: <span className="font-medium">{eventId}</span> • Application:{" "}
-            <span className="font-medium">{appId || "—"}</span>
-          </div>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => nav(`/vendor/events/${encodeURIComponent(eventId)}?appId=${encodeURIComponent(appId || "")}`)}
+          className="rounded-full border border-slate-200 bg-white px-6 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
+        >
+          ← Back to Event
+        </button>
+
+        <div className="text-sm font-semibold text-slate-500">
+          Event: <span className="font-mono">{eventId || "?"}</span> • App:{" "}
+          <span className="font-mono">{appId || "…"}</span>
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+        <div className="text-4xl font-black text-slate-900">Apply</div>
+        <div className="mt-2 text-sm font-semibold text-slate-500">
+          Choose a booth category. Your selection is saved to the draft application (applications.booth_id).
         </div>
 
-        <div className="rounded-2xl border border-slate-200 p-5">
-          <div className="mb-3">
-            <h2 className="text-lg font-semibold">Choose a booth category</h2>
-            <p className="text-sm text-slate-600">
-              Your selection is saved to the draft application (applications.booth_id).
-            </p>
+        {error ? (
+          <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">
+            {error}
           </div>
+        ) : null}
 
-          {booths.length === 0 ? (
-            <div className="text-sm text-slate-500">No booth categories available.</div>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {booths.map((b) => {
-                const isSelected = normalizeId(selectedBoothId) === normalizeId(b.id);
-                return (
-                  <button
-                    key={b.id}
-                    className={[
-                      "rounded-2xl border p-4 text-left transition",
-                      isSelected ? "border-slate-900 bg-slate-50" : "border-slate-200 hover:bg-slate-50",
-                    ].join(" ")}
-                    onClick={() => setSelectedBoothId(b.id)}
-                  >
-                    <div className="text-sm font-semibold">{b.name}</div>
-                    <div className="mt-1 text-xs text-slate-600">
-                      {b.baseSize ? <>Size: {b.baseSize}</> : null}
-                      {b.basePrice !== undefined ? <> • Base: ${b.basePrice}</> : null}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="mt-5 flex items-center justify-end gap-2">
-            <button
-              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium hover:bg-slate-50"
-              onClick={() => navigate(-1)}
-            >
-              Back
-            </button>
-            <button
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-              disabled={!appId}
-              onClick={continueToRequirements}
-            >
-              Continue
-            </button>
+        {loading ? (
+          <div className="mt-6 text-sm font-semibold text-slate-600">Loading…</div>
+        ) : boothCategories.length === 0 ? (
+          <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+            No booth categories were found for this event. The organizer may need to add/publish requirements.
           </div>
+        ) : (
+          <div className="mt-6 grid gap-4 md:grid-cols-2">
+            {boothCategories.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => chooseCategory(c)}
+                disabled={saving}
+                className="rounded-2xl border border-slate-200 bg-white p-5 text-left hover:bg-slate-50 disabled:opacity-60"
+              >
+                <div className="text-lg font-black text-slate-900">{c.name}</div>
+                <div className="mt-1 text-sm font-semibold text-slate-500">
+                  {c.baseSize ? `Size: ${c.baseSize} • ` : ""}
+                  {c.basePrice != null ? `Base: ${money(c.basePrice)}` : "Base: —"}
+                </div>
+                {c.electricalNote ? (
+                  <div className="mt-2 text-xs font-semibold text-slate-500">{c.electricalNote}</div>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-8 flex justify-end">
+          <button
+            type="button"
+            onClick={() => nav(-1)}
+            className="rounded-full border border-slate-200 bg-white px-6 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
+          >
+            Back
+          </button>
         </div>
       </div>
     </div>

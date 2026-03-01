@@ -24,7 +24,13 @@ export function readSession(): AuthSession | null {
 export function writeSession(s: AuthSession) {
   localStorage.setItem(TOKEN_KEY, s.accessToken);
   localStorage.setItem(ROLE_KEY, s.role);
+
+  // ✅ Always overwrite email to prevent “inheriting” previous user
   if (s.email) localStorage.setItem(EMAIL_KEY, s.email);
+  else localStorage.removeItem(EMAIL_KEY);
+
+  // Optional: clear per-user caches on login/session write
+  localStorage.removeItem("vendor_profile_v1");
 }
 
 export function clearSession() {

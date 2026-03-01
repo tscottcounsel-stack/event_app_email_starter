@@ -1,19 +1,7 @@
 // src/components/api/applications.ts
-
-/**
- * Backward-compatible Applications API.
- *
- * Fixes:
- * - Vendor pages calling listVendorApplications() without args
- * - Missing vendor identity by automatically attaching auth headers
- *
- * Uses readSession() from localStorage:
- *   accessToken, role, email
- */
-
 import { readSession } from "../../auth/authStorage";
 
-export const API_BASE_DEFAULT =
+const API_BASE =
   (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
 /* ---------------- Types ---------------- */
@@ -35,10 +23,17 @@ export type ServerApplication = {
   vendor_email?: string | null;
   vendor_id?: string | null;
 
-  status?: "draft" | "submitted" | string | null;
+  status?: string | null; // "draft" | "submitted" | "approved" | "rejected"
+  payment_status?: string | null; // "unpaid" | "paid"
 
   checked?: Record<string, boolean> | null;
-  docs?: Record<string, UploadedDocMeta | null> | null;
+
+  /**
+   * BACKEND SHAPE:
+   * apps may include documents and/or docs. We'll support both.
+   */
+  documents?: Record<string, any> | null;
+  docs?: Record<string, any> | null;
 
   notes?: string | null;
 
@@ -50,263 +45,281 @@ export type ListVendorApplicationsResponse = {
   applications: ServerApplication[];
 };
 
-export type SubmitApplicationBody = {
+export type ApplyBody = {
   booth_id?: string | null;
+  booth_category_id?: string | null;
   checked?: Record<string, boolean>;
-  docs?: Record<string, UploadedDocMeta | null>;
   notes?: string;
-  status?: "draft" | "submitted";
 };
 
-export type UpdateApplicationBody = SubmitApplicationBody;
+export type ProgressBody = {
+  checked?: Record<string, boolean>;
+  notes?: string;
+
+  /**
+   * We want to persist doc metadata now.
+   * Backend accepts either "documents" or "docs" and normalizes.
+   * We'll send BOTH to avoid regressions.
+   */
+  documents?: Record<string, UploadedDocMeta | null>;
+  docs?: Record<string, UploadedDocMeta | null>;
+};
 
 /* ---------------- Internals ---------------- */
 
-type Authish = {
-  accessToken?: string;
-  role?: string;
-  email?: string;
-};
-
-function getSessionFallback(explicit?: Authish): Authish {
-  // If caller passed an accessToken explicitly, prefer it.
-  if (explicit?.accessToken) return explicit;
-
+function mustHaveSession() {
   const s = readSession();
-  if (!s) return explicit ?? {};
+  if (!s?.accessToken) throw new Error("Missing auth session (accessToken).");
+  return s;
+}
+
+function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const s = mustHaveSession();
   return {
-    accessToken: s.accessToken,
-    role: s.role,
-    email: s.email,
+    Accept: "application/json",
+    Authorization: `Bearer ${s.accessToken}`,
+    ...(extra || {}),
   };
 }
 
-function buildAuthHeaders(explicit?: Authish): Record<string, string> {
-  const s = getSessionFallback(explicit);
+function buildVendorHeaders(extra?: Record<string, string>): Record<string, string> {
+  const s = mustHaveSession();
 
-  const h: Record<string, string> = { Accept: "application/json" };
+  // Backend identity checks require x-user-email OR x-user-id on vendor endpoints
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    Authorization: `Bearer ${s.accessToken}`,
+  };
 
-  if (s.accessToken) h["Authorization"] = `Bearer ${s.accessToken}`;
+  if (s.email) headers["x-user-email"] = s.email;
 
-  // Fallback identity headers (some backend paths require these)
-  if (s.email) h["x-user-email"] = s.email;
-  if (s.role) h["x-user-role"] = s.role;
-
-  return h;
+  return { ...headers, ...(extra || {}) };
 }
 
-async function readJson(res: Response): Promise<any> {
-  const text = await res.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
-}
-
-function unwrapApplication(data: any): ServerApplication {
-  return (data?.application ?? data) as ServerApplication;
-}
-
-function unwrapApplications(data: any): ServerApplication[] {
-  const list = (data?.applications ?? data) as any;
-  return Array.isArray(list) ? (list as ServerApplication[]) : [];
-}
-
-async function fetchJsonOrThrow(url: string, init: RequestInit): Promise<any> {
+async function fetchJsonOrThrow(url: string, init?: RequestInit) {
   const res = await fetch(url, init);
-  const data = await readJson(res);
+  const text = await res.text();
+
+  const data = text
+    ? (() => {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return text;
+        }
+      })()
+    : null;
+
   if (!res.ok) {
-    const msg = String(data?.detail || data?.message || `HTTP ${res.status}`);
+    const msg =
+      typeof data === "string"
+        ? data
+        : (data as any)?.detail
+          ? String((data as any).detail)
+          : `Request failed (${res.status})`;
     throw new Error(msg);
   }
+
   return data;
 }
 
-/* =========================================================
-   Vendor endpoints (draft + update)
-   ========================================================= */
+/**
+ * Hard guard to prevent URLs like /undefined/
+ */
+function mustInt(name: string, v: any): number {
+  const n = typeof v === "string" ? Number(v) : Number(v);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${name} must be a number. Got: ${String(v)}`);
+  }
+  return n;
+}
+
+function idPath(name: string, v: any): string {
+  return String(mustInt(name, v));
+}
+
+function unwrapApplication(data: any): ServerApplication {
+  return (data as any)?.application ? ((data as any).application as ServerApplication) : (data as ServerApplication);
+}
+
+/* ---------------- Optional URL helpers ---------------- */
+
+export function vendorPutProgressUrl(appId: any) {
+  return `${API_BASE}/vendor/applications/${idPath("appId", appId)}/progress`;
+}
+
+export function vendorGetProgressUrl(appId: any) {
+  return `${API_BASE}/vendor/applications/${idPath("appId", appId)}/progress`;
+}
+
+/* ---------------- Vendor: list applications ---------------- */
+
+export async function listVendorApplications(): Promise<ServerApplication[]> {
+  const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications`, {
+    method: "GET",
+    headers: buildVendorHeaders(),
+  });
+
+  if (Array.isArray((data as any)?.applications)) return (data as any).applications;
+  if (Array.isArray(data)) return data as any;
+  return [];
+}
+
+/* ---------------- Vendor: get application ---------------- */
+
+export async function vendorGetApplication(args: {
+  applicationId: string | number;
+}): Promise<ServerApplication> {
+  const appId = idPath("applicationId", args.applicationId);
+
+  const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${appId}`, {
+    method: "GET",
+    headers: buildVendorHeaders(),
+  });
+
+  return unwrapApplication(data);
+}
+
+/* ---------------- Vendor: create application (apply) ---------------- */
+
+export async function vendorApplyToEvent(args: {
+  eventId: string | number;
+  body: ApplyBody;
+}): Promise<ServerApplication> {
+  const eventId = idPath("eventId", args.eventId);
+
+  const data = await fetchJsonOrThrow(`${API_BASE}/applications/events/${eventId}/apply`, {
+    method: "POST",
+    headers: buildVendorHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(args.body || {}),
+  });
+
+  return unwrapApplication(data);
+}
+
+/* ---------------- Vendor: get or create draft (compat) ---------------- */
 
 export async function vendorGetOrCreateDraftApplication(args: {
-  apiBase?: string;
   eventId: string | number;
-  accessToken?: string;
 }): Promise<ServerApplication> {
-  const apiBase = args.apiBase || API_BASE_DEFAULT;
-  const url = `${apiBase}/vendor/events/${encodeURIComponent(
-    String(args.eventId)
-  )}/applications/draft`;
+  return vendorApplyToEvent({ eventId: args.eventId, body: {} });
+}
 
-  const data = await fetchJsonOrThrow(url, {
+export async function vendorGetOrCreateDraftApplicationLegacy(args: {
+  eventId: string | number;
+}): Promise<ServerApplication> {
+  return vendorGetOrCreateDraftApplication(args);
+}
+
+/* ---------------- Vendor: save progress (checked/docs/notes) ---------------- */
+
+export async function vendorSaveProgress(args: {
+  applicationId: string | number;
+  body: ProgressBody;
+}): Promise<ServerApplication> {
+  const applicationId = idPath("applicationId", args.applicationId);
+  const body = args.body || {};
+
+  const documents = body.documents ?? body.docs;
+
+  const payload: any = {
+    checked: body.checked,
+    notes: body.notes,
+  };
+
+  if (documents !== undefined) {
+    payload.documents = documents;
+    payload.docs = documents;
+  }
+
+  const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${applicationId}/progress`, {
+    method: "PUT",
+    headers: buildVendorHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+
+  const appFromResp = (data as any)?.application;
+  if (appFromResp) return appFromResp as ServerApplication;
+
+  const appId = (data as any)?.app_id ?? (data as any)?.appId ?? applicationId;
+  if (appId) {
+    const fresh = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${appId}`, {
+      method: "GET",
+      headers: buildVendorHeaders(),
+    });
+    return unwrapApplication(fresh);
+  }
+
+  return unwrapApplication(data);
+}
+
+export async function vendorUpdateApplication(args: {
+  applicationId: string | number;
+  body: ProgressBody;
+}): Promise<ServerApplication> {
+  return vendorSaveProgress(args);
+}
+
+/* ---------------- Vendor: submit application (compat) ---------------- */
+
+export async function submitApplication(args: {
+  applicationId: string | number;
+}): Promise<ServerApplication> {
+  const applicationId = idPath("applicationId", args.applicationId);
+
+  const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${applicationId}/submit`, {
     method: "POST",
-    headers: {
-      ...buildAuthHeaders({ accessToken: args.accessToken }),
-      "Content-Type": "application/json",
-    },
+    headers: buildVendorHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({}),
   });
 
   return unwrapApplication(data);
 }
 
-export async function vendorGetOrCreateDraftApplicationLegacy(args: {
-  apiBase?: string;
+/* ---------------- Organizer: application helpers (NEW) ---------------- */
+/**
+ * Requires backend endpoint:
+ * GET /organizer/events/{event_id}/applications/{app_id}
+ */
+export async function organizerGetApplication(args: {
   eventId: string | number;
-  accessToken?: string;
+  appId: string | number;
 }): Promise<ServerApplication> {
-  const apiBase = args.apiBase || API_BASE_DEFAULT;
-  const url = `${apiBase}/vendor/applications/draft`;
+  const eventId = idPath("eventId", args.eventId);
+  const appId = idPath("appId", args.appId);
 
-  const data = await fetchJsonOrThrow(url, {
+  const data = await fetchJsonOrThrow(`${API_BASE}/organizer/events/${eventId}/applications/${appId}`, {
+    method: "GET",
+    headers: buildAuthHeaders(),
+  });
+
+  return unwrapApplication(data);
+}
+
+export async function organizerApproveApplication(args: {
+  appId: string | number;
+}): Promise<ServerApplication> {
+  const appId = idPath("appId", args.appId);
+
+  const data = await fetchJsonOrThrow(`${API_BASE}/organizer/applications/${appId}/approve`, {
     method: "POST",
-    headers: {
-      ...buildAuthHeaders({ accessToken: args.accessToken }),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ event_id: Number(args.eventId) }),
+    headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({}),
   });
 
   return unwrapApplication(data);
 }
 
-export async function vendorGetApplication(args: {
-  apiBase?: string;
+export async function organizerRejectApplication(args: {
   appId: string | number;
-  accessToken?: string;
 }): Promise<ServerApplication> {
-  const apiBase = args.apiBase || API_BASE_DEFAULT;
-  const url = `${apiBase}/vendor/applications/${encodeURIComponent(
-    String(args.appId)
-  )}`;
+  const appId = idPath("appId", args.appId);
 
-  const data = await fetchJsonOrThrow(url, {
-    method: "GET",
-    headers: { ...buildAuthHeaders({ accessToken: args.accessToken }) },
+  const data = await fetchJsonOrThrow(`${API_BASE}/organizer/applications/${appId}/reject`, {
+    method: "POST",
+    headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({}),
   });
 
   return unwrapApplication(data);
 }
-
-export async function vendorUpdateApplication(args: {
-  apiBase?: string;
-  appId: string | number;
-  accessToken?: string;
-  body: UpdateApplicationBody;
-}): Promise<ServerApplication> {
-  const apiBase = args.apiBase || API_BASE_DEFAULT;
-  const url = `${apiBase}/vendor/applications/${encodeURIComponent(
-    String(args.appId)
-  )}`;
-
-  const data = await fetchJsonOrThrow(url, {
-    method: "PUT",
-    headers: {
-      ...buildAuthHeaders({ accessToken: args.accessToken }),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(args.body ?? {}),
-  });
-
-  return unwrapApplication(data);
-}
-
-/* =========================================================
-   Organizer endpoints
-   ========================================================= */
-
-export async function organizerListEventApplications(args: {
-  apiBase?: string;
-  eventId: string | number;
-  accessToken?: string;
-}): Promise<ServerApplication[]> {
-  const apiBase = args.apiBase || API_BASE_DEFAULT;
-  const url = `${apiBase}/organizer/events/${encodeURIComponent(
-    String(args.eventId)
-  )}/applications`;
-
-  const data = await fetchJsonOrThrow(url, {
-    method: "GET",
-    headers: { ...buildAuthHeaders({ accessToken: args.accessToken }) },
-  });
-
-  return unwrapApplications(data);
-}
-
-/* =========================================================
-   Legacy exports (key compatibility)
-   ========================================================= */
-
-export async function listVendorApplications(
-  args?:
-    | {
-        apiBase?: string;
-        accessToken?: string;
-        eventId?: string | number;
-      }
-    | undefined
-): Promise<ListVendorApplicationsResponse> {
-  const apiBase = args?.apiBase || API_BASE_DEFAULT;
-
-  // If eventId is provided, treat as organizer list for that event.
-  if (args?.eventId !== undefined && args?.eventId !== null) {
-    const applications = await organizerListEventApplications({
-      apiBase,
-      eventId: args.eventId,
-      accessToken: args.accessToken,
-    });
-    return { applications };
-  }
-
-  // Otherwise: vendor "my applications"
-  const url = `${apiBase}/vendor/applications`;
-  const data = await fetchJsonOrThrow(url, {
-    method: "GET",
-    headers: { ...buildAuthHeaders({ accessToken: args?.accessToken }) },
-  });
-
-  return { applications: unwrapApplications(data) };
-}
-
-export async function organizerListVendorApplications(args: {
-  apiBase?: string;
-  eventId: string | number;
-  accessToken?: string;
-}): Promise<ListVendorApplicationsResponse> {
-  return listVendorApplications(args);
-}
-
-export async function submitApplication(args: {
-  apiBase?: string;
-  appId: string | number;
-  accessToken?: string;
-  body: SubmitApplicationBody;
-}): Promise<ServerApplication> {
-  return vendorUpdateApplication({
-    apiBase: args.apiBase,
-    appId: args.appId,
-    accessToken: args.accessToken,
-    body: args.body,
-  });
-}
-
-/* =========================================================
-   Default export (supports default-import style)
-   ========================================================= */
-
-export const ApplicationsAPI = {
-  vendorGetOrCreateDraftApplication,
-  vendorGetOrCreateDraftApplicationLegacy,
-  vendorGetApplication,
-  vendorUpdateApplication,
-
-  organizerListEventApplications,
-
-  listVendorApplications,
-  organizerListVendorApplications,
-  submitApplication,
-
-  API_BASE_DEFAULT,
-};
-
-export default ApplicationsAPI;

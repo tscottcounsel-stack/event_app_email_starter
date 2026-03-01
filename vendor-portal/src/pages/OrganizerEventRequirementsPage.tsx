@@ -2,6 +2,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import PaymentSettingsSection, {
+  type PaymentSettings as OffPlatformPaymentSettings,
+} from "../components/PaymentSettingsSection";
 
 /* ---------------- Types ---------------- */
 
@@ -37,25 +40,8 @@ type DocumentRequirement = {
   dueBy?: string; // freeform
 };
 
-type RefundPolicy =
-  | "No Refunds"
-  | "Full Refund"
-  | "Partial Refund (50%)"
-  | "Event Credits Only";
+type PaymentSettings = OffPlatformPaymentSettings;
 
-type PaymentSettings = {
-  requireDeposit: boolean;
-  depositPercent: number; // 0-100
-
-  lateFeeEnabled: boolean;
-  lateFee: number; // dollars
-
-  refundPolicy: RefundPolicy;
-  paymentNotes?: string;
-
-  // Stripe-safe optional fallback
-  defaultAmountCents?: number;
-};
 
 type RequirementsModel = {
   version: string;
@@ -225,13 +211,17 @@ function toRequirementsModel(
     complianceItems: [],
     documentRequirements: [],
     paymentSettings: {
-      requireDeposit: false,
-      depositPercent: 50,
-      lateFeeEnabled: false,
-      lateFee: 0,
-      refundPolicy: "No Refunds",
-      paymentNotes: "",
-      defaultAmountCents: 0,
+      enabled: true,
+      payment_url: "",
+      billing_contact_email: "",
+      billing_contact_phone: "",
+      memo_instructions: "Include your company name + booth number.",
+      refund_policy: "No Refunds",
+      payment_notes: "",
+      due_by: "",
+      deposit_type: "none",
+      deposit_value: null,
+      methods: {},
     },
     updatedAt: new Date().toISOString(),
   };
@@ -307,14 +297,21 @@ function toRequirementsModel(
 
     const paymentSettings: PaymentSettings = ps
       ? {
-          requireDeposit: !!ps.require_deposit,
-          depositPercent: Number(ps.deposit_percent ?? 0) || 0,
-          lateFeeEnabled: !!ps.late_fee_enabled,
-          lateFee: Number(ps.late_fee ?? 0) || 0,
-          refundPolicy:
-            (ps.refund_policy as RefundPolicy) || ("No Refunds" as RefundPolicy),
-          paymentNotes: ps.payment_notes ? String(ps.payment_notes) : "",
-          defaultAmountCents: Number(ps.default_amount_cents ?? 0) || 0,
+          enabled: !!ps.enabled,
+          payment_url: ps.payment_url ? String(ps.payment_url) : "",
+          billing_contact_email: ps.billing_contact_email ? String(ps.billing_contact_email) : "",
+          billing_contact_phone: ps.billing_contact_phone ? String(ps.billing_contact_phone) : "",
+          memo_instructions: ps.memo_instructions ? String(ps.memo_instructions) : "",
+          refund_policy: ps.refund_policy ? String(ps.refund_policy) : "No Refunds",
+          payment_notes: ps.payment_notes ? String(ps.payment_notes) : "",
+          due_by: ps.due_by ? String(ps.due_by) : "",
+          deposit_type: ps.deposit_type ? String(ps.deposit_type) : "none",
+          deposit_value:
+            ps.deposit_value === null || ps.deposit_value === undefined
+              ? null
+              : ps.deposit_value,
+          methods:
+            ps.methods && typeof ps.methods === "object" ? ps.methods : {},
         }
       : base.paymentSettings;
 
@@ -408,16 +405,20 @@ function normalizeForApi(m: RequirementsModel) {
       })),
 
       payment_settings: {
-        require_deposit: !!m.paymentSettings?.requireDeposit,
-        deposit_percent: Number(m.paymentSettings?.depositPercent) || 0,
-
-        late_fee_enabled: !!m.paymentSettings?.lateFeeEnabled,
-        late_fee: Number(m.paymentSettings?.lateFee) || 0,
-
-        refund_policy: m.paymentSettings?.refundPolicy || "No Refunds",
-        payment_notes: String(m.paymentSettings?.paymentNotes || ""),
-
-        default_amount_cents: Number(m.paymentSettings?.defaultAmountCents) || 0,
+        enabled: !!m.paymentSettings?.enabled,
+        payment_url: String((m.paymentSettings as any)?.payment_url || ""),
+        billing_contact_email: String((m.paymentSettings as any)?.billing_contact_email || ""),
+        billing_contact_phone: String((m.paymentSettings as any)?.billing_contact_phone || ""),
+        memo_instructions: String((m.paymentSettings as any)?.memo_instructions || ""),
+        refund_policy: String((m.paymentSettings as any)?.refund_policy || "No Refunds"),
+        payment_notes: String((m.paymentSettings as any)?.payment_notes || ""),
+        due_by: String((m.paymentSettings as any)?.due_by || ""),
+        deposit_type: String((m.paymentSettings as any)?.deposit_type || "none"),
+        deposit_value: (m.paymentSettings as any)?.deposit_value ?? null,
+        methods:
+          (m.paymentSettings as any)?.methods && typeof (m.paymentSettings as any).methods === "object"
+            ? (m.paymentSettings as any).methods
+            : {},
       },
 
       updated_at: new Date().toISOString(),
@@ -479,13 +480,17 @@ const EVENT_TEMPLATES: EventTemplate[] = [
       { name: "Business License", required: true, dueBy: "" },
     ],
     paymentDefaults: {
-      requireDeposit: true,
-      depositPercent: 50,
-      lateFeeEnabled: true,
-      lateFee: 50,
-      refundPolicy: "Partial Refund (50%)",
-      paymentNotes: "Food vendors must be approved before payment is finalized.",
-      defaultAmountCents: 0,
+      enabled: true,
+      payment_url: "",
+      billing_contact_email: "",
+      billing_contact_phone: "",
+      memo_instructions: "Include your company name + booth number.",
+      refund_policy: "No Refunds",
+      payment_notes: "",
+      due_by: "",
+      deposit_type: "none",
+      deposit_value: null,
+      methods: {},
     },
   },
   {
@@ -528,13 +533,17 @@ const EVENT_TEMPLATES: EventTemplate[] = [
       { name: "Business License", required: true, dueBy: "" },
     ],
     paymentDefaults: {
-      requireDeposit: true,
-      depositPercent: 25,
-      lateFeeEnabled: false,
-      lateFee: 0,
-      refundPolicy: "No Refunds",
-      paymentNotes: "All booth fees are non-refundable once confirmed.",
-      defaultAmountCents: 0,
+      enabled: true,
+      payment_url: "",
+      billing_contact_email: "",
+      billing_contact_phone: "",
+      memo_instructions: "Include your company name + booth number.",
+      refund_policy: "No Refunds",
+      payment_notes: "",
+      due_by: "",
+      deposit_type: "none",
+      deposit_value: null,
+      methods: {},
     },
   },
   {
@@ -589,13 +598,17 @@ const EVENT_TEMPLATES: EventTemplate[] = [
       { name: "W-9 Tax Form", required: true, dueBy: "" },
     ],
     paymentDefaults: {
-      requireDeposit: true,
-      depositPercent: 50,
-      lateFeeEnabled: true,
-      lateFee: 100,
-      refundPolicy: "Partial Refund (50%)",
-      paymentNotes: "Balance due 14 days before event.",
-      defaultAmountCents: 0,
+      enabled: true,
+      payment_url: "",
+      billing_contact_email: "",
+      billing_contact_phone: "",
+      memo_instructions: "Include your company name + booth number.",
+      refund_policy: "No Refunds",
+      payment_notes: "",
+      due_by: "",
+      deposit_type: "none",
+      deposit_value: null,
+      methods: {},
     },
   },
 ];
@@ -677,6 +690,8 @@ export default function OrganizerEventRequirementsPage() {
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [savedOk, setSavedOk] = useState(false);
 
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
     EVENT_TEMPLATES[0]?.id || "food_festival"
@@ -822,6 +837,7 @@ export default function OrganizerEventRequirementsPage() {
     setSaving(true);
     setError(null);
     setToast(null);
+    setSavedOk(false);
 
     try {
       localStorage.setItem(storageKey, JSON.stringify(model));
@@ -845,6 +861,7 @@ export default function OrganizerEventRequirementsPage() {
         if (res.ok) {
           setSaving(false);
           setToast("Configuration saved ✅");
+          setSavedOk(true);
           return true;
         }
 
@@ -1071,6 +1088,7 @@ export default function OrganizerEventRequirementsPage() {
             </span>
           </div>
 
+          <div className="flex items-center gap-3">
           <button
             type="button"
             className={saveBtnBlue}
@@ -1079,6 +1097,17 @@ export default function OrganizerEventRequirementsPage() {
           >
             {saving ? "Saving…" : "Save Configuration"}
           </button>
+
+          {savedOk ? (
+            <button
+              type="button"
+              className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
+              onClick={() => navigate(`/organizer/events/${eid}/layout`)}
+            >
+              Go to Booth Layout →
+            </button>
+          ) : null}
+        </div>
         </div>
       </div>
 
@@ -1123,8 +1152,17 @@ export default function OrganizerEventRequirementsPage() {
           </div>
 
           {toast ? (
-            <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800">
-              {toast}
+            <div className="mt-3 flex flex-col gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 md:flex-row md:items-center md:justify-between">
+              <div>{toast}</div>
+              {savedOk ? (
+                <button
+                  type="button"
+                  className="self-start rounded-full bg-emerald-600 px-4 py-2 text-xs font-black text-white hover:bg-emerald-700 md:self-auto"
+                  onClick={() => navigate(`/organizer/events/${eid}/layout`)}
+                >
+                  Continue to Layout →
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -1512,154 +1550,17 @@ export default function OrganizerEventRequirementsPage() {
         <div className={`${sectionCard} mt-8`}>
           <SectionHeader
             emoji="💳"
-            title="Payment & Refund Rules"
-            subtitle="Configure payment terms and policies"
+            title="Payment Instructions"
+            subtitle="Off-platform for now: tell vendors how to pay you after approval."
           />
 
-          <div className="mt-6 grid gap-6">
-            <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <label className="flex items-center gap-2 text-sm font-black text-slate-900">
-                  <input
-                    type="checkbox"
-                    checked={!!model.paymentSettings.requireDeposit}
-                    onChange={(e) =>
-                      setModel(
-                        bump({
-                          ...model,
-                          paymentSettings: {
-                            ...model.paymentSettings,
-                            requireDeposit: e.target.checked,
-                          },
-                        })
-                      )
-                    }
-                  />
-                  Require Deposit
-                </label>
+          <PaymentSettingsSection
+            value={model.paymentSettings as any}
+            onChange={(next) => setModel(bump({ ...model, paymentSettings: next as any }))}
+          />
 
-                <div className="mt-4">
-                  <div className="text-xs font-black text-slate-700">
-                    Deposit Percentage
-                  </div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <input
-                      className={inputCls}
-                      inputMode="numeric"
-                      value={String(model.paymentSettings.depositPercent ?? 0)}
-                      onChange={(e) =>
-                        setModel(
-                          bump({
-                            ...model,
-                            paymentSettings: {
-                              ...model.paymentSettings,
-                              depositPercent: clamp(toNumber(e.target.value, 0), 0, 100),
-                            },
-                          })
-                        )
-                      }
-                    />
-                    <span className="text-sm font-black text-slate-600">%</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="text-xs font-black text-slate-700">
-                  Refund Policy
-                </div>
-                <select
-                  className={`mt-2 ${inputCls}`}
-                  value={model.paymentSettings.refundPolicy}
-                  onChange={(e) =>
-                    setModel(
-                      bump({
-                        ...model,
-                        paymentSettings: {
-                          ...model.paymentSettings,
-                          refundPolicy: e.target.value as RefundPolicy,
-                        },
-                      })
-                    )
-                  }
-                >
-                  <option>No Refunds</option>
-                  <option>Full Refund</option>
-                  <option>Partial Refund (50%)</option>
-                  <option>Event Credits Only</option>
-                </select>
-
-                <div className="mt-4 text-xs font-black text-slate-700">
-                  Payment Notes (optional)
-                </div>
-                <textarea
-                  className={`mt-2 ${inputCls}`}
-                  rows={3}
-                  value={model.paymentSettings.paymentNotes || ""}
-                  onChange={(e) =>
-                    setModel(
-                      bump({
-                        ...model,
-                        paymentSettings: {
-                          ...model.paymentSettings,
-                          paymentNotes: e.target.value,
-                        },
-                      })
-                    )
-                  }
-                  placeholder="Shown to vendors / internal notes…"
-                />
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <label className="flex items-center gap-2 text-sm font-black text-slate-900">
-                <input
-                  type="checkbox"
-                  checked={!!model.paymentSettings.lateFeeEnabled}
-                  onChange={(e) =>
-                    setModel(
-                      bump({
-                        ...model,
-                        paymentSettings: {
-                          ...model.paymentSettings,
-                          lateFeeEnabled: e.target.checked,
-                        },
-                      })
-                    )
-                  }
-                />
-                Late Submission Surcharge
-              </label>
-
-              <div className="mt-4 max-w-sm">
-                <div className="text-xs font-black text-slate-700">
-                  Late Fee Amount
-                </div>
-                <input
-                  className={`mt-2 ${inputCls}`}
-                  inputMode="decimal"
-                  value={String(model.paymentSettings.lateFee ?? 0)}
-                  onChange={(e) =>
-                    setModel(
-                      bump({
-                        ...model,
-                        paymentSettings: {
-                          ...model.paymentSettings,
-                          lateFee: clamp(toNumber(e.target.value, 0), 0, 999999),
-                        },
-                      })
-                    )
-                  }
-                  disabled={!model.paymentSettings.lateFeeEnabled}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-6 text-xs font-bold text-slate-500">
-            Backend note: booth pricing is saved with both dollars and cents
-            fields for Stripe safety.
+          <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs font-bold text-slate-600">
+            Vendors will see these instructions after you approve their application.
           </div>
         </div>
 

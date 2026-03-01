@@ -31,9 +31,7 @@ function pickToken(data: any): string | null {
 }
 
 function normalizeRole(value: unknown): AuthRole | null {
-  const r = String(value ?? "")
-    .trim()
-    .toLowerCase();
+  const r = String(value ?? "").trim().toLowerCase();
   if (r === "vendor" || r === "organizer" || r === "admin") return r as AuthRole;
   return null;
 }
@@ -55,8 +53,6 @@ function deriveRoleFromToken(accessToken: string): AuthRole | null {
   const claims = decodeJwtPayload(accessToken);
   if (!claims) return null;
 
-  // Common claim names:
-  // role, user_role, app_role, roles (array), scope, etc.
   const direct =
     normalizeRole(claims.role) ||
     normalizeRole(claims.user_role) ||
@@ -64,13 +60,28 @@ function deriveRoleFromToken(accessToken: string): AuthRole | null {
 
   if (direct) return direct;
 
-  // Sometimes "roles" is an array like ["organizer"]
   if (Array.isArray(claims.roles) && claims.roles.length > 0) {
     const first = normalizeRole(claims.roles[0]);
     if (first) return first;
   }
 
   return null;
+}
+
+function deriveEmailFromToken(accessToken: string): string | null {
+  const claims = decodeJwtPayload(accessToken);
+  if (!claims) return null;
+
+  // Common claim names: email, user_email, username, sub
+  const raw =
+    claims.email ||
+    claims.user_email ||
+    claims.username ||
+    claims.sub ||
+    null;
+
+  const email = String(raw ?? "").trim().toLowerCase();
+  return email.includes("@") ? email : null;
 }
 
 /* ---------- Provider ---------- */
@@ -93,10 +104,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login: AuthState["login"] = async ({ email, password, role }) => {
     const requestedRole = role;
 
+    // ✅ Ensure we never “inherit” previous user's email/profile caches
+    clearSession();
+    setSession(null);
+
     const res = await fetch(`${API_BASE}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // send both keys (harmless if backend ignores)
       body: JSON.stringify({ email, username: email, password, role: requestedRole }),
     });
 
@@ -117,12 +131,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const accessToken = pickToken(data);
     if (!accessToken) throw new Error("Server did not return an access_token");
 
-    // A) Production-safe: token claim wins if present
-    // Fallback: requestedRole (dev / until backend fixed)
     const tokenRole = deriveRoleFromToken(accessToken);
     const finalRole = tokenRole ?? requestedRole;
 
-    const next: AuthSession = { accessToken, role: finalRole, email };
+    // ✅ Use token email if present (prevents “typed email” mismatch / dev stub weirdness)
+    const tokenEmail = deriveEmailFromToken(accessToken);
+    const finalEmail = tokenEmail ?? String(email || "").trim().toLowerCase();
+
+    const next: AuthSession = { accessToken, role: finalRole, email: finalEmail };
     writeSession(next);
     setSession(next);
   };
@@ -149,12 +165,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return false;
     }
 
-    // Refresh may mint a new token with updated claims, so re-derive role.
     const tokenRole = deriveRoleFromToken(newToken);
+    const tokenEmail = deriveEmailFromToken(newToken);
+
     const next: AuthSession = {
       accessToken: newToken,
       role: tokenRole ?? current.role,
-      email: current.email,
+      // ✅ keep email in sync with token claims if present
+      email: tokenEmail ?? current.email,
     };
 
     writeSession(next);

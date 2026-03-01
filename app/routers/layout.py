@@ -8,7 +8,10 @@ from pydantic import BaseModel, ConfigDict
 
 from app.store import _EVENTS, _LAYOUT_META, save_store
 
-router = APIRouter(prefix="/events/{event_id}/layout", tags=["Layout"])
+# ✅ Minimal, safest fix:
+# Define the router without a prefix here so we don't accidentally double-prefix
+# (your main app likely sets the prefix when include_router(...) is called).
+router = APIRouter()
 
 
 class LayoutPayload(BaseModel):

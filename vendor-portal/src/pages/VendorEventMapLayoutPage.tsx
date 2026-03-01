@@ -40,10 +40,6 @@ function safeJsonParse<T = any>(value: string | null): T | null {
   }
 }
 
-/**
- * Pull a best-effort vendor profile snapshot from localStorage.
- * This is what the organizer read-only vendor profile page will display.
- */
 function loadVendorProfileSnapshot(): Record<string, any> {
   const raw = localStorage.getItem(LS_VENDOR_PROFILE_KEY);
   const parsed = safeJsonParse<any>(raw);
@@ -51,11 +47,6 @@ function loadVendorProfileSnapshot(): Record<string, any> {
   return {};
 }
 
-/**
- * IMPORTANT:
- * Map page often has NO appId in the URL.
- * If appId is missing, match by eventId only and pick the most recent entry.
- */
 function loadVendorProgress(eventId: string, appId?: string): VendorReqProgress | null {
   const all = safeJsonParse<VendorReqProgress[]>(localStorage.getItem(LS_VENDOR_PROGRESS_KEY));
   if (!Array.isArray(all) || all.length === 0) return null;
@@ -66,18 +57,14 @@ function loadVendorProgress(eventId: string, appId?: string): VendorReqProgress 
   const candidates = all.filter((p) => normalizeId(p.eventId) === eId);
   if (candidates.length === 0) return null;
 
-  // If appId was provided, prefer exact match.
   if (aId) {
     const exact = candidates.find((p) => normalizeId(p.appId || "") === aId);
     if (exact) return exact;
-    // fall through to "most recent" if no exact hit
   }
 
-  // Prefer entries that were saved without an appId, but still choose newest overall.
   const noAppId = candidates.filter((p) => !normalizeId(p.appId || ""));
   const pool = noAppId.length > 0 ? noAppId : candidates;
 
-  // Choose most recent by updatedAt (string ISO compare works for ISO timestamps)
   pool.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return pool[0] ?? null;
 }
@@ -92,12 +79,7 @@ function summarizeUploads(uploads: Record<string, UploadMeta[]>) {
   return { docsWithFiles: docsWithFiles.length, totalDocs: docIds.length, totalFiles };
 }
 
-/**
- * Vendor Event Map Layout
- * - Loads diagram from API (public) and caches diagram doc to localStorage for faster reloads
- * - Server is source-of-truth for applications/status
- * - Vendor selects booth -> confirms -> submits application -> redirects to /vendor/events/:id/apply?appId=<numeric>&boothId=<id>
- */
+/* ---------------- Types ---------------- */
 
 type BoothStatus =
   | "available"
@@ -141,7 +123,7 @@ type MapElement = {
 };
 
 type DiagramDoc = {
-  booths?: Booth[]; // legacy
+  booths?: Booth[];
   canvas?: { width: number; height: number; gridSize: number };
   levels?: Array<{ id: string; name: string; booths: Booth[]; elements?: MapElement[] }>;
 };
@@ -151,7 +133,38 @@ type DiagramResponse = {
   source?: "api" | "localStorage";
 };
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+const API_BASE =
+  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+
+/* ---------------- Visual helpers (match Organizer tile feel) ---------------- */
+
+function statusColor(status: BoothStatus) {
+  const s = String(status || "").toLowerCase();
+  if (s === "available") return "#10b981"; // emerald
+  if (s === "pending") return "#f59e0b"; // amber
+  if (s === "booked" || s === "assigned") return "#ef4444"; // red
+  if (s === "reserved") return "#fb923c"; // orange
+  if (s === "blocked") return "#111827"; // slate-900
+  return "#6b7280"; // slate-500
+}
+
+function tileTheme(status: BoothStatus) {
+  const s = String(status || "").toLowerCase();
+  const base = statusColor(s);
+  const isStrong =
+    s === "available" || s === "pending" || s === "booked" || s === "assigned" || s === "reserved" || s === "blocked";
+
+  // Vendor UX: keep strong fills for non-available too (like organizer), but slightly muted.
+  const opacity = s === "available" ? 1 : 0.92;
+
+  return {
+    fill: base,
+    dot: base,
+    text: isStrong ? "#ffffff" : "#0f172a",
+    subtext: isStrong ? "rgba(255,255,255,0.92)" : "#334155",
+    opacity,
+  };
+}
 
 function pill(kind: "Pending" | "Available" | "Reserved" | "Booked" | "Blocked" | "Assigned") {
   const base = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold";
@@ -204,6 +217,15 @@ function extractNumericAppId(created: any): number | null {
     if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
+}
+
+function shortVendorLabel(v?: string | null) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const at = s.indexOf("@");
+  if (at > 0) return s.slice(0, at);
+  if (s.length > 18) return s.slice(0, 18) + "…";
+  return s;
 }
 
 /* ---------------- Confirm Modal ---------------- */
@@ -266,7 +288,6 @@ export default function VendorEventMapLayoutPage() {
   const location = useLocation();
 
   const query = useMemo(() => new URLSearchParams(location.search), [location.search]);
-  // NOTE: this may be empty or may be legacy. We do NOT rely on it being numeric here.
   const appId = query.get("appId") || "";
 
   const [loadingDiagram, setLoadingDiagram] = useState(true);
@@ -281,11 +302,9 @@ export default function VendorEventMapLayoutPage() {
   const [levelId, setLevelId] = useState<string>("level-1");
   const [selectedBoothId, setSelectedBoothId] = useState<string | null>(null);
 
-  // Zoom
   const [zoom, setZoom] = useState(1);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Confirm modal
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -323,11 +342,44 @@ export default function VendorEventMapLayoutPage() {
     };
   }, [diagram]);
 
+  // Booth labels by id (so we never show raw booth ids to users)
+  const boothLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    const allLevels = Array.isArray(diagram?.levels) ? diagram!.levels! : [];
+    if (allLevels.length > 0) {
+      for (const lvl of allLevels) {
+        for (const b of Array.isArray(lvl.booths) ? lvl.booths : []) {
+          if (b?.id && b?.label) m.set(String(b.id), String(b.label));
+        }
+      }
+    } else {
+      for (const b of Array.isArray(diagram?.booths) ? diagram!.booths! : []) {
+        if (b?.id && b?.label) m.set(String(b.id), String(b.label));
+      }
+    }
+    return m;
+  }, [diagram]);
+
+  // Owner by booth_id from server applications, if available
+  const boothOwnerByBoothId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of apps) {
+      const bid = (a as any)?.booth_id;
+      if (!bid) continue;
+
+      const email = (a as any)?.vendor_email;
+      const vendorId = (a as any)?.vendor_id;
+      const label = email ? String(email) : vendorId ? String(vendorId) : "";
+      if (label) m.set(String(bid), label);
+    }
+    return m;
+  }, [apps]);
+
   const vendorBoothStatusById = useMemo(() => {
     const map = new Map<string, string>();
     for (const a of apps) {
-      if (!a?.booth_id) continue;
-      map.set(String(a.booth_id), String(a.status || "pending"));
+      if (!(a as any)?.booth_id) continue;
+      map.set(String((a as any).booth_id), String((a as any).status || "pending"));
     }
     return map;
   }, [apps]);
@@ -369,19 +421,6 @@ export default function VendorEventMapLayoutPage() {
     setSelectedBoothId(null);
   }
 
-  function zoomIn() {
-    setZoom((z) => clamp(Number(z) + 0.1, 0.3, 2));
-  }
-  function zoomOut() {
-    setZoom((z) => clamp(Number(z) - 0.1, 0.3, 2));
-  }
-  function zoomFit() {
-    setZoom(1);
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
-    }
-  }
-
   const diagramCacheKey = useMemo(() => {
     return eventId ? `vendor:event:${eventId}:diagram` : "";
   }, [eventId]);
@@ -398,7 +437,6 @@ export default function VendorEventMapLayoutPage() {
       return;
     }
 
-    // Try API first
     try {
       const url = `${API_BASE}/events/${encodeURIComponent(eventId)}/diagram`;
       const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
@@ -411,7 +449,7 @@ export default function VendorEventMapLayoutPage() {
           try {
             if (diagramCacheKey) localStorage.setItem(diagramCacheKey, JSON.stringify(doc));
           } catch {
-            // ignore cache issues
+            // ignore
           }
           setLoadingDiagram(false);
           return;
@@ -421,7 +459,6 @@ export default function VendorEventMapLayoutPage() {
       // fall through
     }
 
-    // Fallback: localStorage cache
     try {
       const cached = diagramCacheKey ? safeJsonParse(localStorage.getItem(diagramCacheKey)) : null;
       if (cached && typeof cached === "object") {
@@ -497,28 +534,21 @@ export default function VendorEventMapLayoutPage() {
     setSubmitBusy(true);
     setSubmitError(null);
 
-    function normalizeCheckedForSubmit(
-      checked: Record<string, boolean> | undefined | null
-    ) {
+    function normalizeCheckedForSubmit(checked: Record<string, boolean> | undefined | null) {
       const src = checked && typeof checked === "object" ? checked : {};
       const out: Record<string, boolean> = {};
       for (const k of Object.keys(src)) {
-        if (k.startsWith("compliance:")) {
-          out[normalizeId(k.slice("compliance:".length))] = !!src[k];
-        } else {
-          out[normalizeId(k)] = !!src[k];
-        }
+        if (k.startsWith("compliance:")) out[normalizeId(k.slice("compliance:".length))] = !!src[k];
+        else out[normalizeId(k)] = !!src[k];
       }
       return out;
     }
 
-    // ✅ FIX: if appId is empty, load by eventId only (most recent)
     const progress = loadVendorProgress(String(eventId), appId || undefined);
     const uploadSummary = progress
       ? summarizeUploads(progress.uploads || {})
       : { docsWithFiles: 0, totalDocs: 0, totalFiles: 0 };
 
-    // ✅ NEW: attach vendor profile snapshot so organizer read-only view has real data
     const vendorProfileSnapshot = loadVendorProfileSnapshot();
 
     try {
@@ -528,13 +558,11 @@ export default function VendorEventMapLayoutPage() {
         notes: progress
           ? `Uploads: ${uploadSummary.docsWithFiles}/${uploadSummary.totalDocs} docs • ${uploadSummary.totalFiles} file(s)`
           : "",
-        vendor_profile: vendorProfileSnapshot, // ✅
+        vendor_profile: vendorProfileSnapshot,
       });
 
-      // Refresh apps so this screen stays truthful if user returns
       await loadVendorApps();
 
-      // ✅ go straight to Apply with numeric appId
       const numericId = extractNumericAppId(created);
       if (!numericId) {
         navigate("/vendor/applications");
@@ -558,12 +586,22 @@ export default function VendorEventMapLayoutPage() {
 
   const pageStatus = useMemo(() => {
     const anyPending = apps.some(
-      (a) =>
+      (a: any) =>
         String(a.event_id) === String(eventId) &&
         String(a.status || "").toLowerCase() === "submitted"
     );
     return anyPending ? "Pending" : "";
   }, [apps, eventId]);
+
+  function boothUiLabel(b: Booth) {
+    const id = String(b.id);
+    return boothLabelById.get(id) || b.label || `Booth`;
+  }
+
+  function boothOwnerLabel(b: Booth) {
+    const owner = boothOwnerByBoothId.get(String(b.id));
+    return owner ? shortVendorLabel(owner) : "";
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -644,7 +682,7 @@ export default function VendorEventMapLayoutPage() {
 
                 <button
                   type="button"
-                  onClick={zoomOut}
+                  onClick={() => setZoom((z) => clamp(Number(z) - 0.1, 0.3, 2))}
                   className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 hover:bg-slate-50"
                 >
                   −
@@ -654,14 +692,17 @@ export default function VendorEventMapLayoutPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={zoomIn}
+                  onClick={() => setZoom((z) => clamp(Number(z) + 0.1, 0.3, 2))}
                   className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 hover:bg-slate-50"
                 >
                   +
                 </button>
                 <button
                   type="button"
-                  onClick={zoomFit}
+                  onClick={() => {
+                    setZoom(1);
+                    if (scrollRef.current) scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+                  }}
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
                 >
                   Fit
@@ -726,19 +767,23 @@ export default function VendorEventMapLayoutPage() {
                     const sel = selectedBoothId && String(selectedBoothId) === String(b.id);
                     const canSelect = isBoothSelectable(b);
 
-                    const s = statusLabel(b.status);
-                    const bg =
-                      String(b.status || "").toLowerCase() === "available"
-                        ? "bg-white"
-                        : String(b.status || "").toLowerCase() === "pending"
-                        ? "bg-amber-50"
-                        : String(b.status || "").toLowerCase() === "booked"
-                        ? "bg-emerald-50"
-                        : String(b.status || "").toLowerCase() === "reserved"
-                        ? "bg-indigo-50"
-                        : "bg-slate-100";
+                    const label = boothUiLabel(b);
+                    const owner = boothOwnerLabel(b);
+                    const s = String(b.status || "").toLowerCase();
+                    const nonAvailable = s !== "available";
 
-                    const border = sel ? "border-indigo-600 ring-2 ring-indigo-200" : "border-slate-300";
+                    const theme = tileTheme(s);
+                    const dot = statusColor(s);
+
+                    const tooltip = [
+                      label,
+                      b.category ? `Category: ${b.category}` : "",
+                      `Status: ${s || "—"}`,
+                      owner && nonAvailable ? `Held by: ${owner}` : "",
+                      typeof b.price === "number" ? `Price: $${b.price}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" • ");
 
                     return (
                       <button
@@ -746,25 +791,62 @@ export default function VendorEventMapLayoutPage() {
                         type="button"
                         onClick={() => selectBooth(b)}
                         disabled={!canSelect}
-                        className={`absolute flex flex-col items-center justify-center rounded-xl border ${border} ${bg} text-left shadow-sm`}
+                        className="absolute rounded-2xl shadow-sm"
                         style={{
                           left: b.x * zoom,
                           top: b.y * zoom,
                           width: b.width * zoom,
                           height: b.height * zoom,
-                          padding: 8,
+                          padding: 10,
                           cursor: canSelect ? "pointer" : "not-allowed",
-                          opacity: canSelect ? 1 : 0.85,
+                          userSelect: "none",
+                          boxSizing: "border-box",
+                          background: theme.fill,
+                          opacity: theme.opacity,
+                          border: sel ? "3px solid #2563eb" : "2px solid rgba(255,255,255,0.35)",
+                          boxShadow: sel ? "0 14px 30px rgba(37,99,235,0.22)" : "0 3px 10px rgba(15,23,42,0.08)",
+                          color: theme.text,
+                          overflow: "hidden",
                         }}
-                        title={`Booth ${b.label || b.id} • ${s.text}`}
+                        title={tooltip}
                       >
-                        <div className="text-sm font-extrabold text-slate-900">
-                          {b.label || `Booth ${b.id}`}
+                        <div className="flex items-start justify-between gap-2">
+                          <div style={{ fontSize: 12, fontWeight: 1000, lineHeight: 1.1 }}>
+                            {label}
+                          </div>
+                          <div
+                            style={{
+                              width: 10,
+                              height: 10,
+                              borderRadius: 999,
+                              background: dot,
+                              flexShrink: 0,
+                              boxShadow: "0 0 0 2px rgba(255,255,255,0.35)",
+                            }}
+                          />
                         </div>
-                        <div className="mt-1 text-xs font-semibold text-slate-700">{b.category || ""}</div>
-                        <div className="mt-1">
-                          <span className={s.klass}>{s.text}</span>
+
+                        <div style={{ marginTop: 8, fontSize: 12, fontWeight: 1000, lineHeight: 1 }}>
+                          {fmtMoney(b.price)}
                         </div>
+
+                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 900, color: theme.subtext, lineHeight: 1.15 }}>
+                          {b.category || "Select category"}
+                        </div>
+
+                        {/* Only show holder if not available */}
+                        {owner && nonAvailable ? (
+                          <div style={{ marginTop: 6, fontSize: 11, fontWeight: 800, color: theme.subtext, opacity: 0.95 }}>
+                            Held by {owner}
+                          </div>
+                        ) : null}
+
+                        {/* subtle bottom hint for non-selectable */}
+                        {!canSelect ? (
+                          <div style={{ position: "absolute", right: 10, bottom: 8, fontSize: 10, fontWeight: 900, color: theme.subtext, opacity: 0.9 }}>
+                            {s || "—"}
+                          </div>
+                        ) : null}
                       </button>
                     );
                   })}
@@ -781,7 +863,7 @@ export default function VendorEventMapLayoutPage() {
             {selectedBooth ? (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
                 <div className="text-2xl font-extrabold text-slate-900">
-                  {selectedBooth.label || `Booth ${selectedBooth.id}`}
+                  {boothUiLabel(selectedBooth)}
                 </div>
 
                 <div className="mt-2 space-y-1 text-sm text-slate-700">
@@ -792,7 +874,8 @@ export default function VendorEventMapLayoutPage() {
                     Price: <span className="font-semibold">{fmtMoney(selectedBooth.price)}</span>
                   </div>
                   <div>
-                    Status: <span className="font-semibold">{statusLabel(selectedBooth.status).text}</span>
+                    Status:{" "}
+                    <span className="font-semibold">{statusLabel(selectedBooth.status).text}</span>
                   </div>
                   <div>
                     Size:{" "}
@@ -800,6 +883,16 @@ export default function VendorEventMapLayoutPage() {
                       {Math.round(Number(selectedBooth.width || 0))}×{Math.round(Number(selectedBooth.height || 0))}
                     </span>
                   </div>
+
+                  {(() => {
+                    const owner = boothOwnerLabel(selectedBooth);
+                    const nonAvailable = String(selectedBooth.status || "").toLowerCase() !== "available";
+                    return owner && nonAvailable ? (
+                      <div>
+                        Held by: <span className="font-semibold">{owner}</span>
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -850,9 +943,7 @@ export default function VendorEventMapLayoutPage() {
           title="Confirm booth request"
           subtitle={
             selectedBooth
-              ? `${selectedBooth.label || `Booth ${selectedBooth.id}`} for ${fmtMoney(
-                  selectedBooth.price
-                )}?\n\nYour request will be submitted as Pending until the organizer reviews it.`
+              ? `${boothUiLabel(selectedBooth)} for ${fmtMoney(selectedBooth.price)}?\n\nYour request will be submitted as Pending until the organizer reviews it.`
               : "Your request will be submitted as Pending until the organizer reviews it."
           }
           confirmText="Submit Request"

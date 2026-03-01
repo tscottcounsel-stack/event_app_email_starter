@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import base64
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 
-from app.store import _APPLICATIONS  # source of truth in current dev store
+# Dev store (current system)
+from app.store import _APPLICATIONS, _VENDORS, save_store
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
 
@@ -37,6 +39,11 @@ def _pick_vendor_identity(req: Request) -> Dict[str, Optional[str]]:
     return {"email": email or None, "vendor_id": vid}
 
 
+def _vendor_key(email: Optional[str]) -> str:
+    key = _norm_email(email)
+    return key
+
+
 def _extract_vendor_profile_from_app(app: Dict[str, Any]) -> Dict[str, Any]:
     """
     Build a vendor profile payload from whatever we have available today.
@@ -45,9 +52,7 @@ def _extract_vendor_profile_from_app(app: Dict[str, Any]) -> Dict[str, Any]:
     """
     email = app.get("vendor_email") or app.get("email") or ""
     vendor_id = app.get("vendor_id")  # may be string/number
-    base: Dict[str, Any] = {
-        "email": email,
-    }
+    base: Dict[str, Any] = {"email": email}
     if vendor_id is not None:
         base["vendor_id"] = vendor_id
 
@@ -99,18 +104,14 @@ def _find_latest_app_by_vendor_id(vendor_id: str) -> Optional[Dict[str, Any]]:
     return best
 
 
-def _apply_profile_to_matching_apps(
-    *,
-    email: Optional[str],
-    vendor_id: Optional[str],
-    profile: Dict[str, Any],
-) -> Dict[str, Any]:
+def _mirror_profile_into_matching_apps(
+    *, email: Optional[str], vendor_id: Optional[str], profile: Dict[str, Any]
+) -> None:
     """
-    Update ALL matching applications so organizer view (which reads from _APPLICATIONS)
-    immediately reflects the newest vendor profile.
+    Keep legacy organizer screens (that read from _APPLICATIONS) in sync.
+    This does NOT make _APPLICATIONS the source of truth anymore.
     """
     now = utc_now_iso()
-    updated_any = False
 
     for app in _APPLICATIONS.values():
         email_match = bool(email) and _norm_email(
@@ -121,64 +122,75 @@ def _apply_profile_to_matching_apps(
             and app.get("vendor_id") is not None
             and str(app.get("vendor_id")) == str(vendor_id)
         )
-
         if not (email_match or vid_match):
             continue
 
-        # Ensure vendor_email exists (organizer routes are email-based)
         if email and not _norm_email(app.get("vendor_email")):
             app["vendor_email"] = email
 
-        # Ensure vendor_id exists if we have it
         if vendor_id and app.get("vendor_id") is None:
             app["vendor_id"] = vendor_id
 
         app["vendor_profile"] = profile
         app["updated_at"] = now
-        updated_any = True
 
-    if not updated_any:
-        # No applications exist yet for this vendor; return profile anyway.
-        # Organizer side won't have anything to show until an application exists.
-        pass
 
-    # Return a server-ish payload
-    out = dict(profile)
-    if email and not out.get("email"):
-        out["email"] = email
-    if vendor_id is not None and "vendor_id" not in out:
-        out["vendor_id"] = vendor_id
-    out["updated_at"] = now
-    return out
+def _save_vendor_profile(
+    email: str, vendor_id: Optional[str], profile: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Save to _VENDORS as source of truth, and mirror to apps for legacy views.
+    """
+    now = utc_now_iso()
+    key = _vendor_key(email)
+
+    profile = dict(profile or {})
+    profile["email"] = email
+    if vendor_id:
+        profile.setdefault("vendor_id", vendor_id)
+
+    profile["updatedAt"] = now
+
+    _VENDORS[key] = profile
+    save_store()
+
+    _mirror_profile_into_matching_apps(
+        email=email, vendor_id=vendor_id, profile=profile
+    )
+    return profile
+
+
+def _uploads_dir() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))  # .../app/routers
+    app_dir = os.path.abspath(os.path.join(base_dir, ".."))  # .../app
+    root_dir = os.path.abspath(os.path.join(app_dir, ".."))  # project root
+    return os.path.join(root_dir, "uploads")
+
+
+def _safe_ext(filename: str) -> str:
+    name = (filename or "").strip()
+    _, ext = os.path.splitext(name)
+    ext = ext.lower()
+    if ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]:
+        return ext
+    return ".jpg"
+
+
+# ----------------------------
+# Public / Organizer lookups
+# ----------------------------
 
 
 @router.get("/by-email/{email}")
 def get_vendor_by_email(email: str):
-    needle = _norm_email(email)
-    if not needle:
-        raise HTTPException(status_code=400, detail="Email is required")
-
-    best = _find_latest_app_by_email(needle)
-    if not best:
-        raise HTTPException(status_code=404, detail="Vendor not found by email")
-
-    return _extract_vendor_profile_from_app(best)
+    key = _vendor_key(email)
+    v = _VENDORS.get(key)
+    return v or {}
 
 
-@router.get("/{vendor_id}")
-def get_vendor(vendor_id: int):
-    """
-    Current system has no vendor table.
-    For now, resolve vendor_id by scanning applications.vendor_id.
-    """
-    best = _find_latest_app_by_vendor_id(str(vendor_id))
-    if not best:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-
-    return _extract_vendor_profile_from_app(best)
-
-
-# ---------------- NEW: /vendors/me ----------------
+# ----------------------------
+# ✅ IMPORTANT: /vendors/me MUST be defined BEFORE /vendors/{vendor_id}
+# ----------------------------
 
 
 @router.get("/me")
@@ -193,6 +205,13 @@ def get_my_vendor_profile(request: Request):
             detail="Missing vendor identity (x-user-email or x-user-id).",
         )
 
+    # Source of truth: _VENDORS by email
+    if email:
+        v = _VENDORS.get(_vendor_key(email))
+        if v:
+            return v
+
+    # Fallback: derive from apps
     best: Optional[Dict[str, Any]] = None
     if email:
         best = _find_latest_app_by_email(email)
@@ -200,7 +219,6 @@ def get_my_vendor_profile(request: Request):
         best = _find_latest_app_by_vendor_id(vid)
 
     if not best:
-        # Return a minimal profile instead of 404 so UI can still render setup page.
         return {"email": email or "", "vendor_id": vid}
 
     return _extract_vendor_profile_from_app(best)
@@ -209,39 +227,33 @@ def get_my_vendor_profile(request: Request):
 @router.put("/me")
 def put_my_vendor_profile(request: Request, body: Dict[str, Any] = Body(default={})):
     ident = _pick_vendor_identity(request)
+
     email = ident["email"] or _norm_email(
         body.get("email") or body.get("vendor_email") or ""
     )
     vid = ident["vendor_id"] or _safe_str(body.get("vendor_id") or "")
 
-    if not email and not vid:
+    if not email:
         raise HTTPException(
             status_code=400, detail="Email is required (x-user-email header preferred)."
         )
 
-    # Accept either { vendor_profile: {...} } or a flat body
     incoming = body.get("vendor_profile")
     profile = incoming if isinstance(incoming, dict) else dict(body)
 
-    # Ensure email is present in the profile blob too
-    if email and not _norm_email(profile.get("email")):
-        profile["email"] = email
+    profile["email"] = email
+    if vid:
+        profile.setdefault("vendor_id", vid)
 
-    # Store vendor_id if known
-    if vid and not _safe_str(profile.get("vendor_id")):
-        profile["vendor_id"] = vid
-
-    saved = _apply_profile_to_matching_apps(
-        email=email, vendor_id=vid or None, profile=profile
-    )
+    saved = _save_vendor_profile(email=email, vendor_id=vid or None, profile=profile)
     return saved
 
 
 @router.put("/me/logo")
 async def put_my_vendor_logo(request: Request, file: UploadFile = File(...)):
     """
-    Store logo as a data URL inside vendor_profile so both vendor + organizer views
-    can render it without needing a blob store in dev.
+    Save logo to disk under /uploads and store logoUrl in _VENDORS.
+    Also stores logoDataUrl as a fallback (optional but helpful in dev).
     """
     ident = _pick_vendor_identity(request)
     email = ident["email"]
@@ -253,30 +265,63 @@ async def put_my_vendor_logo(request: Request, file: UploadFile = File(...)):
             detail="Missing vendor identity (x-user-email or x-user-id).",
         )
 
+    if not email:
+        raise HTTPException(
+            status_code=400, detail="x-user-email header is required for logo upload."
+        )
+
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty upload.")
+
+    up_dir = _uploads_dir()
+    os.makedirs(up_dir, exist_ok=True)
+
+    ext = _safe_ext(file.filename or "")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    safe_email = email.replace("@", "_at_").replace(".", "_")
+    fname = f"vendor_{safe_email}_logo_{ts}{ext}"
+    fpath = os.path.join(up_dir, fname)
+
+    with open(fpath, "wb") as f:
+        f.write(content)
+
+    logo_url = f"/uploads/{fname}"
 
     ctype = file.content_type or "application/octet-stream"
     b64 = base64.b64encode(content).decode("utf-8")
     data_url = f"data:{ctype};base64,{b64}"
 
-    # Start from latest profile (if any), then set logo
-    best: Optional[Dict[str, Any]] = None
+    current = _VENDORS.get(_vendor_key(email)) or {"email": email}
+    if vid:
+        current.setdefault("vendor_id", vid)
+
+    current["logoUrl"] = logo_url
+    current["logoDataUrl"] = data_url
+    saved = _save_vendor_profile(email=email, vendor_id=vid or None, profile=current)
+
+    return {"ok": True, "logoUrl": logo_url, "profile": saved}
+
+
+# ----------------------------
+# Vendor ID lookup (must be LAST)
+# ----------------------------
+
+
+@router.get("/{vendor_id}")
+def get_vendor(vendor_id: int):
+    """
+    Current system has no vendor table.
+    For now, resolve vendor_id by scanning applications.vendor_id.
+    """
+    best = _find_latest_app_by_vendor_id(str(vendor_id))
+    if not best:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    email = _norm_email(best.get("vendor_email"))
     if email:
-        best = _find_latest_app_by_email(email)
-    if not best and vid:
-        best = _find_latest_app_by_vendor_id(vid)
+        v = _VENDORS.get(_vendor_key(email))
+        if v:
+            return v
 
-    existing_profile: Dict[str, Any] = {}
-    if best:
-        existing_profile = _extract_vendor_profile_from_app(best)
-        # strip server-injected keys to keep blob clean
-        existing_profile.pop("updated_at", None)
-
-    existing_profile["logoDataUrl"] = data_url
-
-    saved = _apply_profile_to_matching_apps(
-        email=email, vendor_id=vid or None, profile=existing_profile
-    )
-    return {"ok": True, "logoDataUrl": data_url, "profile": saved}
+    return _extract_vendor_profile_from_app(best)
