@@ -124,6 +124,8 @@ export default function PublicLoginPage() {
   async function handleContinue(e?: React.FormEvent | React.MouseEvent) {
     e?.preventDefault?.();
 
+    if (loading) return;
+
     setLoading(true);
     setError(null);
 
@@ -230,9 +232,20 @@ export default function PublicLoginPage() {
                   </div>
 
                   <div>
-                    <label htmlFor="password" className="text-xs font-black text-slate-700">
-                      Password
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="password" className="text-xs font-black text-slate-700">
+                        Password
+                      </label>
+
+                      {/* ✅ Forgot password link */}
+                      <Link
+                        to="/forgot-password"
+                        className="text-xs font-black text-indigo-700 hover:text-indigo-800"
+                      >
+                        Forgot password?
+                      </Link>
+                    </div>
+
                     <input
                       id="password"
                       name="password"
@@ -254,7 +267,6 @@ export default function PublicLoginPage() {
 
                   <button
                     type="submit"
-                    onClick={handleContinue}
                     disabled={loading}
                     className={`w-full rounded-2xl px-6 py-3 text-sm font-black text-white ${
                       loading ? "bg-slate-400" : "bg-gradient-to-r from-indigo-600 to-purple-600"

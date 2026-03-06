@@ -3,26 +3,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { getEventDiagram, saveEventDiagram } from "../components/api/diagram";
 import type { Booth } from "../components/api/diagram";
-import { readSession } from "../../auth/authStorage";
 
 /* ---------------- Types ---------------- */
 
-type BoothStatus =
-  | "available"
-  | "pending"
-  | "booked"
-  | "reserved"
-  | "assigned"
-  | "blocked";
-
-type ElementType =
-  | "stage"
-  | "restrooms"
-  | "entrance"
-  | "info"
-  | "foodcourt"
-  | "street"
-  | "venue";
+type ElementType = "venue" | "street" | "label" | "shape";
 
 type MapElement = {
   id: string;
@@ -42,6 +26,10 @@ type Level = {
 };
 
 type DiagramDoc = {
+  // Publish/lock state is stored on the diagram so it persists per-event.
+  // When published: geometry edits are locked, but assignment actions are still allowed.
+  published?: boolean;
+  meta?: { published?: boolean };
   version?: number;
   canvas?: { width?: number; height?: number; gridSize?: number };
   levels?: Array<{
@@ -59,6 +47,7 @@ type DiagramDoc = {
 type AppReservationInfo = {
   applicationId: number;
   vendorEmail?: string;
+  vendorName?: string;
   paymentStatus: "unpaid" | "pending" | "paid" | "expired" | "unknown";
   reservedUntil?: string | null;
 };
@@ -68,6 +57,10 @@ type OrganizerApp = {
   status?: string;
   vendor_email?: string;
   vendor_id?: number | string;
+  vendor_name?: string;
+  vendor_company_name?: string;
+  company_name?: string;
+  vendor_display_name?: string;
   booth_id?: string | null;
   booth_reserved_until?: string | null;
   payment_status?: string | null;
@@ -96,6 +89,17 @@ function fmtWhen(value?: string | null) {
   return d.toLocaleString();
 }
 
+function pickVendorDisplayName(a: OrganizerApp): string | undefined {
+  const raw =
+    a.vendor_company_name ||
+    a.company_name ||
+    a.vendor_name ||
+    a.vendor_display_name ||
+    undefined;
+  const s = raw ? String(raw).trim() : "";
+  return s || undefined;
+}
+
 /* ---------------- Constants ---------------- */
 
 const API_BASE =
@@ -103,132 +107,85 @@ const API_BASE =
 
 const CATEGORY_OPTIONS = [
   "Food & Beverage",
-  "Technology",
-  "Art & Crafts",
-  "Retail",
-  "Entertainment",
+  "Clothing",
+  "Accessories",
+  "Beauty",
+  "Art",
+  "Tech",
+  "Home",
   "Services",
-  "Wellness",
-  "Non-Profit",
+  "Other",
 ];
 
-const SIZE_PRESETS: Array<{ label: string; w: number | null; h: number | null }> =
-  [
-    { label: "Custom Size", w: null, h: null },
-    { label: "10×10", w: 120, h: 80 },
-    { label: "10×20", w: 160, h: 80 },
-    { label: "20×20", w: 160, h: 120 },
-    { label: "20×30", w: 200, h: 140 },
-  ];
+/* ---------------- Small Helpers ---------------- */
 
-/* ---------------- Utils ---------------- */
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
+}
 
 function uid(prefix = "id") {
-  return `${prefix}-${Math.random().toString(16).slice(2)}-${Date.now()}`;
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function safeJsonParse<T>(raw: string | null): T | null {
-  if (!raw) return null;
+function safeJsonParse<T = any>(s: string | null): T | null {
+  if (!s) return null;
   try {
-    return JSON.parse(raw) as T;
+    return JSON.parse(s) as T;
   } catch {
     return null;
   }
 }
 
-function lsDiagramKey(eventId: string | number) {
-  return `vendorconnect:diagram:${eventId}`;
-}
-
-function persistDiagramToLocal(eventId: string | number, diagram: any, version?: number) {
-  try {
-    localStorage.setItem(
-      lsDiagramKey(eventId),
-      JSON.stringify({
-        event_id: eventId,
-        version: version ?? 1,
-        diagram,
-        updated_at: new Date().toISOString(),
-      })
-    );
-  } catch {
-    // ignore
+function isEmptyDiagramDoc(doc: DiagramDoc | null | undefined) {
+  if (!doc) return true;
+  const levels = Array.isArray(doc.levels) ? doc.levels : [];
+  const legacyBooths = Array.isArray(doc.booths) ? doc.booths : [];
+  if (levels.length) {
+    return levels.every((l) => (l.booths?.length ?? 0) === 0 && (l.elements?.length ?? 0) === 0);
   }
+  return legacyBooths.length === 0;
 }
 
-function isEmptyDiagramDoc(doc: any) {
-  if (!doc || typeof doc !== "object") return true;
-
-  if (Array.isArray(doc.levels)) {
-    if (doc.levels.length === 0) return true;
-    const hasAny = doc.levels.some(
-      (l: any) =>
-        (Array.isArray(l?.booths) ? l.booths.length : 0) > 0 ||
-        (Array.isArray(l?.elements) ? l.elements.length : 0) > 0
-    );
-    return !hasAny;
-  }
-
-  if (Array.isArray(doc.booths)) return doc.booths.length === 0;
-  return true;
+function lsDiagramKey(eventId: string) {
+  return `event:${String(eventId)}:diagram`;
 }
 
-function statusColor(status: BoothStatus) {
-  if (status === "available") return "#10b981";
-  if (status === "reserved") return "#fb923c";
-  if (status === "pending") return "#f59e0b";
-  if (status === "booked" || status === "assigned") return "#ef4444";
-  if (status === "blocked") return "#111827";
-  return "#6b7280";
+function readSession() {
+  const s = safeJsonParse<any>(localStorage.getItem("session"));
+  return s || null;
 }
 
-function elementLabel(t: ElementType) {
-  if (t === "stage") return "Stage";
-  if (t === "restrooms") return "Restrooms";
-  if (t === "entrance") return "Entrance";
-  if (t === "info") return "Info";
-  if (t === "foodcourt") return "Food Court";
-  if (t === "street") return "Street";
-  return "Venue Boundary";
-}
-
-function pill(active = false): React.CSSProperties {
+function pill(active: boolean): React.CSSProperties {
   return {
-    border: active ? "2px solid #2563eb" : "1px solid rgba(15,23,42,0.12)",
     borderRadius: 999,
     padding: "8px 12px",
-    fontSize: 12,
     fontWeight: 900,
-    background: "#fff",
+    fontSize: 12,
+    border: active ? "1px solid rgba(99,102,241,0.40)" : "1px solid rgba(15,23,42,0.12)",
+    background: active ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.90)",
+    color: active ? "#4338ca" : "#0f172a",
     cursor: "pointer",
     userSelect: "none",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    whiteSpace: "nowrap",
   };
 }
 
 function softCard(): React.CSSProperties {
   return {
-    border: "1px solid rgba(15,23,42,0.10)",
     borderRadius: 16,
-    background: "#fff",
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(255,255,255,0.92)",
+    boxShadow: "0 10px 24px rgba(2,6,23,0.06)",
   };
 }
 
 async function readJson(res: Response) {
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return await res.json().catch(() => ({}));
-  const text = await res.text().catch(() => "");
-  return { detail: text };
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return text || null;
+  }
 }
-
-/* ---------------- Policy 2 API ---------------- */
 
 async function fetchOrganizerApplications(eventId: string): Promise<OrganizerApp[]> {
   const s = readSession();
@@ -236,7 +193,7 @@ async function fetchOrganizerApplications(eventId: string): Promise<OrganizerApp
   const email = s?.email || "organizer@example.com";
 
   const res = await fetch(
-    `${API_BASE}/organizer/events/${encodeURIComponent(eventId)}/applications`,
+    `${API_BASE}/organizer/events/${encodeURIComponent(String(eventId))}/applications`,
     {
       method: "GET",
       headers: {
@@ -249,7 +206,11 @@ async function fetchOrganizerApplications(eventId: string): Promise<OrganizerApp
 
   const data = await readJson(res);
   if (!res.ok) throw new Error(String((data as any)?.detail || "Failed to load applications"));
-  return Array.isArray((data as any)?.applications) ? (data as any).applications : [];
+  return Array.isArray((data as any)?.applications)
+    ? (data as any).applications
+    : Array.isArray(data)
+    ? data
+    : [];
 }
 
 async function organizerReserveBooth(appId: number, boothId: string) {
@@ -270,6 +231,7 @@ async function organizerReserveBooth(appId: number, boothId: string) {
       body: JSON.stringify({ booth_id: boothId, hold_hours: 48 }),
     }
   );
+
   const data = await readJson(res);
   if (!res.ok) throw new Error(String((data as any)?.detail || "Reserve failed"));
   return data;
@@ -287,14 +249,81 @@ export default function BoothMapEditor() {
     const sp = new URLSearchParams(location.search);
     return String(sp.get("eventId") || "").trim();
   }, [location.search]);
+
   const eventId = (routeEventId || queryEventId || "").trim();
 
-  // Picker mode (Policy 2)
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
   const assignAppIdRaw = (searchParams.get("assignAppId") || "").trim();
-  const assignAction = (searchParams.get("assignAction") || "").trim().toLowerCase(); // reserve|change
+  const assignAction = (searchParams.get("assignAction") || "").trim().toLowerCase();
   const assignAppId = assignAppIdRaw ? Number(assignAppIdRaw) : null;
   const pickerMode = Boolean(assignAppId && (assignAction === "reserve" || assignAction === "change"));
+
+  /* ---------------- Publish / Lock + Print ---------------- */
+
+  // Published locks geometry (move/resize/add/delete), but we still allow assignment changes when in picker mode.
+  const [isPublished, setIsPublished] = useState<boolean>(false);
+
+  // Temporary override to allow geometry edits while published (e.g., last-minute layout change).
+  // We auto-relock after a short window to prevent accidental drift.
+  const [layoutOverrideUntil, setLayoutOverrideUntil] = useState<number | null>(null);
+  const layoutOverrideActive = useMemo(() => {
+    if (!layoutOverrideUntil) return false;
+    return Date.now() < layoutOverrideUntil;
+  }, [layoutOverrideUntil]);
+
+  const layoutLocked = Boolean(isPublished && !layoutOverrideActive && !pickerMode);
+
+  // Printing: temporarily hide panels/grid and fit the canvas, then invoke browser print.
+  const printSnapshotRef = useRef<{
+    drawerOpen: boolean;
+    hideGrid: boolean;
+    zoom: number;
+  } | null>(null);
+
+  function beginLayoutOverride() {
+    // 10 minute edit window (safe default)
+    const mins = 10;
+    setLayoutOverrideUntil(Date.now() + mins * 60 * 1000);
+  }
+
+  function relockLayoutNow() {
+    setLayoutOverrideUntil(null);
+  }
+
+  function handlePrint() {
+    // Save current UI state
+    if (!printSnapshotRef.current) {
+      printSnapshotRef.current = { drawerOpen, hideGrid, zoom };
+    }
+
+    // Make print clean: hide grid/panel and fit to screen
+    setDrawerOpen(false);
+    setHideGrid(true);
+
+    // Fit before printing (next tick so DOM sizes settle)
+    setTimeout(() => {
+      try {
+        fitToScreen();
+      } catch {}
+      setTimeout(() => {
+        window.print();
+      }, 50);
+    }, 50);
+  }
+
+  useEffect(() => {
+    const onAfterPrint = () => {
+      const snap = printSnapshotRef.current;
+      if (snap) {
+        setDrawerOpen(snap.drawerOpen);
+        setHideGrid(snap.hideGrid);
+        setZoom(snap.zoom);
+      }
+      printSnapshotRef.current = null;
+    };
+    window.addEventListener("afterprint", onAfterPrint);
+    return () => window.removeEventListener("afterprint", onAfterPrint);
+  }, []);
 
   const canvasScrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -313,7 +342,6 @@ export default function BoothMapEditor() {
     [levels, activeLevelId]
   );
 
-  // Tabs row (these are your "header tabs")
   const [tab, setTab] = useState<
     "floors" | "booths" | "elements" | "vendors" | "reservations" | "settings"
   >("booths");
@@ -325,20 +353,28 @@ export default function BoothMapEditor() {
 
   const selectedBooth = useMemo(() => {
     if (selectedKind !== "booth" || !selectedId) return null;
-    return activeLevel.booths.find((b) => (b as any).id === selectedId) || null;
-  }, [activeLevel.booths, selectedKind, selectedId]);
+    return activeLevel.booths.find((b: any) => String(b.id) === String(selectedId)) || null;
+  }, [selectedKind, selectedId, activeLevel.booths]);
 
   const selectedElement = useMemo(() => {
     if (selectedKind !== "element" || !selectedId) return null;
     return activeLevel.elements.find((e) => e.id === selectedId) || null;
-  }, [activeLevel.elements, selectedKind, selectedId]);
+  }, [selectedKind, selectedId, activeLevel.elements]);
 
   // Drag/resize
   const [drag, setDrag] = useState<
     null | { kind: "booth" | "element"; id: string; cx: number; cy: number }
   >(null);
   const [resize, setResize] = useState<
-    null | { kind: "booth" | "element"; id: string; sw: number; sh: number; cx: number; cy: number }
+    | null
+    | {
+        kind: "booth" | "element";
+        id: string;
+        sw: number;
+        sh: number;
+        cx: number;
+        cy: number;
+      }
   >(null);
 
   // Save state
@@ -358,7 +394,22 @@ export default function BoothMapEditor() {
 
   // Policy 2 overlays + apps list (Assign Vendor)
   const [apps, setApps] = useState<OrganizerApp[]>([]);
-  const [boothReservations, setBoothReservations] = useState<Record<string, AppReservationInfo>>({});
+
+  // ✅ Paid lock (UX): if the currently-focused application is already PAID, prevent any booth changes.
+  const pickerApp = useMemo(() => {
+    if (!assignAppId) return null;
+    return apps.find((a) => Number(a?.id) === Number(assignAppId)) || null;
+  }, [apps, assignAppId]);
+
+  const pickerPaymentStatus = useMemo(() => {
+    return parsePaymentStatus((pickerApp as any)?.payment_status);
+  }, [pickerApp]);
+
+  const isLocked = Boolean(pickerMode && assignAppId && pickerPaymentStatus === "paid");
+
+  const [boothReservations, setBoothReservations] = useState<Record<string, AppReservationInfo>>(
+    {}
+  );
   const [reservationsError, setReservationsError] = useState<string | null>(null);
 
   const refreshReservations = useCallback(async () => {
@@ -380,6 +431,7 @@ export default function BoothMapEditor() {
           idx[boothId] = {
             applicationId: Number(a?.id),
             vendorEmail: a?.vendor_email ? String(a.vendor_email) : undefined,
+            vendorName: pickVendorDisplayName(a),
             paymentStatus: "paid",
             reservedUntil: until,
           };
@@ -390,6 +442,7 @@ export default function BoothMapEditor() {
           idx[boothId] = {
             applicationId: Number(a?.id),
             vendorEmail: a?.vendor_email ? String(a.vendor_email) : undefined,
+            vendorName: pickVendorDisplayName(a),
             paymentStatus: pay,
             reservedUntil: until,
           };
@@ -398,7 +451,9 @@ export default function BoothMapEditor() {
 
       setBoothReservations(idx);
     } catch (e: any) {
-      setReservationsError(e?.message ? String(e.message) : "Failed to load applications.");
+      setReservationsError(
+        e?.message ? String(e.message) : "Failed to load applications."
+      );
       setApps([]);
       setBoothReservations({});
     }
@@ -433,10 +488,16 @@ export default function BoothMapEditor() {
         const apiDiagram = (raw ?? null) as DiagramDoc | null;
         const apiHasLayout = apiDiagram && !isEmptyDiagramDoc(apiDiagram);
 
+        // Publish state (persisted in diagram)
+        const publishedFlag = Boolean((apiDiagram as any)?.published ?? (apiDiagram as any)?.meta?.published);
+        setIsPublished(publishedFlag);
+
         if (!apiHasLayout) {
           const cached = safeJsonParse<any>(localStorage.getItem(lsDiagramKey(eventId)));
           if (cached?.diagram) {
             const dLocal = cached.diagram as DiagramDoc;
+            const publishedFlagLocal = Boolean((dLocal as any)?.published ?? (dLocal as any)?.meta?.published);
+            setIsPublished(publishedFlagLocal);
             setCanvasW(dLocal.canvas?.width ?? 1200);
             setCanvasH(dLocal.canvas?.height ?? 800);
             setGridSize(dLocal.canvas?.gridSize ?? 20);
@@ -464,20 +525,15 @@ export default function BoothMapEditor() {
             }
 
             setStatusMsg("Loaded (local)");
-            setTimeout(() => fitToScreen(), 0);
             return;
           }
 
-          setLevels([{ id: "level-1", name: "Level 1", booths: [], elements: [] }]);
-          setActiveLevelId("level-1");
-          setStatusMsg("New layout");
-          setTimeout(() => fitToScreen(), 0);
+          setStatusMsg("Loaded (empty)");
           return;
         }
 
+        // hydrate from API
         const d = apiDiagram as DiagramDoc;
-        persistDiagramToLocal(eventId, d, (data as any)?.version ?? 1);
-
         setCanvasW(d.canvas?.width ?? 1200);
         setCanvasH(d.canvas?.height ?? 800);
         setGridSize(d.canvas?.gridSize ?? 20);
@@ -504,10 +560,11 @@ export default function BoothMapEditor() {
           setActiveLevelId("level-1");
         }
 
+        // cache
+        localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: d }));
         setStatusMsg("Loaded");
-        setTimeout(() => fitToScreen(), 0);
       } catch (e: any) {
-        setSaveError(e?.message ? String(e.message) : "Load failed");
+        setSaveError(e?.message ? String(e.message) : "Failed to load diagram.");
         setStatusMsg("Load failed");
       }
     })();
@@ -515,102 +572,80 @@ export default function BoothMapEditor() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);
 
-  // Drag/resize move/up
+  // Drag handlers
   useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!drag && !resize) return;
+    if (!drag && !resize) return;
 
+    const onMove = (e: MouseEvent) => {
       const dx = (e.clientX - (drag?.cx ?? resize?.cx ?? 0)) / zoom;
       const dy = (e.clientY - (drag?.cy ?? resize?.cy ?? 0)) / zoom;
 
       if (drag) {
-        if (drag.kind === "booth") {
-          setLevels((prev) =>
-            prev.map((lvl) =>
-              lvl.id !== activeLevelId
-                ? lvl
-                : {
-                    ...lvl,
-                    booths: lvl.booths.map((b) =>
-                      (b as any).id === drag.id
-                        ? ({
-                            ...(b as any),
-                            x: clamp((b as any).x + dx, 0, canvasW - 10),
-                            y: clamp((b as any).y + dy, 0, canvasH - 10),
-                          } as any)
-                        : b
-                    ),
-                  }
-            )
-          );
-        } else {
-          setLevels((prev) =>
-            prev.map((lvl) =>
-              lvl.id !== activeLevelId
-                ? lvl
-                : {
-                    ...lvl,
-                    elements: lvl.elements.map((el) =>
-                      el.id === drag.id
-                        ? {
-                            ...el,
-                            x: clamp(el.x + dx, 0, canvasW - 10),
-                            y: clamp(el.y + dy, 0, canvasH - 10),
-                          }
-                        : el
-                    ),
-                  }
-            )
-          );
-        }
+        const { kind, id } = drag;
+        setLevels((prev) =>
+          prev.map((lvl) => {
+            if (lvl.id !== activeLevelId) return lvl;
+            if (kind === "booth") {
+              return {
+                ...lvl,
+                booths: lvl.booths.map((b: any) =>
+                  String(b.id) !== String(id)
+                    ? b
+                    : { ...b, x: (b.x || 0) + dx, y: (b.y || 0) + dy }
+                ),
+              };
+            }
+            return {
+              ...lvl,
+              elements: lvl.elements.map((el) =>
+                el.id !== id ? el : { ...el, x: el.x + dx, y: el.y + dy }
+              ),
+            };
+          })
+        );
+
+        setDrag({ ...drag, cx: e.clientX, cy: e.clientY });
         markDirty();
-        return;
       }
 
       if (resize) {
-        const nw = clamp(resize.sw + dx, 30, canvasW);
-        const nh = clamp(resize.sh + dy, 30, canvasH);
+        const { kind, id, sw, sh } = resize;
+        const nw = Math.max(40, sw + dx);
+        const nh = Math.max(28, sh + dy);
 
-        if (resize.kind === "booth") {
-          setLevels((prev) =>
-            prev.map((lvl) =>
-              lvl.id !== activeLevelId
-                ? lvl
-                : {
-                    ...lvl,
-                    booths: lvl.booths.map((b) =>
-                      (b as any).id === resize.id
-                        ? ({ ...(b as any), width: nw, height: nh } as any)
-                        : b
-                    ),
-                  }
-            )
-          );
-        } else {
-          setLevels((prev) =>
-            prev.map((lvl) =>
-              lvl.id !== activeLevelId
-                ? lvl
-                : {
-                    ...lvl,
-                    elements: lvl.elements.map((el) =>
-                      el.id === resize.id ? { ...el, width: nw, height: nh } : el
-                    ),
-                  }
-            )
-          );
-        }
+        setLevels((prev) =>
+          prev.map((lvl) => {
+            if (lvl.id !== activeLevelId) return lvl;
+            if (kind === "booth") {
+              return {
+                ...lvl,
+                booths: lvl.booths.map((b: any) =>
+                  String(b.id) !== String(id)
+                    ? b
+                    : { ...b, width: nw, height: nh }
+                ),
+              };
+            }
+            return {
+              ...lvl,
+              elements: lvl.elements.map((el) =>
+                el.id !== id ? el : { ...el, width: nw, height: nh }
+              ),
+            };
+          })
+        );
+
+        setResize({ ...resize, cx: e.clientX, cy: e.clientY });
         markDirty();
       }
-    }
+    };
 
-    function onUp() {
-      if (drag) setDrag(null);
-      if (resize) setResize(null);
-    }
+    const onUp = () => {
+      setDrag(null);
+      setResize(null);
+    };
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -618,255 +653,181 @@ export default function BoothMapEditor() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [drag, resize, zoom, activeLevelId, canvasW, canvasH]);
+  }, [drag, resize, zoom, activeLevelId]);
 
   function beginDrag(kind: "booth" | "element", id: string, e: React.MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (pickerMode) return;
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to move items.");
+      return;
+    }
     setDrag({ kind, id, cx: e.clientX, cy: e.clientY });
   }
 
   function beginResize(kind: "booth" | "element", id: string, e: React.MouseEvent) {
-    e.preventDefault();
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to resize items.");
+      return;
+    }
     e.stopPropagation();
-    if (pickerMode) return;
-
     if (kind === "booth") {
-      const booth = activeLevel.booths.find((b) => (b as any).id === id) as any;
-      if (!booth) return;
-      setResize({ kind, id, sw: booth.width, sh: booth.height, cx: e.clientX, cy: e.clientY });
-    } else {
-      const el = activeLevel.elements.find((x) => x.id === id);
-      if (!el) return;
-      setResize({ kind, id, sw: el.width, sh: el.height, cx: e.clientX, cy: e.clientY });
+      const b = activeLevel.booths.find((x: any) => String(x.id) === String(id)) as any;
+      if (!b) return;
+      setResize({ kind, id, sw: Number(b.width || 100), sh: Number(b.height || 80), cx: e.clientX, cy: e.clientY });
+      return;
     }
+    const el = activeLevel.elements.find((x) => x.id === id);
+    if (!el) return;
+    setResize({ kind, id, sw: el.width, sh: el.height, cx: e.clientX, cy: e.clientY });
   }
 
-  function nextBoothNumberForLevel(lvl: Level) {
-    let maxN = 0;
-    for (const b of lvl.booths as any[]) {
-      const label = String((b as any).label || "");
-      const m = label.match(/Booth\s+(\d+)/i);
-      if (m?.[1]) maxN = Math.max(maxN, Number(m[1]));
-    }
-    return maxN + 1;
-  }
-
-  function addBooth() {
-    const n = nextBoothNumberForLevel(activeLevel);
-    const b: Booth = {
-      id: uid("booth"),
-      x: 140,
-      y: 140,
-      width: 120,
-      height: 80,
-      label: `Booth ${n}`,
-      status: "available",
-      category: "Food & Beverage",
-      price: 500,
-    } as any;
-
-    setLevels((prev) =>
-      prev.map((l) => (l.id === activeLevelId ? { ...l, booths: [...l.booths, b] } : l))
-    );
-    setSelectedKind("booth");
-    setSelectedId((b as any).id);
-    setDrawerOpen(true);
-    setTab("booths");
-    markDirty();
-  }
-
-  function addLevel() {
-    const newId = uid("level");
-    const idx = levels.length + 1;
-    const lvl: Level = { id: newId, name: `Level ${idx}`, booths: [], elements: [] };
-    setLevels((prev) => [...prev, lvl]);
-    setActiveLevelId(newId);
-    setTab("floors");
-    markDirty();
-  }
-
-  function addQuickElement(type: ElementType) {
-    if (pickerMode) return;
-
-    // Sensible defaults that match your "header chips" expectation
-    const base: MapElement = {
-      id: uid("el"),
-      type,
-      x: 140,
-      y: 120,
-      width: 240,
-      height: 140,
-      label: elementLabel(type),
-    };
-
-    if (type === "venue") {
-      base.x = 60;
-      base.y = 60;
-      base.width = Math.max(600, Math.min(1000, canvasW - 120));
-      base.height = Math.max(420, Math.min(720, canvasH - 120));
-      base.label = "Venue Boundary";
-    }
-
-    if (type === "street") {
-      base.x = 60;
-      base.y = Math.max(0, canvasH - 130);
-      base.width = Math.max(600, Math.min(1000, canvasW - 120));
-      base.height = 80;
-      base.label = "Street";
-    }
-
-    if (type === "restrooms") {
-      base.width = 180;
-      base.height = 120;
-      base.x = canvasW - 260;
-      base.y = 120;
-    }
-
-    if (type === "stage") {
-      base.width = 320;
-      base.height = 160;
-      base.x = canvasW - 420;
-      base.y = canvasH - 320;
-    }
-
-    if (type === "entrance") {
-      base.width = 220;
-      base.height = 90;
-      base.x = 120;
-      base.y = canvasH - 220;
-    }
-
-    setLevels((prev) =>
-      prev.map((l) => (l.id === activeLevelId ? { ...l, elements: [...l.elements, base] } : l))
-    );
-    setSelectedKind("element");
-    setSelectedId(base.id);
-    setDrawerOpen(true);
-    setTab("elements");
-    markDirty();
-  }
-
-  function deleteSelected() {
-    if (!selectedKind || !selectedId) return;
-
-    if (selectedKind === "booth") {
-      setLevels((prev) =>
-        prev.map((lvl) =>
-          lvl.id === activeLevelId
-            ? { ...lvl, booths: lvl.booths.filter((b) => (b as any).id !== selectedId) }
-            : lvl
-        )
-      );
-    } else {
-      setLevels((prev) =>
-        prev.map((lvl) =>
-          lvl.id === activeLevelId
-            ? { ...lvl, elements: lvl.elements.filter((e) => e.id !== selectedId) }
-            : lvl
-        )
-      );
-    }
-
-    clearSelection();
-    markDirty();
-  }
-
-  function updateSelectedBooth(patch: any) {
-    if (!selectedBooth) return;
-    setLevels((prev) =>
-      prev.map((lvl) =>
-        lvl.id !== activeLevelId
-          ? lvl
-          : {
-              ...lvl,
-              booths: lvl.booths.map((b) =>
-                (b as any).id === (selectedBooth as any).id ? ({ ...(b as any), ...patch } as any) : b
-              ),
-            }
-      )
-    );
-    markDirty();
-  }
-
-  function updateSelectedElement(patch: Partial<MapElement>) {
-    if (!selectedElement) return;
-    setLevels((prev) =>
-      prev.map((lvl) =>
-        lvl.id !== activeLevelId
-          ? lvl
-          : {
-              ...lvl,
-              elements: lvl.elements.map((e) =>
-                e.id === selectedElement.id ? { ...e, ...patch } : e
-              ),
-            }
-      )
-    );
-    markDirty();
-  }
-
-  async function saveAll() {
-    if (!eventId) return false;
+  async function saveNow() {
+    if (!eventId) return;
     try {
       setIsSaving(true);
-      setStatusMsg("Saving…");
       setSaveError(null);
+      setStatusMsg("Saving…");
 
-      const diagram: DiagramDoc = {
+      const doc: DiagramDoc = {
+        version: 2,
+        published: isPublished,
+        meta: { published: isPublished },
         canvas: { width: canvasW, height: canvasH, gridSize },
         levels: levels.map((lvl) => ({
           id: lvl.id,
           name: lvl.name,
-          booths: lvl.booths || [],
-          elements: lvl.elements || [],
+          booths: lvl.booths,
+          elements: lvl.elements,
         })),
       };
 
-      const res = await saveEventDiagram(eventId, diagram as any);
-      persistDiagramToLocal(eventId, diagram, (res as any)?.version ?? 1);
-
+      await saveEventDiagram(eventId, doc);
+      localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: doc }));
       setStatusMsg("Saved");
-      return true;
     } catch (e: any) {
       setSaveError(e?.message ? String(e.message) : "Save failed");
       setStatusMsg("Save failed");
-      return false;
     } finally {
       setIsSaving(false);
     }
   }
 
-  const gridBg = hideGrid
-    ? "none"
-    : `linear-gradient(to right, rgba(15,23,42,0.06) 1px, transparent 1px),
-       linear-gradient(to bottom, rgba(15,23,42,0.06) 1px, transparent 1px)`;
+  async function publishEventNow() {
+    if (!eventId) return;
+    const s = readSession();
+    const token = (s as any)?.access_token || (s as any)?.accessToken || (s as any)?.token;
+    const email = (s as any)?.email || "organizer@example.com";
 
-  function boothOverlay(booth: Booth) {
-    const boothKey = String((booth as any).id || "").trim();
+    const res = await fetch(`${API_BASE}/organizer/events/${eventId}/publish`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "x-user-email": String(email),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(txt || "Publish failed");
+    }
+    return await res.json().catch(() => ({}));
+  }
+
+  function elementLabel(t: ElementType) {
+    if (t === "venue") return "Venue";
+    if (t === "street") return "Street";
+    if (t === "label") return "Label";
+    return "Shape";
+  }
+
+  function addBooth() {
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to add booths.");
+      return;
+    }
+    const id = uid("booth");
+    const booth: any = {
+      id,
+      label: `Booth ${activeLevel.booths.length + 1}`,
+      x: 80,
+      y: 120,
+      width: 140,
+      height: 110,
+      category: "",
+      price: 0,
+      status: "available",
+    };
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId ? lvl : { ...lvl, booths: [...lvl.booths, booth] }
+      )
+    );
+    setSelectedKind("booth");
+    setSelectedId(id);
+    setDrawerOpen(true);
+    setTab("booths");
+    markDirty();
+  }
+
+  function deleteSelected() {
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to delete items.");
+      return;
+    }
+    if (!selectedKind || !selectedId) return;
+    if (selectedKind === "booth") {
+      setLevels((prev) =>
+        prev.map((lvl) =>
+          lvl.id !== activeLevelId
+            ? lvl
+            : { ...lvl, booths: lvl.booths.filter((b: any) => String(b.id) !== String(selectedId)) }
+        )
+      );
+      clearSelection();
+      markDirty();
+      return;
+    }
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId ? lvl : { ...lvl, elements: lvl.elements.filter((e) => e.id !== selectedId) }
+      )
+    );
+    clearSelection();
+    markDirty();
+  }
+
+  function statusColor(status: string) {
+    // Solid fills (requested): easy to read, print-friendly.
+    if (status === "blocked") return "#94a3b8"; // slate-400
+    if (status === "assigned") return "#8b5cf6"; // violet-500
+    if (status === "paid") return "#10b981"; // emerald-500
+    if (status === "reserved") return "#f59e0b"; // amber-500
+    return "#22c55e"; // green-500 (available)
+  }
+
+  function boothOverlay(b: any) {
+    const boothKey = String(b?.id || "").trim();
+    const statusRaw = String(b?.status || "available").toLowerCase();
+
     const resv = boothKey ? boothReservations[boothKey] : undefined;
 
-    const baseStatus =
-      (String((booth as any).status || "available").toLowerCase() as BoothStatus) || "available";
-
-    let effectiveStatus: BoothStatus = baseStatus;
-    let overlayNote = "";
-
-    if (resv?.paymentStatus === "paid") {
-      effectiveStatus = "assigned";
-      overlayNote = resv.vendorEmail ? resv.vendorEmail : `App #${resv.applicationId}`;
-    } else if (
-      resv &&
-      (resv.paymentStatus === "unpaid" || resv.paymentStatus === "pending") &&
-      isFutureIso(resv.reservedUntil || null)
-    ) {
+    // Effective status for coloring
+    let effectiveStatus: "available" | "reserved" | "assigned" | "blocked" | "paid" = "available";
+    if (statusRaw === "blocked") effectiveStatus = "blocked";
+    if (resv?.paymentStatus === "paid") effectiveStatus = "paid";
+    else if (resv && (resv.paymentStatus === "unpaid" || resv.paymentStatus === "pending") && isFutureIso(resv.reservedUntil || null))
       effectiveStatus = "reserved";
-      const who = resv.vendorEmail ? resv.vendorEmail : `App #${resv.applicationId}`;
-      overlayNote = `${who} • until ${fmtWhen(resv.reservedUntil || "")}`;
-    }
+    else if (statusRaw === "assigned") effectiveStatus = "assigned";
 
-    return { boothKey, resv, baseStatus, effectiveStatus, overlayNote };
+    const overlayName = resv?.vendorName || resv?.vendorEmail || "";
+    const overlayDetail = resv
+      ? `${overlayName ? overlayName + " • " : ""}${resv.paymentStatus.toUpperCase()}${
+          resv.reservedUntil ? ` • until ${fmtWhen(resv.reservedUntil)}` : ""
+        }`
+      : "";
+
+    return { boothKey, resv, effectiveStatus, overlayName, overlayDetail };
   }
 
   function Legend({ color, label }: { color: string; label: string }) {
@@ -900,7 +861,12 @@ export default function BoothMapEditor() {
   }, [apps]);
 
   const [assignBusy, setAssignBusy] = useState(false);
+
   async function assignVendorToSelectedBooth(appId: number) {
+    if (isLocked) {
+      window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
+      return;
+    }
     if (!selectedBooth) return;
     const boothId = String((selectedBooth as any).id || "").trim();
     if (!boothId) return;
@@ -932,268 +898,270 @@ export default function BoothMapEditor() {
     }
   }
 
+  function addLevel() {
+    const id = uid("level");
+    const n = levels.length + 1;
+    setLevels((prev) => [...prev, { id, name: `Level ${n}`, booths: [], elements: [] }]);
+    setActiveLevelId(id);
+    markDirty();
+  }
+
+  function addQuickElement(t: ElementType) {
+    const id = uid("el");
+    const el: MapElement = {
+      id,
+      type: t,
+      x: 80,
+      y: 80,
+      width: t === "venue" ? 700 : t === "street" ? 700 : 220,
+      height: t === "venue" ? 440 : t === "street" ? 80 : 140,
+      label: elementLabel(t),
+    };
+
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId
+          ? lvl
+          : { ...lvl, elements: [...(lvl.elements || []), el] }
+      )
+    );
+    setSelectedKind("element");
+    setSelectedId(id);
+    setDrawerOpen(true);
+    setTab("elements");
+    markDirty();
+  }
+
+  const gridBg = hideGrid
+    ? "none"
+    : `linear-gradient(to right, rgba(148,163,184,0.25) 1px, transparent 1px),
+       linear-gradient(to bottom, rgba(148,163,184,0.25) 1px, transparent 1px)`;
+
   if (!eventId) {
     return <div style={{ padding: 20, fontWeight: 900 }}>Missing eventId.</div>;
   }
 
   return (
-    <div
-      style={{
-        height: "100%",
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden", // ✅ prevents double scroll
-        background: "#fff",
-      }}
-    >
+    <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "#fff" }}>
+      <style>{`
+        @media print {
+          /* Hide controls, keep the canvas printable */
+          button { display: none !important; }
+          a { display: none !important; }
+          input, select, textarea { display: none !important; }
+          /* Hide drawer/panels */
+          [data-print-hide="true"] { display: none !important; }
+          /* Ensure canvas uses full page */
+          html, body { height: auto !important; overflow: visible !important; }
+        }
+      `}</style>
+
       {/* ---------- HEADER ---------- */}
-      <div style={{ flexShrink: 0, borderBottom: "1px solid #e6e8ee", background: "#fff" }}>
-        {/* Top row */}
+      {isPublished ? (
         <div
           style={{
-            padding: "14px 16px 10px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
+            margin: "10px 16px 0",
+            padding: "10px 12px",
+            borderRadius: 14,
+            border: layoutOverrideActive ? "1px solid rgba(59,130,246,0.35)" : "1px solid rgba(99,102,241,0.30)",
+            background: layoutOverrideActive ? "rgba(59,130,246,0.10)" : "rgba(99,102,241,0.10)",
+            color: layoutOverrideActive ? "#1d4ed8" : "#3730a3",
+            fontSize: 13,
+            fontWeight: 900,
           }}
         >
+          {layoutOverrideActive
+            ? "Published — Layout temporarily UNLOCKED for edits (auto-relocks)."
+            : "Published — Layout is LOCKED. Assignments/reassignments are still allowed."}
+        </div>
+      ) : null}
+
+      {isLocked ? (
+        <div
+          style={{
+            margin: "10px 16px 0",
+            padding: "10px 12px",
+            borderRadius: 14,
+            border: "1px solid rgba(16,185,129,0.25)",
+            background: "rgba(16,185,129,0.10)",
+            color: "#065f46",
+            fontSize: 13,
+            fontWeight: 900,
+          }}
+        >
+          Paid — Booth selection is locked. Contact the organizer to make changes.
+        </div>
+      ) : null}
+
+      <div data-print-hide="true" style={{ flexShrink: 0, borderBottom: "1px solid #e6e8ee", background: "#fff" }}>
+        <div style={{ padding: "14px 16px 10px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
             <button onClick={() => window.history.back()} style={pill(false)}>
               ← <span>Back</span>
             </button>
 
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 24, fontWeight: 1000, lineHeight: 1.05 }}>
-                Booth Map Editor
-              </div>
+              <div style={{ fontSize: 24, fontWeight: 1000, lineHeight: 1.05 }}>Booth Map Editor</div>
               <div style={{ fontSize: 12, fontWeight: 800, color: "#64748b", marginTop: 4 }}>
                 Event {eventId}
-                {pickerMode ? " • Picker Mode" : ""}
-                {reservationsError ? ` • ${reservationsError}` : ""}
+                {pickerMode ? (
+                  <>
+                    {" "}
+                    • <span style={{ color: "#0f172a" }}>Picker mode</span>{" "}
+                    {assignAppId ? <>• App #{assignAppId}</> : null}
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <button style={pill(false)} onClick={() => setHideGrid((v) => !v)}>
-              {hideGrid ? "Show Grid" : "Hide Grid"}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button onClick={fitToScreen} style={pill(false)}>
+              Fit
             </button>
-            <button style={pill(false)} onClick={saveAll} disabled={isSaving}>
-              {isSaving ? "Saving…" : "Save Layout"}
+
+            <button onClick={handlePrint} style={pill(false)} title="Print map (hides panels/grid)">
+              Print
             </button>
+
+            {!pickerMode ? (
+              isPublished ? (
+                <>
+                  <span style={{ fontSize: 12, fontWeight: 1000, color: "#0f172a" }}>Published</span>
+                  {layoutOverrideActive ? (
+                    <button onClick={relockLayoutNow} style={pill(true)} title="Relock layout now">
+                      Relock
+                    </button>
+                  ) : (
+                    <button onClick={beginLayoutOverride} style={pill(false)} title="Temporarily unlock layout edits (auto-relocks)">
+                      Unlock Layout
+                    </button>
+                  )}
+                  <button
+                    onClick={async () => {
+                      try {
+                        setIsPublished(false);
+                        await saveNow();
+                        window.alert("Layout unpublished (event remains published on vendor side — no unpublish endpoint yet).");
+                      } catch (e: any) {
+                        console.error(e);
+                        window.alert(e?.message ? String(e.message) : "Unpublish failed");
+                      }
+                    }}
+                    style={pill(false)}
+                    title="Unpublish (keeps current assignments)"
+                  >
+                    Unpublish
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={async () => {
+                    try {
+                      setIsPublished(true);
+
+                      // 1) Save layout (diagram)
+                      await saveNow();
+
+                      // 2) Publish event record (controls vendor visibility + organizer dashboard status)
+                      await publishEventNow();
+
+                      window.alert("Event published.");
+                    } catch (e: any) {
+                      console.error(e);
+                      window.alert(e?.message ? String(e.message) : "Publish failed");
+                    }
+                  }}
+                  style={pill(true)}
+                  title="Publish locks geometry but still allows booth assignment changes"
+                >
+                  Publish
+                </button>
+              )
+            ) : null}
+
             <button
-              style={{
-                ...pill(false),
-                borderColor: "rgba(99,102,241,0.45)",
-                background: "rgba(99,102,241,0.10)",
-                color: "#3730a3",
-              }}
-              onClick={async () => {
-                await saveAll();
-                window.alert("Saved. (Publish wiring next)");
-              }}
+              onClick={() => setZoom((z) => +clamp(z - 0.1, 0.45, 2).toFixed(2))}
+              style={pill(false)}
             >
-              Finish & Publish
+              −
             </button>
+            <div style={{ fontSize: 12, fontWeight: 900, color: "#0f172a", width: 56, textAlign: "center" }}>
+              {Math.round(zoom * 100)}%
+            </div>
+            <button
+              onClick={() => setZoom((z) => +clamp(z + 0.1, 0.45, 2).toFixed(2))}
+              style={pill(false)}
+            >
+              +
+            </button>
+
+            {!pickerMode ? (
+              <button onClick={saveNow} style={pill(true)} disabled={isSaving}>
+                {isSaving ? "Saving…" : "Save"}
+              </button>
+            ) : null}
           </div>
         </div>
 
-        {/* Tabs row */}
-        <div
-          style={{
-            padding: "0 16px 10px",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          <button style={pill(tab === "floors")} onClick={() => setTab("floors")}>
-            Floors
-          </button>
-          <button style={pill(tab === "booths")} onClick={() => setTab("booths")}>
-            Booths
-          </button>
-          <button style={pill(tab === "elements")} onClick={() => setTab("elements")}>
-            Elements
-          </button>
-          <button style={pill(tab === "vendors")} onClick={() => setTab("vendors")}>
-            Vendors
-          </button>
-          <button style={pill(tab === "reservations")} onClick={() => setTab("reservations")}>
-            Reservations
-          </button>
-          <button style={pill(tab === "settings")} onClick={() => setTab("settings")}>
-            Settings
-          </button>
-
-          <div style={{ marginLeft: 10, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ padding: "0 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <Legend color={statusColor("available")} label="Available" />
             <Legend color={statusColor("reserved")} label="Reserved" />
-            <Legend color={statusColor("assigned")} label="Paid/Occupied" />
+            <Legend color={statusColor("paid")} label="Paid" />
+            <Legend color={statusColor("assigned")} label="Assigned/Occupied" />
             <Legend color={statusColor("blocked")} label="Blocked" />
+            {reservationsError ? (
+              <span style={{ marginLeft: 10, fontSize: 12, fontWeight: 900, color: "#b91c1c" }}>
+                {reservationsError}
+              </span>
+            ) : null}
           </div>
 
-          <div
-            style={{
-              marginLeft: "auto",
-              fontSize: 12,
-              fontWeight: 900,
-              color: saveError ? "#b91c1c" : "#334155",
-            }}
-          >
-            {saveError ? saveError : statusMsg}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <span style={{ fontSize: 12, fontWeight: 900, color: saveError ? "#b91c1c" : "#334155" }}>
+              {saveError ? saveError : statusMsg}
+            </span>
+
+            {!pickerMode ? (
+              <>
+                <button onClick={() => setHideGrid((x) => !x)} style={pill(hideGrid)}>
+                  Grid
+                </button>
+                <button onClick={() => setDrawerOpen((x) => !x)} style={pill(drawerOpen)}>
+                  Panel
+                </button>
+              </>
+            ) : null}
           </div>
-        </div>
-
-        {/* Toolbar row */}
-        <div
-          style={{
-            padding: "0 16px 10px",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          <button
-            style={{
-              ...pill(false),
-              borderColor: "rgba(99,102,241,0.45)",
-              background: "rgba(99,102,241,0.12)",
-              color: "#3730a3",
-              padding: "10px 14px",
-            }}
-            onClick={addBooth}
-            disabled={pickerMode}
-          >
-            + Add Booth
-          </button>
-
-          <button style={pill(false)} onClick={() => setZoom((z) => +clamp(z - 0.1, 0.45, 2.0).toFixed(2))}>
-            −
-          </button>
-          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155", minWidth: 64, textAlign: "center" }}>
-            {Math.round(zoom * 100)}%
-          </div>
-          <button style={pill(false)} onClick={() => setZoom((z) => +clamp(z + 0.1, 0.45, 2.0).toFixed(2))}>
-            +
-          </button>
-          <button style={pill(false)} onClick={fitToScreen}>
-            Fit
-          </button>
-
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 10 }}>
-            <input
-              type="number"
-              value={canvasW}
-              onChange={(e) => {
-                setCanvasW(Number(e.target.value || 1200));
-                markDirty();
-              }}
-              style={{
-                width: 86,
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: "1px solid rgba(15,23,42,0.12)",
-                fontWeight: 900,
-              }}
-              disabled={pickerMode}
-            />
-            <span style={{ fontWeight: 1000, color: "#64748b" }}>×</span>
-            <input
-              type="number"
-              value={canvasH}
-              onChange={(e) => {
-                setCanvasH(Number(e.target.value || 800));
-                markDirty();
-              }}
-              style={{
-                width: 86,
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: "1px solid rgba(15,23,42,0.12)",
-                fontWeight: 900,
-              }}
-              disabled={pickerMode}
-            />
-            <span style={{ fontSize: 12, fontWeight: 900, color: "#64748b" }}>px</span>
-          </div>
-        </div>
-
-        {/* ✅ MISSING HEADER CHIPS ROW (RESTORED) */}
-        <div
-          style={{
-            padding: "0 16px 14px",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          {/* Level selector */}
-          <select
-            value={activeLevelId}
-            onChange={(e) => setActiveLevelId(e.target.value)}
-            style={{
-              border: "1px solid rgba(15,23,42,0.12)",
-              borderRadius: 999,
-              padding: "8px 12px",
-              fontSize: 12,
-              fontWeight: 900,
-              background: "#fff",
-              cursor: "pointer",
-            }}
-          >
-            {levels.map((lvl) => (
-              <option key={lvl.id} value={lvl.id}>
-                {lvl.name}
-              </option>
-            ))}
-          </select>
-
-          <button style={pill(false)} onClick={addLevel} disabled={pickerMode}>
-            + Add Level
-          </button>
-
-          <button style={pill(false)} onClick={() => addQuickElement("venue")} disabled={pickerMode}>
-            + Venue Boundary
-          </button>
-          <button style={pill(false)} onClick={() => addQuickElement("street")} disabled={pickerMode}>
-            + Street
-          </button>
-          <button style={pill(false)} onClick={() => addQuickElement("stage")} disabled={pickerMode}>
-            + Stage
-          </button>
-          <button style={pill(false)} onClick={() => addQuickElement("entrance")} disabled={pickerMode}>
-            + Entrance
-          </button>
-          <button style={pill(false)} onClick={() => addQuickElement("restrooms")} disabled={pickerMode}>
-            + Restrooms
-          </button>
-
-          <button style={{ ...pill(false), marginLeft: 6 }} onClick={fitToScreen}>
-            Fit to Screen
-          </button>
         </div>
       </div>
 
       {/* ---------- BODY ---------- */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-        {/* Canvas scroller */}
+        {/* Canvas */}
         <div
           ref={canvasScrollerRef}
-          style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", background: "#fff" }}
-          onMouseDown={() => clearSelection()}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            overflow: "auto",
+            background: "#f8fafc",
+            position: "relative",
+          }}
+          onMouseDown={() => {
+            if (pickerMode) return;
+            clearSelection();
+          }}
         >
           <div
             style={{
               position: "relative",
               width: canvasW * zoom,
               height: canvasH * zoom,
-              background: gridBg,
+              background: "#fff",
+              backgroundImage: gridBg,
               backgroundSize: `${gridSize * zoom}px ${gridSize * zoom}px`,
               backgroundPosition: "0 0",
             }}
@@ -1201,7 +1169,6 @@ export default function BoothMapEditor() {
             {/* Elements */}
             {activeLevel.elements.map((el) => {
               const selected = selectedKind === "element" && selectedId === el.id;
-
               const isVenue = el.type === "venue";
               const isStreet = el.type === "street";
 
@@ -1214,7 +1181,7 @@ export default function BoothMapEditor() {
                     setSelectedId(el.id);
                     setDrawerOpen(true);
                     setTab("elements");
-                    if (!pickerMode) beginDrag("element", el.id, e);
+                    if (!pickerMode && !isLocked) beginDrag("element", el.id, e);
                   }}
                   style={{
                     position: "absolute",
@@ -1228,9 +1195,7 @@ export default function BoothMapEditor() {
                       : isVenue
                       ? "2px dashed rgba(37,99,235,0.55)"
                       : "2px dashed rgba(0,0,0,0.15)",
-                    background: isStreet
-                      ? "rgba(15, 23, 42, 0.10)"
-                      : "rgba(15, 23, 42, 0.06)",
+                    background: isStreet ? "rgba(15, 23, 42, 0.10)" : "rgba(15, 23, 42, 0.06)",
                     padding: 10,
                     boxSizing: "border-box",
                     cursor: pickerMode ? "default" : "move",
@@ -1263,7 +1228,7 @@ export default function BoothMapEditor() {
             {/* Booths */}
             {activeLevel.booths.map((b) => {
               const selected = selectedKind === "booth" && selectedId === (b as any).id;
-              const { boothKey, resv, effectiveStatus, overlayNote } = boothOverlay(b);
+              const { boothKey, resv, effectiveStatus, overlayName, overlayDetail } = boothOverlay(b);
               const bg = statusColor(effectiveStatus);
 
               const price = Number((b as any).price || 0) || 0;
@@ -1272,10 +1237,15 @@ export default function BoothMapEditor() {
               return (
                 <div
                   key={(b as any).id}
-                  title={overlayNote || ""}
+                  title={overlayDetail || ""}
                   onClick={async (e) => {
                     if (!pickerMode) return;
                     e.stopPropagation();
+
+                    if (isLocked) {
+                      window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
+                      return;
+                    }
 
                     if (effectiveStatus === "blocked" || resv?.paymentStatus === "paid") {
                       window.alert("That booth is not available.");
@@ -1291,11 +1261,17 @@ export default function BoothMapEditor() {
                     }
 
                     try {
-                      if (assignAction === "reserve" && assignAppId) {
+                      if ((assignAction === "reserve" || assignAction === "change") && assignAppId) {
                         await organizerReserveBooth(assignAppId, boothKey);
                       }
                       await refreshReservations();
-                      navigate(`/organizer/events/${encodeURIComponent(String(eventId))}/applications`);
+
+                      // ✅ Return to Applications and focus the app row
+                      navigate(
+                        `/organizer/events/${encodeURIComponent(
+                          String(eventId)
+                        )}/applications?focusAppId=${encodeURIComponent(String(assignAppId || ""))}`
+                      );
                     } catch (err: any) {
                       window.alert(err?.message ? String(err.message) : "Action failed");
                     }
@@ -1306,7 +1282,7 @@ export default function BoothMapEditor() {
                     setSelectedId((b as any).id);
                     setDrawerOpen(true);
                     setTab("booths");
-                    if (!pickerMode) beginDrag("booth", (b as any).id, e);
+                    if (!pickerMode && !isLocked) beginDrag("booth", (b as any).id, e);
                   }}
                   style={{
                     position: "absolute",
@@ -1320,44 +1296,50 @@ export default function BoothMapEditor() {
                     cursor: pickerMode ? "pointer" : "move",
                     userSelect: "none",
                     boxSizing: "border-box",
-                    overflow: "hidden",
-                    boxShadow: selected
-                      ? "0 0 0 4px rgba(37,99,235,0.22), 0 18px 40px rgba(37,99,235,0.22)"
-                      : "0 4px 14px rgba(15,23,42,0.12)",
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
                     padding: 10,
-                    textAlign: "center",
+                    display: "flex",
                     flexDirection: "column",
-                    gap: 4,
+                    justifyContent: "space-between",
+                    gap: 6,
                   }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 1000 }}>
-                    {String((b as any).label || "Booth")}
-                  </div>
-                  {price > 0 ? <div style={{ fontSize: 12, fontWeight: 900 }}>${price}</div> : null}
-                  {category ? (
-                    <div style={{ fontSize: 11, fontWeight: 900, opacity: 0.95 }}>{category}</div>
-                  ) : null}
-                  {overlayNote ? (
-                    <div style={{ marginTop: 6, fontSize: 10, fontWeight: 900, opacity: 0.95 }}>
-                      {overlayNote}
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 1000, color: "#0f172a", lineHeight: 1.1 }}>
+                        {(b as any).label || "Booth"}
+                      </div>
+                      {overlayName ? (
+                        <div style={{ marginTop: 3, fontSize: 11, fontWeight: 900, color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {overlayName}
+                        </div>
+                      ) : null}
                     </div>
-                  ) : null}
+
+                    {effectiveStatus === "paid" ? (
+                      <span style={{ fontSize: 11, fontWeight: 1000, color: "#065f46" }}>PAID</span>
+                    ) : null}
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 900, color: "#475569" }}>
+                      {category ? category : "—"}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 1000, color: "#0f172a" }}>
+                      {price ? `$${price}` : ""}
+                    </div>
+                  </div>
 
                   {selected && !pickerMode ? (
                     <div
                       onMouseDown={(e) => beginResize("booth", (b as any).id, e)}
                       style={{
                         position: "absolute",
-                        right: 10,
-                        bottom: 10,
+                        right: 8,
+                        bottom: 8,
                         width: 14,
                         height: 14,
                         borderRadius: 6,
-                        background: "rgba(15,23,42,0.85)",
+                        background: "#0f172a",
                         cursor: "nwse-resize",
                       }}
                     />
@@ -1368,370 +1350,445 @@ export default function BoothMapEditor() {
           </div>
         </div>
 
-        {/* Right properties panel */}
+        {/* Drawer */}
         {drawerOpen ? (
-          <div
+          <div data-print-hide="true"
             style={{
               width: 420,
-              flexShrink: 0,
-              minHeight: 0,
-              display: "flex",
-              flexDirection: "column",
+              maxWidth: "44vw",
+              minWidth: 340,
               borderLeft: "1px solid #e6e8ee",
               background: "#fff",
-              overflow: "hidden", // ✅ panel scroll is internal only
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
             }}
           >
-            <div
-              style={{
-                flexShrink: 0,
-                padding: "14px 14px 12px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                borderBottom: "1px solid #eef2f7",
-              }}
-            >
-              <div style={{ fontSize: 18, fontWeight: 1000 }}>
-                {selectedKind === "booth"
-                  ? "Booth Properties"
-                  : selectedKind === "element"
-                  ? "Element Properties"
-                  : "Properties"}
-              </div>
-              <button style={{ ...pill(false), padding: "6px 10px" }} onClick={() => setDrawerOpen(false)}>
-                ✕
-              </button>
+            {/* Drawer tabs */}
+            <div style={{ padding: 12, display: "flex", gap: 8, flexWrap: "wrap", borderBottom: "1px solid #eef2f7" }}>
+              {(["floors", "booths", "elements", "vendors", "reservations", "settings"] as const).map((k) => (
+                <button
+                  key={k}
+                  style={pill(tab === k)}
+                  onClick={() => setTab(k)}
+                >
+                  {k[0].toUpperCase() + k.slice(1)}
+                </button>
+              ))}
             </div>
 
-            <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 14 }}>
-              {/* BOOTHS */}
-              {tab === "booths" ? (
-                <>
-                  {!selectedBooth ? (
-                    <div style={{ ...softCard(), padding: 14, color: "#64748b", fontWeight: 900, fontSize: 12 }}>
-                      Select a booth on the canvas to edit its properties.
-                    </div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 12 }}>
-                      {/* Label */}
-                      <div style={{ ...softCard(), padding: 14 }}>
-                        <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Booth Label</div>
-                        <input
-                          value={String((selectedBooth as any).label || "")}
-                          onChange={(e) => updateSelectedBooth({ label: e.target.value })}
-                          style={{
-                            marginTop: 8,
-                            width: "100%",
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: "1px solid rgba(15,23,42,0.12)",
-                            fontWeight: 900,
-                            outline: "none",
-                          }}
-                          disabled={pickerMode}
-                        />
-                      </div>
+            {/* Drawer content */}
+            <div style={{ padding: 12, overflow: "auto", minHeight: 0 }}>
+              {/* Floors */}
+              {tab === "floors" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontSize: 14, fontWeight: 1000 }}>Floors</div>
+                    {!pickerMode ? (
+                      <button style={pill(true)} onClick={addLevel}>
+                        + Add Floor
+                      </button>
+                    ) : null}
+                  </div>
 
-                      {/* Position + size */}
-                      <div style={{ ...softCard(), padding: 14 }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <div>
-                            <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>X</div>
-                            <input
-                              type="number"
-                              value={Number((selectedBooth as any).x || 0)}
-                              onChange={(e) => updateSelectedBooth({ x: Number(e.target.value || 0) })}
-                              style={{
-                                marginTop: 8,
-                                width: "100%",
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(15,23,42,0.12)",
-                                fontWeight: 900,
-                                outline: "none",
-                              }}
-                              disabled={pickerMode}
-                            />
-                          </div>
-                          <div>
-                            <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Y</div>
-                            <input
-                              type="number"
-                              value={Number((selectedBooth as any).y || 0)}
-                              onChange={(e) => updateSelectedBooth({ y: Number(e.target.value || 0) })}
-                              style={{
-                                marginTop: 8,
-                                width: "100%",
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(15,23,42,0.12)",
-                                fontWeight: 900,
-                                outline: "none",
-                              }}
-                              disabled={pickerMode}
-                            />
-                          </div>
-
-                          <div>
-                            <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Width (px)</div>
-                            <input
-                              type="number"
-                              value={Number((selectedBooth as any).width || 0)}
-                              onChange={(e) => updateSelectedBooth({ width: Number(e.target.value || 0) })}
-                              style={{
-                                marginTop: 8,
-                                width: "100%",
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(15,23,42,0.12)",
-                                fontWeight: 900,
-                                outline: "none",
-                              }}
-                              disabled={pickerMode}
-                            />
-                          </div>
-                          <div>
-                            <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Height (px)</div>
-                            <input
-                              type="number"
-                              value={Number((selectedBooth as any).height || 0)}
-                              onChange={(e) => updateSelectedBooth({ height: Number(e.target.value || 0) })}
-                              style={{
-                                marginTop: 8,
-                                width: "100%",
-                                padding: "10px 12px",
-                                borderRadius: 12,
-                                border: "1px solid rgba(15,23,42,0.12)",
-                                fontWeight: 900,
-                                outline: "none",
-                              }}
-                              disabled={pickerMode}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Price */}
-                        <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Price ($)</div>
-                          <input
-                            type="number"
-                            value={Number((selectedBooth as any).price || 0)}
-                            onChange={(e) => updateSelectedBooth({ price: Number(e.target.value || 0) })}
-                            style={{
-                              marginTop: 8,
-                              width: "100%",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(15,23,42,0.12)",
-                              fontWeight: 900,
-                              outline: "none",
-                            }}
-                            disabled={pickerMode}
-                          />
-                          <div style={{ marginTop: 6, fontSize: 12, color: "#64748b", fontWeight: 800 }}>
-                            Vendors will see this price
-                          </div>
-                        </div>
-
-                        {/* Category */}
-                        <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Category</div>
-                          <select
-                            value={String((selectedBooth as any).category || "Food & Beverage")}
-                            onChange={(e) => updateSelectedBooth({ category: e.target.value })}
-                            style={{
-                              marginTop: 8,
-                              width: "100%",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(15,23,42,0.12)",
-                              fontWeight: 900,
-                              outline: "none",
-                            }}
-                            disabled={pickerMode}
-                          >
-                            {CATEGORY_OPTIONS.map((c) => (
-                              <option key={c} value={c}>
-                                {c}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        {/* Size preset */}
-                        <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Size</div>
-                          <select
-                            value={(() => {
-                              const w = Number((selectedBooth as any).width || 0);
-                              const h = Number((selectedBooth as any).height || 0);
-                              const preset = SIZE_PRESETS.find((p) => p.w === w && p.h === h);
-                              return preset ? preset.label : "Custom Size";
-                            })()}
-                            onChange={(e) => {
-                              const p = SIZE_PRESETS.find((x) => x.label === e.target.value);
-                              if (!p) return;
-                              if (p.w != null && p.h != null) updateSelectedBooth({ width: p.w, height: p.h });
-                            }}
-                            style={{
-                              marginTop: 8,
-                              width: "100%",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(15,23,42,0.12)",
-                              fontWeight: 900,
-                              outline: "none",
-                            }}
-                            disabled={pickerMode}
-                          >
-                            {SIZE_PRESETS.map((p) => (
-                              <option key={p.label} value={p.label}>
-                                {p.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        {/* Status */}
-                        <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Status</div>
-                          <select
-                            value={String(((selectedBooth as any).status || "available")).toLowerCase()}
-                            onChange={(e) => updateSelectedBooth({ status: e.target.value })}
-                            style={{
-                              marginTop: 8,
-                              width: "100%",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(15,23,42,0.12)",
-                              fontWeight: 900,
-                              outline: "none",
-                            }}
-                            disabled={pickerMode}
-                          >
-                            <option value="available">Available</option>
-                            <option value="pending">Pending</option>
-                            <option value="blocked">Blocked</option>
-                          </select>
-                        </div>
-
-                        {/* Assign Vendor */}
-                        <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Assign Vendor</div>
-                          <select
-                            value="__none__"
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              if (!v || v === "__none__") return;
-                              const appId = Number(v);
-                              if (!Number.isFinite(appId)) return;
-                              assignVendorToSelectedBooth(appId);
-                              e.target.value = "__none__";
-                            }}
-                            style={{
-                              marginTop: 8,
-                              width: "100%",
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: "1px solid rgba(15,23,42,0.12)",
-                              fontWeight: 900,
-                              outline: "none",
-                            }}
-                            disabled={pickerMode || assignBusy}
-                          >
-                            <option value="__none__">No vendor assigned</option>
-                            {approvedApps.map((a) => (
-                              <option key={a.id} value={String(a.id)}>
-                                {a.vendor_email ? a.vendor_email : `Approved App #${a.id}`}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-
-                      <div style={{ display: "flex", gap: 10 }}>
-                        <button
-                          style={{
-                            ...pill(false),
-                            borderColor: "rgba(185,28,28,0.25)",
-                            color: "#b91c1c",
-                          }}
-                          onClick={deleteSelected}
-                          disabled={pickerMode}
-                        >
-                          ✕ Delete Booth
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </>
+                  <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                    {levels.map((lvl) => (
+                      <button
+                        key={lvl.id}
+                        style={pill(activeLevelId === lvl.id)}
+                        onClick={() => setActiveLevelId(lvl.id)}
+                      >
+                        {lvl.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ) : null}
 
-              {/* ELEMENTS */}
-              {tab === "elements" ? (
-                <div style={{ display: "grid", gap: 12 }}>
-                  {!selectedElement ? (
-                    <div style={{ ...softCard(), padding: 14, color: "#64748b", fontWeight: 900, fontSize: 12 }}>
-                      Select an element on the canvas to edit its properties.
+              {/* Booths */}
+              {tab === "booths" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontSize: 14, fontWeight: 1000 }}>Booths</div>
+                    {!pickerMode ? (
+                      <button style={pill(true)} onClick={addBooth}>
+                        + Add Booth
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {selectedBooth ? (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 1000, color: "#64748b" }}>Selected</div>
+                      <div style={{ fontSize: 14, fontWeight: 1000, color: "#0f172a", marginTop: 4 }}>
+                        {(selectedBooth as any).label || (selectedBooth as any).id}
+                      </div>
+
+                      {!pickerMode ? (
+                        <>
+                          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                            <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                              Label
+                              <input
+                                value={String((selectedBooth as any).label || "")}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setLevels((prev) =>
+                                    prev.map((lvl) =>
+                                      lvl.id !== activeLevelId
+                                        ? lvl
+                                        : {
+                                            ...lvl,
+                                            booths: lvl.booths.map((b: any) =>
+                                              String(b.id) !== String((selectedBooth as any).id)
+                                                ? b
+                                                : { ...b, label: val }
+                                            ),
+                                          }
+                                    )
+                                  );
+                                  markDirty();
+                                }}
+                                style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                              />
+                            </label>
+
+                            <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                              Category
+                              <select
+                                value={String((selectedBooth as any).category || "")}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setLevels((prev) =>
+                                    prev.map((lvl) =>
+                                      lvl.id !== activeLevelId
+                                        ? lvl
+                                        : {
+                                            ...lvl,
+                                            booths: lvl.booths.map((b: any) =>
+                                              String(b.id) !== String((selectedBooth as any).id)
+                                                ? b
+                                                : { ...b, category: val }
+                                            ),
+                                          }
+                                    )
+                                  );
+                                  markDirty();
+                                }}
+                                style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 900 }}
+                              >
+                                <option value="">—</option>
+                                {CATEGORY_OPTIONS.map((c) => (
+                                  <option key={c} value={c}>
+                                    {c}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+
+                            <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                              Price
+                              <input
+                                type="number"
+                                value={String((selectedBooth as any).price || 0)}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value || 0);
+                                  setLevels((prev) =>
+                                    prev.map((lvl) =>
+                                      lvl.id !== activeLevelId
+                                        ? lvl
+                                        : {
+                                            ...lvl,
+                                            booths: lvl.booths.map((b: any) =>
+                                              String(b.id) !== String((selectedBooth as any).id)
+                                                ? b
+                                                : { ...b, price: val }
+                                            ),
+                                          }
+                                    )
+                                  );
+                                  markDirty();
+                                }}
+                                style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                              />
+                            </label>
+                          </div>
+
+                          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+                            <button
+                              style={{
+                                ...pill(false),
+                                color: "#b91c1c",
+                                borderColor: "rgba(185,28,28,0.25)",
+                                background: "rgba(185,28,28,0.08)",
+                              }}
+                              onClick={deleteSelected}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ marginTop: 10, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                            Picker mode: click a booth on the map to reserve for the selected application.
+                          </div>
+
+                          <div style={{ marginTop: 12 }}>
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                              {approvedApps.map((a) => (
+                                <button
+                                  key={a.id}
+                                  style={pill(false)}
+                                  onClick={() => assignVendorToSelectedBooth(a.id)}
+                                  disabled={assignBusy || isLocked}
+                                >
+                                  {pickVendorDisplayName(a) || a.vendor_email || `App #${a.id}`}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   ) : (
-                    <div style={{ ...softCard(), padding: 14 }}>
-                      <div style={{ fontSize: 12, fontWeight: 1000, color: "#334155" }}>Label</div>
-                      <input
-                        value={String(selectedElement.label || "")}
-                        onChange={(e) => updateSelectedElement({ label: e.target.value })}
-                        style={{
-                          marginTop: 8,
-                          width: "100%",
-                          padding: "10px 12px",
-                          borderRadius: 12,
-                          border: "1px solid rgba(15,23,42,0.12)",
-                          fontWeight: 900,
-                          outline: "none",
-                        }}
-                        disabled={pickerMode}
-                      />
+                    <div style={{ marginTop: 12, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                      Select a booth to edit.
+                    </div>
+                  )}
+                </div>
+              ) : null}
 
-                      <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+              {/* Elements */}
+              {tab === "elements" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontSize: 14, fontWeight: 1000 }}>Elements</div>
+                    {!pickerMode ? (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button style={pill(false)} onClick={() => addQuickElement("venue")}>
+                          + Venue
+                        </button>
+                        <button style={pill(false)} onClick={() => addQuickElement("street")}>
+                          + Street
+                        </button>
+                        <button style={pill(false)} onClick={() => addQuickElement("label")}>
+                          + Label
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {selectedElement ? (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 1000, color: "#64748b" }}>Selected</div>
+                      <div style={{ fontSize: 14, fontWeight: 1000, color: "#0f172a", marginTop: 4 }}>
+                        {selectedElement.label || elementLabel(selectedElement.type)}
+                      </div>
+
+                      {!pickerMode ? (
+                        <>
+                          <label style={{ display: "block", marginTop: 10, fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                            Label
+                            <input
+                              value={String(selectedElement.label || "")}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setLevels((prev) =>
+                                  prev.map((lvl) =>
+                                    lvl.id !== activeLevelId
+                                      ? lvl
+                                      : {
+                                          ...lvl,
+                                          elements: lvl.elements.map((el) =>
+                                            el.id !== selectedElement.id ? el : { ...el, label: val }
+                                          ),
+                                        }
+                                  )
+                                );
+                                markDirty();
+                              }}
+                              style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                            />
+                          </label>
+
+                          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+                            <button
+                              style={{
+                                ...pill(false),
+                                color: "#b91c1c",
+                                borderColor: "rgba(185,28,28,0.25)",
+                                background: "rgba(185,28,28,0.08)",
+                              }}
+                              onClick={deleteSelected}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 12, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                      Select an element to edit.
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {/* Vendors */}
+              {tab === "vendors" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ fontSize: 14, fontWeight: 1000 }}>Approved Applications</div>
+                  <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                    {approvedApps.map((a) => {
+                      const name = pickVendorDisplayName(a) || a.vendor_email || `App #${a.id}`;
+                      const boothId = a.booth_id ? String(a.booth_id) : "";
+                      const pay = parsePaymentStatus(a.payment_status);
+                      return (
+                        <div key={a.id} style={{ border: "1px solid rgba(15,23,42,0.10)", borderRadius: 14, padding: 10 }}>
+                          <div style={{ fontWeight: 1000, fontSize: 13, color: "#0f172a" }}>{name}</div>
+                          <div style={{ marginTop: 4, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                            App #{a.id} • {String(a.status || "").toUpperCase()} • {pay.toUpperCase()}
+                          </div>
+                          {boothId ? (
+                            <div style={{ marginTop: 6, fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                              Booth: {boothId}
+                            </div>
+                          ) : (
+                            <div style={{ marginTop: 6, fontSize: 12, fontWeight: 900, color: "#94a3b8" }}>
+                              No booth selected
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {!approvedApps.length ? (
+                      <div style={{ fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                        No approved applications yet.
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Reservations */}
+              {tab === "reservations" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ fontSize: 14, fontWeight: 1000 }}>Reservations</div>
+                    <button style={pill(false)} onClick={refreshReservations}>
+                      Refresh
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                    {Object.keys(boothReservations).length ? (
+                      Object.entries(boothReservations).map(([boothId, r]) => {
+                        const who = (r.vendorName || r.vendorEmail || (r ? `App #${r.applicationId}` : "")).trim();
+                        return (
+                          <div key={boothId} style={{ border: "1px solid rgba(15,23,42,0.10)", borderRadius: 14, padding: 10 }}>
+                            <div style={{ fontWeight: 1000, fontSize: 13, color: "#0f172a" }}>
+                              {boothId} • {r.paymentStatus.toUpperCase()}
+                            </div>
+                            {who ? (
+                              <div style={{ marginTop: 4, fontSize: 12, fontWeight: 900, color: "#334155" }}>{who}</div>
+                            ) : null}
+                            {r.reservedUntil ? (
+                              <div style={{ marginTop: 4, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                                Until: {fmtWhen(r.reservedUntil)}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div style={{ fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                        No active reservations.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Settings */}
+              {tab === "settings" ? (
+                <div style={{ ...softCard(), padding: 12 }}>
+                  <div style={{ fontSize: 14, fontWeight: 1000 }}>Settings</div>
+
+                  {!pickerMode ? (
+                    <>
+                      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Canvas width
+                          <input
+                            type="number"
+                            value={canvasW}
+                            onChange={(e) => {
+                              setCanvasW(Number(e.target.value || 1200));
+                              markDirty();
+                            }}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                          />
+                        </label>
+
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Canvas height
+                          <input
+                            type="number"
+                            value={canvasH}
+                            onChange={(e) => {
+                              setCanvasH(Number(e.target.value || 800));
+                              markDirty();
+                            }}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                          />
+                        </label>
+
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Grid size
+                          <input
+                            type="number"
+                            value={gridSize}
+                            onChange={(e) => {
+                              setGridSize(Number(e.target.value || 20));
+                              markDirty();
+                            }}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                          />
+                        </label>
+                      </div>
+
+                      <div style={{ marginTop: 12 }}>
                         <button
                           style={{
                             ...pill(false),
-                            borderColor: "rgba(185,28,28,0.25)",
                             color: "#b91c1c",
+                            borderColor: "rgba(185,28,28,0.25)",
+                            background: "rgba(185,28,28,0.08)",
                           }}
-                          onClick={deleteSelected}
-                          disabled={pickerMode}
+                          onClick={() => {
+                            if (!window.confirm("Clear layout (this cannot be undone)?")) return;
+                            setLevels([{ id: "level-1", name: "Level 1", booths: [], elements: [] }]);
+                            setActiveLevelId("level-1");
+                            clearSelection();
+                            markDirty();
+                          }}
                         >
-                          Delete Element
+                          Clear layout
                         </button>
                       </div>
+                    </>
+                  ) : (
+                    <div style={{ marginTop: 10, fontSize: 12, fontWeight: 900, color: "#64748b" }}>
+                      Settings are disabled in picker mode.
                     </div>
                   )}
                 </div>
               ) : null}
             </div>
           </div>
-        ) : (
-          <div style={{ width: 42, flexShrink: 0, borderLeft: "1px solid #e6e8ee", background: "#fff" }}>
-            <button
-              style={{
-                margin: 10,
-                width: 32,
-                height: 32,
-                borderRadius: 12,
-                border: "1px solid rgba(15,23,42,0.12)",
-                background: "#fff",
-                cursor: "pointer",
-                fontWeight: 1000,
-              }}
-              onClick={() => setDrawerOpen(true)}
-              title="Open properties"
-            >
-              ›
-            </button>
-          </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import {
   vendorSaveProgress,
   type UploadedDocMeta,
 } from "../components/api/applications";
+import { PaymentInstructionsCard } from "../components/PaymentInstructionsCard";
 
 /* ---------------- Types ---------------- */
 
@@ -84,6 +85,10 @@ const LS_VENDOR_PROGRESS_KEY = "vendor_requirements_progress_v1";
 
 /* ---------------- Helpers ---------------- */
 
+function cx(...classes: Array<string | false | undefined | null>) {
+  return classes.filter(Boolean).join(" ");
+}
+
 function normalizeId(v: unknown) {
   return String(v ?? "").trim();
 }
@@ -114,12 +119,48 @@ function boolish(v: any): boolean {
   return false;
 }
 
+/** Robust eventId resolver:
+ * - supports routes using :eventId OR :id OR other common names
+ * - falls back to parsing /vendor/events/:id/requirements from pathname
+ */
+function resolveEventId(params: any, pathname: string): string {
+  const direct =
+    normalizeId(params?.eventId) ||
+    normalizeId(params?.id) ||
+    normalizeId(params?.eventID) ||
+    normalizeId(params?.event_id) ||
+    normalizeId(params?.event);
+
+  if (direct) return direct;
+
+  // pathname fallback: /vendor/events/3/requirements
+  const parts = String(pathname || "")
+    .split("?")[0]
+    .split("#")[0]
+    .split("/")
+    .filter(Boolean);
+
+  const idx = parts.findIndex((p) => p === "events");
+  if (idx >= 0 && parts[idx + 1]) {
+    return normalizeId(parts[idx + 1]);
+  }
+
+  return "";
+}
+
+/** Robust appId resolver:
+ * - supports ?appId=, ?applicationId=, and legacy typo ?appld=
+ */
+function resolveAppId(search: string): string {
+  const sp = new URLSearchParams(search || "");
+  return normalizeId(sp.get("appId") || sp.get("applicationId") || sp.get("appld") || "");
+}
+
 /**
  * Payment settings can come in different shapes depending on old/new UI/API.
  * We normalize best-effort for display.
  */
 function normalizePaymentSettings(ps?: any) {
-  // Supports both legacy shapes and new structured payment_settings.
   const obj = ps && typeof ps === "object" ? ps : null;
   if (!obj) {
     return {
@@ -137,9 +178,7 @@ function normalizePaymentSettings(ps?: any) {
     };
   }
 
-  // New shape (preferred)
   const enabled = boolish(obj.enabled ?? obj.isEnabled ?? obj.payment_enabled ?? true);
-
   const paymentUrl = String(obj.payment_url ?? obj.paymentUrl ?? "").trim();
 
   const methodsObj = (obj.methods && typeof obj.methods === "object" ? obj.methods : null) as
@@ -179,13 +218,17 @@ function normalizePaymentSettings(ps?: any) {
 
   const depositValue = numberOrNull(obj.deposit_value ?? obj.depositValue ?? obj.deposit ?? null);
 
-  const billingEmail = String(obj.billing_contact_email ?? obj.billingContactEmail ?? obj.billingEmail ?? "").trim();
-  const billingPhone = String(obj.billing_contact_phone ?? obj.billingContactPhone ?? obj.billingPhone ?? "").trim();
+  const billingEmail = String(
+    obj.billing_contact_email ?? obj.billingContactEmail ?? obj.billingEmail ?? ""
+  ).trim();
+  const billingPhone = String(
+    obj.billing_contact_phone ?? obj.billingContactPhone ?? obj.billingPhone ?? ""
+  ).trim();
 
   const refundPolicy = String(obj.refund_policy ?? obj.refundPolicy ?? "").trim();
   const notes = String(obj.payment_notes ?? obj.paymentNotes ?? obj.notes ?? "").trim();
 
-  // Legacy fallbacks (older API/UI)
+  // Legacy fallbacks
   const legacyRequireDeposit = boolish(
     obj.requireDeposit ??
       obj.require_deposit ??
@@ -211,9 +254,7 @@ function normalizePaymentSettings(ps?: any) {
       ""
   ).trim();
 
-  const legacyNotes = String(
-    obj.paymentNotes ?? obj.payment_notes ?? obj.notes ?? obj.note ?? ""
-  ).trim();
+  const legacyNotes = String(obj.paymentNotes ?? obj.payment_notes ?? obj.notes ?? obj.note ?? "").trim();
 
   const has =
     enabled &&
@@ -232,7 +273,6 @@ function normalizePaymentSettings(ps?: any) {
       Boolean(legacyRefundPolicy) ||
       Boolean(legacyNotes));
 
-  // Merge legacy into new if new missing
   const mergedDepositType =
     depositType !== "none"
       ? depositType
@@ -289,7 +329,6 @@ function normalizeRequirementsShape(
 
   const templateKey = parsed?.templateKey || parsed?.id || undefined;
 
-  // ✅ booth_categories supports *_cents and electrical_note
   const boothCategories: BoothCategory[] = Array.isArray(parsed?.boothCategories)
     ? parsed.boothCategories
     : Array.isArray(parsed?.booth_categories)
@@ -463,10 +502,7 @@ function normalizeRequirementsShape(
 }
 
 async function loadRequirementsFromApi(eventId: string): Promise<LoadedRequirements | null> {
-  const candidates = [
-    // ✅ Correct public endpoint (exists)
-    `${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`,
-  ];
+  const candidates = [`${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`];
 
   for (const url of candidates) {
     try {
@@ -515,11 +551,10 @@ function migrateCheckedKeys(checked: Record<string, boolean> | undefined | null)
   const src = checked && typeof checked === "object" ? checked : {};
   const out: Record<string, boolean> = { ...src };
 
-  // ✅ migrate old compliance:<id> => <id>
   for (const k of Object.keys(src)) {
     if (k.startsWith("compliance:")) {
-      const plain = normalizeId(k.slice("compliance:".length));
-      if (plain) out[plain] = !!src[k];
+      const nk = k.replace("compliance:", "");
+      if (nk && out[nk] == null) out[nk] = src[k];
       delete out[k];
     }
   }
@@ -527,70 +562,36 @@ function migrateCheckedKeys(checked: Record<string, boolean> | undefined | null)
   return out;
 }
 
-function loadVendorProgress(eventId: string, appId?: string): VendorReqProgress | null {
-  const all = safeJsonParse<VendorReqProgress[]>(localStorage.getItem(LS_VENDOR_PROGRESS_KEY));
-  if (!Array.isArray(all)) return null;
+function loadVendorProgress(eventId: string, appId?: string | null): VendorReqProgress | null {
+  const all = safeJsonParse<Record<string, VendorReqProgress>>(
+    localStorage.getItem(LS_VENDOR_PROGRESS_KEY)
+  );
+  if (!all) return null;
 
-  const eId = normalizeId(eventId);
-  const aId = normalizeId(appId || "");
+  const key = `${normalizeId(eventId)}:${normalizeId(appId || "")}`;
+  const found = all[key];
+  if (!found) return null;
 
-  return all.find((p) => normalizeId(p.eventId) === eId && normalizeId(p.appId || "") === aId) ?? null;
+  if (normalizeId(found.eventId) !== normalizeId(eventId)) return null;
+  if (normalizeId(found.appId || "") !== normalizeId(appId || "")) return null;
+
+  return {
+    eventId: normalizeId(found.eventId),
+    appId: found.appId ? normalizeId(found.appId) : undefined,
+    checked: migrateCheckedKeys(found.checked),
+    uploads: found.uploads || {},
+    updatedAt: found.updatedAt || new Date().toISOString(),
+  };
 }
 
-function saveVendorProgress(progress: VendorReqProgress) {
-  const all = safeJsonParse<VendorReqProgress[]>(localStorage.getItem(LS_VENDOR_PROGRESS_KEY));
-  const list = Array.isArray(all) ? all : [];
-
-  const eId = normalizeId(progress.eventId);
-  const aId = normalizeId(progress.appId || "");
-
-  const next = list.filter((p) => !(normalizeId(p.eventId) === eId && normalizeId(p.appId || "") === aId));
-  next.unshift(progress);
-
-  localStorage.setItem(LS_VENDOR_PROGRESS_KEY, JSON.stringify(next));
-}
-
-function serverDocumentsToUploads(
-  docs: Record<string, UploadedDocMeta[] | null> | null | undefined
-): Record<string, UploadMeta[]> {
-  const out: Record<string, UploadMeta[]> = {};
-  const root = docs || {};
-  for (const [docIdRaw, list] of Object.entries(root)) {
-    const docId = normalizeId(docIdRaw);
-    if (!docId) continue;
-    const arr = Array.isArray(list) ? list : [];
-    out[docId] = arr.map((u) => ({
-      name: u.name,
-      size: u.size,
-      type: u.type || "application/octet-stream",
-      lastModified: u.lastModified,
-    }));
-  }
-  return out;
-}
-
-function uploadsToDocumentsPayload(
-  uploads: Record<string, UploadMeta[]>
-): Record<string, UploadedDocMeta[] | null> {
-  const out: Record<string, UploadedDocMeta[] | null> = {};
-  for (const [docId, list] of Object.entries(uploads || {})) {
-    const key = normalizeId(docId);
-    if (!key) continue;
-
-    const arr = Array.isArray(list) ? list : [];
-    if (arr.length === 0) {
-      out[key] = null;
-      continue;
-    }
-
-    out[key] = arr.map((u) => ({
-      name: u.name,
-      size: u.size,
-      type: u.type,
-      lastModified: u.lastModified,
-    }));
-  }
-  return out;
+function saveVendorProgress(eventId: string, appId: string | null | undefined, progress: VendorReqProgress) {
+  const all =
+    safeJsonParse<Record<string, VendorReqProgress>>(
+      localStorage.getItem(LS_VENDOR_PROGRESS_KEY)
+    ) || {};
+  const key = `${normalizeId(eventId)}:${normalizeId(appId || "")}`;
+  all[key] = progress;
+  localStorage.setItem(LS_VENDOR_PROGRESS_KEY, JSON.stringify(all));
 }
 
 /* ---------------- Page ---------------- */
@@ -600,20 +601,37 @@ export default function VendorEventRequirementsPage() {
   const location = useLocation();
   const params = useParams();
 
-  const eventId = useMemo(() => normalizeId((params as any).eventId), [(params as any).eventId]);
-  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
-
-  // NOTE: This is what routes/pages pass around today (can be empty).
-  // Support both ?appId= and legacy typo ?appld=
-  const appIdFromUrl = useMemo(
-    () => normalizeId(searchParams.get("appId") || searchParams.get("appld") || ""),
-    [searchParams]
+  // ✅ robust IDs
+  const eventId = useMemo(
+    () => resolveEventId(params as any, location.pathname),
+    [params, location.pathname]
   );
 
-  // We keep a local stable appId once created so we can persist.
+  const appIdFromUrl = useMemo(() => resolveAppId(location.search), [location.search]);
+
+  // ✅ normalize legacy query params (?appld= / ?applicationId=) to ?appId=
+  useEffect(() => {
+    const sp = new URLSearchParams(location.search || "");
+    const legacy = sp.get("appld") || sp.get("applicationId");
+    const hasAppId = !!sp.get("appId");
+
+    if (legacy && !hasAppId) {
+      sp.set("appId", legacy);
+      sp.delete("appld");
+      sp.delete("applicationId");
+      navigate(`${location.pathname}?${sp.toString()}`, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, location.search]);
+
+  // keep a stable appId once we have it
   const [appId, setAppId] = useState<string>(appIdFromUrl);
 
-  // ✅ Show approval/payment state: Pay happens AFTER approval.
+  useEffect(() => {
+    if (appIdFromUrl && appIdFromUrl !== appId) setAppId(appIdFromUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appIdFromUrl]);
+
   const [appStatus, setAppStatus] = useState<string>("draft");
   const [paymentStatus, setPaymentStatus] = useState<string>("unpaid");
   const [statusErr, setStatusErr] = useState<string | null>(null);
@@ -624,8 +642,12 @@ export default function VendorEventRequirementsPage() {
 
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [uploads, setUploads] = useState<Record<string, UploadMeta[]>>({});
+  const [saving, setSaving] = useState<boolean>(false);
+  const [saveErr, setSaveErr] = useState<string>("");
 
-  // If legacy uploads were stored under filename keys, migrate them to docId keys
+  const saveTimer = useRef<any>(null);
+
+  // migrate uploads keys helper preserved from your file
   function migrateUploadsKeys(
     docs: DocumentRequirement[],
     current: Record<string, UploadMeta[]>
@@ -638,20 +660,14 @@ export default function VendorEventRequirementsPage() {
     for (const d of docs) {
       const did = normalizeId((d as any).id || (d as any).name);
       if (!did) continue;
-
-      // already correct
       if (next[did] && next[did].length > 0) continue;
 
-      // Try to find a legacy key by matching file.name to doc name
       const targetName = String((d as any).name || "").trim();
-
       for (const k of Object.keys(next)) {
         if (k === did) continue;
-
         const list = next[k] || [];
         if (list.length === 0) continue;
 
-        // Legacy pattern: key is filename or doc name; list holds UploadMeta with name=filename
         const hit = targetName && list.some((u) => String(u?.name || "") === targetName);
         if (hit) {
           next[did] = list;
@@ -662,237 +678,163 @@ export default function VendorEventRequirementsPage() {
       }
     }
 
-    return changed ? next : current;
+    if (changed) return next;
+    return current;
   }
 
-  const [saving, setSaving] = useState(false);
-  const [saveErr, setSaveErr] = useState<string | null>(null);
+  const boothCategories = requirements?.boothCategories || [];
+  const restrictions = requirements?.restrictions || [];
+  const compliance = requirements?.compliance || [];
+  const documents = requirements?.documents || [];
+  const fields = requirements?.fields || [];
 
-  // Prevent early autosaves from overwriting server docs on initial load
-  const [hydrated, setHydrated] = useState(false);
-  const [uploadsDirty, setUploadsDirty] = useState(false);
+  /* ---------------- Load requirements ---------------- */
 
-  const lastSavedSignatureRef = useRef<string>("");
-  const saveTimerRef = useRef<number | null>(null);
-
-  // Keep appId state in sync if URL changes (rare, but safe)
-  useEffect(() => {
-    setAppId(appIdFromUrl);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appIdFromUrl]);
-
-  // Fetch status/payment whenever appId is stable
   useEffect(() => {
     let alive = true;
-    async function loadStatus() {
-      if (!appId) return;
-      try {
-        setStatusErr(null);
-        const serverApp = await vendorGetApplication({ applicationId: appId });
-        if (!alive) return;
-        setAppStatus(String((serverApp as any)?.status || "draft"));
-        setPaymentStatus(String((serverApp as any)?.payment_status || "unpaid"));
-      } catch (e: any) {
-        if (!alive) return;
-        setStatusErr(e?.message ? String(e.message) : "Failed to load application status.");
-      }
-    }
-    loadStatus();
-    return () => {
-      alive = false;
-    };
-  }, [appId]);
-
-  // Load requirements + ensure appId + restore progress
-  useEffect(() => {
-    let alive = true;
-
-    async function ensureDraftApplicationIfNeeded(eid: string) {
-      if (appIdFromUrl) return appIdFromUrl;
-
-      // Create/get a draft application so progress can persist to backend
-      const app = await vendorGetOrCreateDraftApplication({ eventId: eid });
-      const createdId = normalizeId((app as any)?.id);
-
-      if (!createdId) throw new Error("Could not create/get a draft application (missing id).");
-
-      // Update state and URL (replace, no history spam)
-      if (!alive) return createdId;
-
-      setAppId(createdId);
-
-      const qs = new URLSearchParams(location.search);
-      qs.set("appId", createdId);
-      navigate(`${location.pathname}?${qs.toString()}`, { replace: true });
-
-      return createdId;
-    }
 
     async function run() {
       setLoading(true);
       setError("");
-      setRequirements(null);
-      setSaveErr(null);
 
       if (!eventId) {
-        if (!alive) return;
-        setError("Missing eventId in route.");
+        setLoading(false);
+        setError("Missing event id. (Route must include /events/:id/...)");
+        return;
+      }
+
+      const fromApi = await loadRequirementsFromApi(eventId);
+      if (!alive) return;
+
+      if (fromApi) {
+        setRequirements(fromApi);
         setLoading(false);
         return;
       }
 
+      const fromLs = loadRequirementsFromLocalStorage(eventId);
+      if (fromLs) {
+        setRequirements(fromLs);
+        setLoading(false);
+        return;
+      }
+
+      setRequirements(null);
+      setLoading(false);
+      setError("No requirements were found for this event.");
+    }
+
+    run();
+
+    return () => {
+      alive = false;
+    };
+  }, [eventId]);
+
+  /* ---------------- Load vendor progress local ---------------- */
+
+  useEffect(() => {
+    if (!eventId) return;
+
+    const prog = loadVendorProgress(eventId, appId);
+    if (prog) {
+      setChecked(prog.checked || {});
+      setUploads(prog.uploads || {});
+    } else {
+      setChecked({});
+      setUploads({});
+    }
+  }, [eventId, appId]);
+
+  /* ---------------- Fetch status/payment ---------------- */
+
+  useEffect(() => {
+    let alive = true;
+
+    async function run() {
+      setStatusErr(null);
+
+      // ✅ hard-guard: do NOT call backend with undefined ids
+      if (!eventId || !appId) return;
+
       try {
-        const stableAppId = await ensureDraftApplicationIfNeeded(eventId);
+        const serverApp = await vendorGetApplication(eventId, appId);
         if (!alive) return;
 
-        const apiReq = await loadRequirementsFromApi(eventId);
-        const lsReq = loadRequirementsFromLocalStorage(eventId);
-        const finalReq = apiReq ?? lsReq;
-
-        if (!alive) return;
-
-        if (!finalReq) {
-          setError("No requirements found for this event. (API returned nothing and localStorage fallback is empty.)");
-          setLoading(false);
-          return;
-        }
-
-        setRequirements(finalReq);
-
-        const prog = loadVendorProgress(eventId, stableAppId || undefined);
-        setChecked(migrateCheckedKeys(prog?.checked));
-        setUploads(prog?.uploads || {});
-
-        // Hydrate from server application (authoritative) so docs persist across reloads
-        try {
-          const serverApp = await vendorGetApplication({ applicationId: stableAppId });
-          const serverDocs = (serverApp as any)?.documents ?? (serverApp as any)?.docs ?? null;
-          const serverChecked = (serverApp as any)?.checked ?? null;
-
-          if (serverChecked && typeof serverChecked === "object") {
-            setChecked(migrateCheckedKeys(serverChecked as any));
-          }
-
-          if (serverDocs && typeof serverDocs === "object") {
-            setUploads(serverDocumentsToUploads(serverDocs as any));
-          }
-
-          // capture status/payment if present
-          setAppStatus(String((serverApp as any)?.status || "draft"));
-          setPaymentStatus(String((serverApp as any)?.payment_status || "unpaid"));
-        } catch {
-          // ignore hydration failures; local progress still works
-        } finally {
-          // Mark initial hydration complete so debounced saves can run safely
-          if (alive) {
-            setHydrated(true);
-            setUploadsDirty(false);
-          }
-        }
+        setAppStatus(String((serverApp as any)?.status || "draft"));
+        setPaymentStatus(String((serverApp as any)?.payment_status || "unpaid"));
       } catch (e: any) {
         if (!alive) return;
-        setError(e?.message || "Failed to initialize requirements page.");
-      } finally {
-        if (!alive) return;
-        setLoading(false);
+        setStatusErr(e?.message ? String(e.message) : "Failed to fetch application status.");
       }
     }
 
     run();
+
     return () => {
       alive = false;
     };
-  }, [eventId, appIdFromUrl, location.pathname, location.search, navigate]);
+  }, [eventId, appId]);
 
-  // Always persist to localStorage (UX cache)
+  /* ---------------- Auto-save (best effort) ---------------- */
+
   useEffect(() => {
     if (!eventId) return;
-    if (!requirements) return;
 
-    const progress: VendorReqProgress = {
-      eventId,
+    // Always persist to localStorage immediately
+    const next: VendorReqProgress = {
+      eventId: normalizeId(eventId),
       appId: appId || undefined,
-      checked: migrateCheckedKeys(checked), // ✅ always store in new format
+      checked,
       uploads,
       updatedAt: new Date().toISOString(),
     };
+    saveVendorProgress(eventId, appId, next);
 
-    saveVendorProgress(progress);
-  }, [eventId, appId, checked, uploads, requirements]);
-
-  // Persist to backend (debounced) once we have a stable appId
-  useEffect(() => {
-    if (!eventId) return;
-    if (!requirements) return;
+    // If appId missing, don't attempt server save (prevents undefined-id errors)
     if (!appId) return;
-    if (!hydrated) return;
 
-    // Signature helps avoid redundant PUTs
-    const signature = JSON.stringify({
-      checked: migrateCheckedKeys(checked),
-      uploads,
-    });
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      if (!eventId || !appId) return;
 
-    // No change vs last save attempt
-    if (signature === lastSavedSignatureRef.current) return;
+      setSaving(true);
+      setSaveErr("");
 
-    // Debounce writes
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-
-    saveTimerRef.current = window.setTimeout(async () => {
       try {
-        setSaving(true);
-        setSaveErr(null);
+        await vendorGetOrCreateDraftApplication(eventId);
 
-        // NOTE: We store arrays of metadata (so multiple files per doc work),
-        // backend can store arbitrary JSON.
-        // IMPORTANT: only send documents/docs when the user actually changed uploads,
-        // to avoid wiping server docs during initial hydration.
-        const documentsPayload = uploadsDirty ? uploadsToDocumentsPayload(uploads) : undefined;
+        const docsPayload: Record<string, UploadedDocMeta[]> = {};
+        for (const docId of Object.keys(uploads || {})) {
+          const list = uploads[docId] || [];
+          docsPayload[docId] = list.map((m) => ({
+            name: m.name,
+            size: m.size,
+            type: m.type,
+            lastModified: m.lastModified,
+          }));
+        }
 
-        await vendorSaveProgress({
-          applicationId: appId,
-          body: {
-            checked: migrateCheckedKeys(checked),
-            ...(documentsPayload ? { documents: documentsPayload as any, docs: documentsPayload as any } : {}),
-          },
+        const res = await vendorSaveProgress(eventId, {
+          appId,
+          checked,
+          docs: docsPayload,
         });
 
-        // After a successful upload save, we can treat uploads as clean
-        if (uploadsDirty) setUploadsDirty(false);
+        setAppStatus(String((res as any)?.status || appStatus || "draft"));
+        setPaymentStatus(String((res as any)?.payment_status || paymentStatus || "unpaid"));
 
-        lastSavedSignatureRef.current = signature;
-      } catch (e: any) {
-        setSaveErr(e?.message || "Failed to save progress to server.");
-      } finally {
         setSaving(false);
+      } catch (e: any) {
+        setSaving(false);
+        setSaveErr(e?.message ? String(e.message) : "Save failed.");
       }
-    }, 450);
+    }, 700);
 
-    return () => {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-    };
-  }, [eventId, requirements, appId, checked, uploads, hydrated, uploadsDirty]);
-
-  const boothCategories = requirements?.boothCategories ?? [];
-  const restrictions = requirements?.restrictions ?? [];
-  const compliance = requirements?.compliance ?? [];
-  const documents = requirements?.documents ?? [];
-
-  // Keep upload keys aligned with document requirement IDs (prevents 2/4 regressions)
-  useEffect(() => {
-    if (!documents || documents.length === 0) return;
-    setUploads((prev) => migrateUploadsKeys(documents, prev));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents]);
+  }, [checked, uploads, eventId, appId]);
 
-  const fields = requirements?.fields ?? [];
+  /* ---------------- Derived ---------------- */
 
   const complianceChecked = useMemo(() => {
     return compliance.reduce((acc, c) => {
@@ -909,7 +851,11 @@ export default function VendorEventRequirementsPage() {
     }, 0);
   }, [documents, uploads]);
 
-  const payment = useMemo(() => normalizePaymentSettings(requirements?.paymentSettings), [requirements]);
+  useEffect(() => {
+    if (!documents.length) return;
+    setUploads((prev) => migrateUploadsKeys(documents, prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents.length]);
 
   function toggle(key: string) {
     const k = normalizeId(key);
@@ -931,7 +877,6 @@ export default function VendorEventRequirementsPage() {
       const existing = Array.isArray(prev[key]) ? prev[key] : [];
       return { ...prev, [key]: [...existing, ...nextFiles] };
     });
-    setUploadsDirty(true);
   }
 
   function removeUpload(docId: string, idx: number) {
@@ -941,7 +886,6 @@ export default function VendorEventRequirementsPage() {
       const next = existing.filter((_, i) => i !== idx);
       return { ...prev, [key]: next };
     });
-    setUploadsDirty(true);
   }
 
   function goBackToDashboard() {
@@ -949,27 +893,58 @@ export default function VendorEventRequirementsPage() {
   }
 
   function goBackToEvent() {
-    navigate(`/vendor/events/${encodeURIComponent(eventId)}${appId ? `?appId=${encodeURIComponent(appId)}` : ""}`);
+    if (!eventId) return navigate("/vendor/dashboard");
+    navigate(
+      `/vendor/events/${encodeURIComponent(eventId)}${
+        appId ? `?appId=${encodeURIComponent(appId)}` : ""
+      }`
+    );
   }
 
   function goToLayout() {
-    navigate(`/vendor/events/${encodeURIComponent(eventId)}/map${appId ? `?appId=${encodeURIComponent(appId)}` : ""}`);
+    if (!eventId) return;
+    navigate(
+      `/vendor/events/${encodeURIComponent(eventId)}/map${
+        appId ? `?appId=${encodeURIComponent(appId)}` : ""
+      }`
+    );
   }
 
   function viewMyApplication() {
     if (!appId) return;
-    navigate(`/vendor/applications?appId=${encodeURIComponent(appId)}&eventId=${encodeURIComponent(eventId)}`);
+    navigate(
+      `/vendor/applications?appId=${encodeURIComponent(appId)}&eventId=${encodeURIComponent(eventId)}`
+    );
+  }
+  function openMessages(params?: { subject?: string; focus?: string }) {
+    if (!eventId) return;
+
+    const subject = params?.subject ? String(params.subject) : "";
+    const focus = params?.focus ? String(params.focus) : "";
+
+    // Best-effort organizer contact (MVP): use billingEmail if present.
+    // (We can upgrade later to event.organizer_email once you expose it on the API.)
+    const organizerEmail = (paymentInfo?.billingEmail || "").trim();
+
+    const sp = new URLSearchParams();
+    sp.set("eventId", String(eventId));
+    if (appId) sp.set("appId", String(appId));
+    if (organizerEmail) sp.set("organizer", organizerEmail);
+    if (subject) sp.set("subject", subject);
+    if (focus) sp.set("focus", focus);
+
+    navigate(`/vendor/messages?${sp.toString()}`);
   }
 
-  // Pay becomes available after organizer approval.
-  // Payment is handled directly between vendor and organizer.
-  // We simply surface organizer-provided instructions/links.
+
   function payNow() {
     const ps = normalizePaymentSettings(requirements?.paymentSettings);
+
     if (ps.paymentUrl) {
       window.open(ps.paymentUrl, "_blank", "noopener,noreferrer");
       return;
     }
+
     if (ps.billingEmail) {
       const subject = encodeURIComponent(`Payment for Event ${eventId} (Application ${appId || ""})`);
       const body = encodeURIComponent(
@@ -980,18 +955,22 @@ export default function VendorEventRequirementsPage() {
       window.location.href = `mailto:${ps.billingEmail}?subject=${subject}&body=${body}`;
       return;
     }
-    // No payment link or contact provided
-    alert("Payment instructions have not been provided by the organizer yet.");
+
+    // Default: bring the payment card into view
+    document.getElementById("payment-instructions")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   const sourceLabel = useMemo(() => {
     if (!requirements) return "—";
-    if (requirements.source === "api") return requirements.sourceKey ? `API • ${requirements.sourceKey}` : "API";
+    if (requirements.source === "api")
+      return requirements.sourceKey ? `API • ${requirements.sourceKey}` : "API";
     return requirements.sourceKey ? `localStorage • ${requirements.sourceKey}` : "localStorage";
   }, [requirements]);
 
   const isApproved = String(appStatus || "").toLowerCase() === "approved";
-    const paymentInfo = useMemo(
+  const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
+
+  const paymentInfo = useMemo(
     () => normalizePaymentSettings(requirements?.paymentSettings),
     [requirements?.paymentSettings]
   );
@@ -1010,7 +989,80 @@ export default function VendorEventRequirementsPage() {
     return bits.join(" • ");
   }, [paymentInfo]);
 
-const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
+  const canPayNow =
+    isApproved &&
+    !isPaid &&
+    (Boolean(paymentInfo.paymentUrl) || Boolean(paymentInfo.billingEmail) || paymentInfo.methods.length > 0);
+
+  /* ---------------- Render ---------------- */
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="mx-auto w-full max-w-6xl px-4 py-10">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6">
+            <div className="text-sm font-semibold text-slate-900">Loading…</div>
+            <div className="mt-2 text-sm text-slate-600">
+              Fetching requirements for event <span className="font-mono">{eventId || "—"}</span>.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="mx-auto w-full max-w-6xl px-4 py-10">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6">
+            <div className="text-sm font-semibold text-rose-800">Unable to load requirements</div>
+            <div className="mt-2 text-sm text-rose-700">{error}</div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={goBackToDashboard}
+                className="rounded-lg border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-800 hover:bg-rose-100"
+              >
+                Back to Dashboard
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!requirements) {
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="mx-auto w-full max-w-6xl px-4 py-10">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6">
+            <div className="text-sm font-semibold text-slate-900">No requirements found</div>
+            <div className="mt-2 text-sm text-slate-600">
+              Ask the organizer to publish requirements for this event.
+            </div>
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={goBackToDashboard}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -1034,7 +1086,12 @@ const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
                   {" "}
                   • AppId: <span className="font-mono">{appId}</span>
                 </>
-              ) : null}{" "}
+              ) : (
+                <>
+                  {" "}
+                  • <span className="font-semibold text-rose-700">Missing appId in URL (?appId=...)</span>
+                </>
+              )}{" "}
               • Source: {sourceLabel}
             </div>
 
@@ -1042,24 +1099,24 @@ const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
             {appId ? (
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                 <span
-                  className={[
+                  className={cx(
                     "rounded-full border px-2 py-0.5 font-semibold",
                     isApproved
                       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : "border-slate-200 bg-white text-slate-700",
-                  ].join(" ")}
+                      : "border-slate-200 bg-white text-slate-700"
+                  )}
                   title="Application status"
                 >
                   Status: <span className="font-bold">{String(appStatus || "draft")}</span>
                 </span>
 
                 <span
-                  className={[
+                  className={cx(
                     "rounded-full border px-2 py-0.5 font-semibold",
                     isPaid
                       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : "border-amber-200 bg-amber-50 text-amber-900",
-                  ].join(" ")}
+                      : "border-amber-200 bg-amber-50 text-amber-900"
+                  )}
                   title="Payment happens after approval"
                 >
                   Payment: <span className="font-bold">{isPaid ? "Paid" : "Unpaid"}</span>
@@ -1069,39 +1126,44 @@ const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
 
                 {!isPaid ? (
                   isApproved ? (
-                    <button
-                      type="button"
-                      onClick={payNow}
-                      className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-1 text-xs font-bold text-white hover:opacity-95"
-                    >
-                      Pay now
-                    </button>
+                    canPayNow ? (
+                      <button
+                        type="button"
+                        onClick={payNow}
+                        className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-1 text-xs font-bold text-white hover:opacity-95"
+                        title="Open organizer payment instructions"
+                      >
+                        Pay now
+                      </button>
+                    ) : (
+                      <span className="text-slate-600">
+                        Payment instructions have not been provided by the organizer yet.
+                      </span>
+                    )
                   ) : (
-                    <span className="text-slate-600">
-                      Payment becomes available after organizer approval.
-                    </span>
+                    <span className="text-slate-600">Payment becomes available after organizer approval.</span>
                   )
                 ) : null}
-              </div>
-            ) : null}
 
-            {/* Save status */}
-            {requirements ? (
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                 <span
-                  className={`rounded-full border px-2 py-0.5 font-semibold ${
+                  className={cx(
+                    "rounded-full border px-2 py-0.5 font-semibold",
                     saving
                       ? "border-amber-200 bg-amber-50 text-amber-900"
                       : saveErr
                         ? "border-rose-200 bg-rose-50 text-rose-700"
                         : "border-emerald-200 bg-emerald-50 text-emerald-700"
-                  }`}
+                  )}
                 >
                   {saving ? "Saving…" : saveErr ? "Save failed" : "Saved"}
                 </span>
                 {saveErr ? <span className="text-rose-700">{saveErr}</span> : null}
               </div>
-            ) : null}
+            ) : (
+              <div className="mt-3 text-xs text-slate-600">
+                This page needs <span className="font-mono">?appId=</span> in the URL to load your application state.
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -1120,528 +1182,35 @@ const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
             >
               Back to Event
             </button>
-
-            <button
-              type="button"
-              onClick={goToLayout}
-              className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
-            >
-              Booth Map
-            </button>
-
-            {appId ? (
-              <button
-                type="button"
-                onClick={viewMyApplication}
-                className="rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
-              >
-                View My Application
-              </button>
-            ) : null}
           </div>
         </div>
 
-        {/* Main Card */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          {loading ? (
-            <div className="flex items-center gap-3">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-200 border-t-slate-700" />
-              <div className="text-sm text-slate-700">Loading requirements…</div>
-            </div>
-          ) : error ? (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
-              <div className="text-sm font-semibold text-rose-700">Couldn't load requirements</div>
-              <div className="mt-1 text-sm text-rose-700">{error}</div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => window.location.reload()}
-                  className="rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
-                >
-                  Retry
-                </button>
-
-                <button
-                  type="button"
-                  onClick={goBackToEvent}
-                  className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
-                >
-                  Return to Event
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Progress Summary */}
-              <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Your progress</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      You can prep everything here, but{" "}
-                      <span className="font-semibold">submission happens on the Booth Map</span> (Option A).
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                      Compliance: {complianceChecked}/{compliance.length}
-                    </div>
-                    <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                      Docs uploaded: {docsUploaded}/{documents.length}
-                    </div>
+        {/* Main grid */}
+        <div className="grid gap-6 lg:grid-cols-3">
+          {/* Left column */}
+          <div className="lg:col-span-2">
+            {/* Overview card */}
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Your progress</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    You can prep everything here, but{" "}
+                    <span className="font-semibold">submission happens on the Booth Map</span> (Option A).
                   </div>
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={goToLayout}
-                    className="rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
-                  >
-                    Continue to Booth Map
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={goBackToEvent}
-                    className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
-                  >
-                    Review Event Details
-                  </button>
+                <div className="flex flex-wrap gap-2">
+                  <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                    Compliance: {complianceChecked}/{compliance.length}
+                  </div>
+                  <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
+                    Docs uploaded: {docsUploaded}/{documents.length}
+                  </div>
                 </div>
               </div>
 
-
-              {/* Payment Instructions (after approval) */}
-              {isApproved && paymentInfo.has ? (
-                <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">Payment instructions</div>
-                      <div className="mt-1 text-sm text-slate-600">
-                        Payment is handled directly with the organizer. Use the info below.
-                      </div>
-                      {paymentSummary ? (
-                        <div className="mt-1 text-xs font-semibold text-slate-700">{paymentSummary}</div>
-                      ) : null}
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      {paymentInfo.billingEmail ? (
-                        <a
-                          className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                          href={`mailto:${paymentInfo.billingEmail}`}
-                        >
-                          Contact organizer
-                        </a>
-                      ) : null}
-
-                      <button
-                        type="button"
-                        onClick={payNow}
-                        className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2 text-xs font-bold text-white hover:opacity-95"
-                      >
-                        Pay organizer
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    {paymentInfo.methods.length > 0 ? (
-                      <div className="rounded-xl border border-slate-200 p-3">
-                        <div className="text-xs font-semibold text-slate-900">Accepted methods</div>
-                        <div className="mt-2 space-y-2">
-                          {paymentInfo.methods.map((m) => (
-                            <div key={m.key} className="flex items-center justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-sm font-semibold text-slate-900">{m.label}</div>
-                                <div className="truncate text-xs text-slate-600">{m.contact}</div>
-                              </div>
-                              <button
-                                type="button"
-                                className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(m.contact);
-                                  } catch {
-                                    // ignore
-                                  }
-                                }}
-                                title="Copy"
-                              >
-                                Copy
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="rounded-xl border border-slate-200 p-3">
-                      <div className="text-xs font-semibold text-slate-900">Notes</div>
-
-                      {paymentInfo.paymentUrl ? (
-                        <div className="mt-2 text-xs text-slate-700">
-                          Payment link provided:{" "}
-                          <a className="font-semibold text-indigo-700 hover:underline" href={paymentInfo.paymentUrl} target="_blank" rel="noreferrer">
-                            Open payment link
-                          </a>
-                        </div>
-                      ) : null}
-
-                      {paymentInfo.memo ? (
-                        <div className="mt-2">
-                          <div className="text-xs font-semibold text-slate-700">Memo / reference</div>
-                          <div className="mt-1 flex items-center justify-between gap-2">
-                            <div className="min-w-0 truncate text-xs text-slate-600">{paymentInfo.memo}</div>
-                            <button
-                              type="button"
-                              className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                              onClick={async () => {
-                                try {
-                                  await navigator.clipboard.writeText(paymentInfo.memo);
-                                } catch {
-                                  // ignore
-                                }
-                              }}
-                            >
-                              Copy
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {paymentInfo.refundPolicy ? (
-                        <div className="mt-2 text-xs text-slate-700">
-                          <span className="font-semibold">Refund policy:</span> {paymentInfo.refundPolicy}
-                        </div>
-                      ) : null}
-
-                      {paymentInfo.notes ? (
-                        <div className="mt-2 text-xs text-slate-700">
-                          <span className="font-semibold">Additional notes:</span> {paymentInfo.notes}
-                        </div>
-                      ) : null}
-
-                      {!paymentInfo.paymentUrl && !paymentInfo.billingEmail && paymentInfo.methods.length === 0 && !paymentInfo.memo && !paymentInfo.refundPolicy && !paymentInfo.notes ? (
-                        <div className="mt-2 text-xs text-slate-600">No payment details provided yet.</div>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-
-              {/* Booth Categories */}
-              <div className="mb-6">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Booth Categories</div>
-                    <div className="mt-1 text-sm text-slate-600">Pricing and sizes set by the organizer.</div>
-                  </div>
-                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    {boothCategories.length} categor{boothCategories.length === 1 ? "y" : "ies"}
-                  </div>
-                </div>
-
-                {boothCategories.length === 0 ? (
-                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                    No booth categories were provided for this event.
-                  </div>
-                ) : (
-                  <div className="mt-3 overflow-hidden rounded-xl border border-slate-200">
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[900px] text-left text-sm">
-                        <thead className="bg-slate-50 text-slate-700">
-                          <tr>
-                            <th className="px-4 py-3 font-semibold">Category</th>
-                            <th className="px-4 py-3 font-semibold">Base Size</th>
-                            <th className="px-4 py-3 font-semibold">Base Price</th>
-                            <th className="px-4 py-3 font-semibold">Add’l / ft</th>
-                            <th className="px-4 py-3 font-semibold">Corner</th>
-                            <th className="px-4 py-3 font-semibold">Fire Marshal</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200">
-                          {boothCategories.map((c) => {
-                            const key = normalizeId(c.id || c.name);
-                            return (
-                              <tr key={key} className="bg-white">
-                                <td className="px-4 py-3 font-semibold text-slate-900">{c.name}</td>
-                                <td className="px-4 py-3 text-slate-700">{c.baseSize || "—"}</td>
-                                <td className="px-4 py-3 text-slate-700">{money(c.basePrice)}</td>
-                                <td className="px-4 py-3 text-slate-700">{money(c.additionalPerFt)}</td>
-                                <td className="px-4 py-3 text-slate-700">{money(c.cornerPremium)}</td>
-                                <td className="px-4 py-3 text-slate-700">{money(c.fireMarshalFee)}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Restrictions */}
-              {restrictions.length > 0 ? (
-                <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="text-sm font-semibold text-slate-900">Restrictions</div>
-                  <div className="mt-1 text-sm text-slate-600">Read-only (set by organizer)</div>
-
-                  <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-700">
-                    {restrictions.map((r, idx) => (
-                      <li key={`${idx}-${r}`}>{r}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              {/* Payment Settings */}
-              <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Payment Settings</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Deposit rules, late fees, and refund policy set by the organizer.
-                    </div>
-                  </div>
-                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    Read-only
-                  </div>
-                </div>
-
-                {!payment.has ? (
-                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                    No payment settings were provided for this event.
-                  </div>
-                ) : (
-                  <div className="mt-4 space-y-4">
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Deposit</span>
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
-                          {payment.requireDeposit ? "Required" : "Not required"}
-                        </span>
-                      </div>
-
-                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-lg border border-slate-200 bg-white p-3">
-                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Deposit %</div>
-                          <div className="mt-1 text-sm font-semibold text-slate-900">
-                            {payment.depositPercent === null ? "—" : `${payment.depositPercent}%`}
-                          </div>
-                        </div>
-
-                        <div className="rounded-lg border border-slate-200 bg-white p-3">
-                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Late fee ($)</div>
-                          <div className="mt-1 text-sm font-semibold text-slate-900">
-                            {payment.lateFee === null ? "—" : `$${payment.lateFee}`}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                      <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Refund policy</div>
-                      <div className="mt-1 text-sm font-semibold text-slate-900">{payment.refundPolicy || "—"}</div>
-
-                      {payment.paymentNotes ? (
-                        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
-                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Payment notes</div>
-                          <div className="mt-1 whitespace-pre-wrap text-sm font-semibold text-slate-800">
-                            {payment.paymentNotes}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Compliance */}
-              <div className="mb-6">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Compliance Confirmations</div>
-                    <div className="mt-1 text-sm text-slate-600">Check each item to confirm you meet the requirement.</div>
-                  </div>
-                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    {complianceChecked}/{compliance.length}
-                  </div>
-                </div>
-
-                {compliance.length === 0 ? (
-                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                    No compliance items were found for this event.
-                  </div>
-                ) : (
-                  <div className="mt-3 space-y-3">
-                    {compliance.map((c) => {
-                      const cid = normalizeId(c.id || c.text);
-                      const isChecked = Boolean(checked[cid]);
-
-                      return (
-                        <div key={cid} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4"
-                            checked={isChecked}
-                            onChange={() => toggle(cid)}
-                          />
-
-                          <div className="flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <div className="text-sm font-semibold text-slate-900">{c.text}</div>
-                              <Badge kind={c.required ? "Required" : "Optional"} />
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Document Uploads */}
-              <div className="mb-6">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Document Uploads</div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Upload documents now, or do it later—your progress is saved.
-                    </div>
-                  </div>
-                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                    {docsUploaded}/{documents.length}
-                  </div>
-                </div>
-
-                {documents.length === 0 ? (
-                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                    No document requirements were found for this event.
-                  </div>
-                ) : (
-                  <div className="mt-3 space-y-3">
-                    {documents.map((d) => {
-                      const did = normalizeId(d.id || d.name);
-                      const list = uploads[did] || [];
-
-                      return (
-                        <div key={did} className="rounded-xl border border-slate-200 p-4">
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <div className="truncate text-sm font-semibold text-slate-900">{d.name}</div>
-                                <Badge kind={d.required ? "Required" : "Optional"} />
-                                {d.dueBy ? <span className="text-xs text-slate-500">Due: {d.dueBy}</span> : null}
-                              </div>
-                            </div>
-
-                            <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100">
-                              <input
-                                type="file"
-                                className="hidden"
-                                multiple
-                                onChange={(e) => {
-                                  addUploads(did, e.target.files);
-                                  e.currentTarget.value = "";
-                                }}
-                              />
-                              Upload
-                            </label>
-                          </div>
-
-                          {list.length > 0 ? (
-                            <div className="mt-3 space-y-2">
-                              {list.map((u, idx) => (
-                                <div
-                                  key={`${u.name}-${u.lastModified}-${idx}`}
-                                  className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
-                                >
-                                  <div className="min-w-0">
-                                    <div className="truncate text-sm font-medium text-slate-900">{u.name}</div>
-                                    <div className="text-xs text-slate-500">
-                                      {(u.size / 1024).toFixed(1)} KB • {u.type || "file"}
-                                    </div>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => removeUpload(did, idx)}
-                                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                                  >
-                                    Remove
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="mt-3 text-sm text-slate-600">No files uploaded yet.</div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Field confirmations (optional) */}
-              {fields.length > 0 ? (
-                <div className="mb-6">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">Application Field Checklist</div>
-                      <div className="mt-1 text-sm text-slate-600">
-                        Optional confirmations for application fields (driven by organizer template).
-                      </div>
-                    </div>
-                    <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
-                      {fields.length} field{fields.length === 1 ? "" : "s"}
-                    </div>
-                  </div>
-
-                  <div className="mt-3 space-y-3">
-                    {fields.map((f) => {
-                      const fid = normalizeId(f.id || f.label);
-                      const key = `field:${fid}`; // keep fields namespaced
-                      const isChecked = Boolean(checked[key]);
-
-                      return (
-                        <div key={fid} className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4"
-                            checked={isChecked}
-                            onChange={() => toggle(key)}
-                          />
-
-                          <div className="flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <div className="text-sm font-semibold text-slate-900">{f.label}</div>
-                              <Badge kind={f.required ? "Required" : "Optional"} />
-                            </div>
-
-                            {f.description ? <div className="mt-1 text-sm text-slate-600">{f.description}</div> : null}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : null}
-
-              {/* Actions */}
-              <div className="mt-6 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={goBackToEvent}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-95"
-                >
-                  Back to Event
-                </button>
-
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={goToLayout}
@@ -1650,23 +1219,377 @@ const isPaid = String(paymentStatus || "").toLowerCase() === "paid";
                   Continue to Booth Map
                 </button>
 
-                {!isPaid ? (
-                  <button
-                    type="button"
-                    onClick={payNow}
-                    disabled={!isApproved}
-                    className={[
-                      "rounded-lg px-4 py-2 text-sm font-semibold text-white hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50",
-                      "bg-gradient-to-r from-indigo-600 to-purple-600",
-                    ].join(" ")}
-                    title={isApproved ? "Proceed to payment" : "Payment is available after approval"}
-                  >
-                    Pay (after approval)
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  onClick={goBackToEvent}
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+                >
+                  Review Event Details
+                </button>
+
+                <button
+                  type="button"
+                  onClick={viewMyApplication}
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+                >
+                  View My Application
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    openMessages({
+                      subject: "Question about requirements / logistics",
+                      focus: "requirements",
+                    })
+                  }
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+                >
+                  Message organizer
+                </button>
               </div>
-            </>
-          )}
+            </div>
+
+            {/* Payment Instructions (after approval) */}
+            {isApproved ? (
+              <div id="payment-instructions" className="mb-6">
+                {paymentInfo.has ? (
+                  <>
+                    {/* Summary header (keeps your existing "paymentSummary" line) */}
+                    <div className="mb-3 rounded-2xl border border-slate-200 bg-white p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">Payment</div>
+                          <div className="mt-1 text-sm text-slate-600">
+                            Payment is handled directly with the organizer.
+                          </div>
+                          {paymentSummary ? (
+                            <div className="mt-1 text-xs font-semibold text-slate-700">{paymentSummary}</div>
+                          ) : null}
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openMessages({
+                                subject: "Payment / invoice question",
+                                focus: "payment",
+                              })
+                            }
+                            className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                            title={
+                              paymentInfo.billingEmail
+                                ? `Message organizer (${paymentInfo.billingEmail})`
+                                : "Message organizer (email not provided yet)"
+                            }
+                          >
+                            Message organizer
+                          </button>
+
+                          {paymentInfo.billingEmail ? (
+                            <a
+                              className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                              href={`mailto:${paymentInfo.billingEmail}`}
+                              onClick={(e) => e.stopPropagation()}
+                              title="Open your email client"
+                            >
+                              Email organizer
+                            </a>
+                          ) : null}
+
+                          {canPayNow ? (
+                            <button
+                              type="button"
+                              onClick={payNow}
+                              className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-2 text-xs font-bold text-white hover:opacity-95"
+                            >
+                              Pay organizer
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Main payment instructions card (fixes Copy + truncation) */}
+                    <PaymentInstructionsCard
+                      instructions={{
+                        title: "Payment instructions",
+                        subtitle: "Payment is handled directly with the organizer. Use the info below.",
+                        paypal: paymentInfo.methods.find((m) => m.key === "paypal")?.contact || "",
+                        zelle: paymentInfo.methods.find((m) => m.key === "zelle")?.contact || "",
+                        memo:
+                          paymentInfo.memo ||
+                          "Include your company name and application ID in the memo/reference.",
+                        refundPolicy: paymentInfo.refundPolicy || "",
+                      }}
+                      onPayOrganizer={() => {
+                        // Prefer payment link if present, else just scroll the methods section into view.
+                        if (paymentInfo.paymentUrl) {
+                          window.open(paymentInfo.paymentUrl, "_blank", "noopener,noreferrer");
+                          return;
+                        }
+                        document
+                          .getElementById("payment-methods")
+                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                    />
+
+                    {paymentInfo.paymentUrl ? (
+                      <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-700">
+                        Payment link provided:{" "}
+                        <a
+                          className="font-semibold text-indigo-700 hover:underline"
+                          href={paymentInfo.paymentUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open payment link
+                        </a>
+                      </div>
+                    ) : null}
+
+                    {/* If there are other methods beyond paypal/zelle, list them (still copy-safe inside card? we keep simple display) */}
+                    {paymentInfo.methods.filter((m) => m.key !== "paypal" && m.key !== "zelle").length > 0 ? (
+                      <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="text-xs font-semibold text-slate-900">Other accepted methods</div>
+                        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                          {paymentInfo.methods
+                            .filter((m) => m.key !== "paypal" && m.key !== "zelle")
+                            .map((m) => (
+                              <li key={m.key}>
+                                <span className="font-semibold">{m.label}:</span>{" "}
+                                <span className="break-words">{m.contact}</span>
+                              </li>
+                            ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="flex flex-col gap-2">
+                      <div className="text-sm font-semibold text-slate-900">Payment instructions</div>
+                      <div className="text-sm text-slate-600">
+                        Payment instructions have not been provided by the organizer yet.
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Once the organizer adds a payment link, email, or accepted methods, you’ll be able to pay.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/* Booth Categories */}
+            <div className="mb-6">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Booth Categories</div>
+                  <div className="mt-1 text-sm text-slate-600">Pricing and sizes set by the organizer.</div>
+                </div>
+                <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
+                  {boothCategories.length} categor{boothCategories.length === 1 ? "y" : "ies"}
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {boothCategories.map((c) => (
+                  <div key={c.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-slate-900">{c.name}</div>
+                      <div className="text-xs font-semibold text-slate-700">{c.baseSize || "—"}</div>
+                    </div>
+
+                    <div className="mt-2 text-sm text-slate-700">
+                      Base: <span className="font-semibold">{money(c.basePrice)}</span>
+                    </div>
+
+                    {c.additionalPerFt != null ? (
+                      <div className="mt-1 text-xs text-slate-600">
+                        Additional / ft: <span className="font-semibold">{money(c.additionalPerFt)}</span>
+                      </div>
+                    ) : null}
+
+                    {c.cornerPremium != null ? (
+                      <div className="mt-1 text-xs text-slate-600">
+                        Corner premium: <span className="font-semibold">{money(c.cornerPremium)}</span>
+                      </div>
+                    ) : null}
+
+                    {c.fireMarshalFee != null ? (
+                      <div className="mt-1 text-xs text-slate-600">
+                        Fire marshal fee: <span className="font-semibold">{money(c.fireMarshalFee)}</span>
+                      </div>
+                    ) : null}
+
+                    {c.electricalNote ? (
+                      <div className="mt-2 text-xs text-slate-600">
+                        <span className="font-semibold">Electrical:</span> {c.electricalNote}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Restrictions */}
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold text-slate-900">Restrictions</div>
+              <div className="mt-1 text-sm text-slate-600">Organizer rules and limitations for vendors.</div>
+
+              {restrictions.length > 0 ? (
+                <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-700">
+                  {restrictions.map((r, idx) => (
+                    <li key={idx}>{r}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-3 text-sm text-slate-600">No restrictions provided.</div>
+              )}
+            </div>
+
+            {/* Compliance */}
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold text-slate-900">Compliance</div>
+              <div className="mt-1 text-sm text-slate-600">Mark each item when you’ve reviewed or prepared it.</div>
+
+              {compliance.length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {compliance.map((c) => {
+                    const id = normalizeId(c.id || c.text);
+                    const on = !!checked[id];
+                    return (
+                      <label
+                        key={id}
+                        className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggle(id)}
+                          className="mt-1 h-4 w-4 rounded border-slate-300"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-900">{c.text}</div>
+                          <div className="mt-1 text-xs text-slate-600">
+                            {c.required ? <Badge kind="Required" /> : <Badge kind="Optional" />}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-3 text-sm text-slate-600">No compliance items provided.</div>
+              )}
+            </div>
+
+            {/* Documents */}
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold text-slate-900">Documents</div>
+              <div className="mt-1 text-sm text-slate-600">
+                Upload placeholders for required documents. (File storage will be added later.)
+              </div>
+
+              {documents.length > 0 ? (
+                <div className="mt-3 space-y-3">
+                  {documents.map((d) => {
+                    const id = normalizeId(d.id || d.name);
+                    const list = uploads[id] || [];
+                    return (
+                      <div key={id} className="rounded-xl border border-slate-200 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-900">{d.name}</div>
+                            <div className="mt-1 flex items-center gap-2 text-xs text-slate-600">
+                              {d.required ? <Badge kind="Required" /> : <Badge kind="Optional" />}
+                              {d.dueBy ? (
+                                <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-semibold">
+                                  Due by: {d.dueBy}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <label className="cursor-pointer rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50">
+                            Add file
+                            <input
+                              type="file"
+                              className="hidden"
+                              multiple
+                              onChange={(e) => addUploads(id, e.target.files)}
+                            />
+                          </label>
+                        </div>
+
+                        {list.length > 0 ? (
+                          <div className="mt-3 space-y-2">
+                            {list.map((m, i) => (
+                              <div
+                                key={`${m.name}:${m.lastModified}:${i}`}
+                                className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                              >
+                                <div className="min-w-0">
+                                  <div className="truncate text-xs font-semibold text-slate-900">{m.name}</div>
+                                  <div className="text-[11px] text-slate-600">
+                                    {Math.round(m.size / 1024)} KB • {m.type || "file"}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                                  onClick={() => removeUpload(id, i)}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mt-3 text-xs text-slate-600">No files added yet.</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-3 text-sm text-slate-600">No documents required.</div>
+              )}
+            </div>
+          </div>
+
+          {/* Right column */}
+          <div className="lg:col-span-1">
+            {/* Fields */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold text-slate-900">Additional fields</div>
+              <div className="mt-1 text-sm text-slate-600">These will be collected in a future update.</div>
+
+              {fields.length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {fields.map((f) => (
+                    <div key={f.id} className="rounded-xl border border-slate-200 p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-900">{f.label}</div>
+                          {f.description ? <div className="mt-1 text-xs text-slate-600">{f.description}</div> : null}
+                        </div>
+                        {f.required ? <Badge kind="Required" /> : <Badge kind="Optional" />}
+                      </div>
+
+                      <div className="mt-2 text-xs text-slate-600">
+                        Type: <span className="font-semibold">{f.type || "text"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-3 text-sm text-slate-600">No extra fields.</div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>

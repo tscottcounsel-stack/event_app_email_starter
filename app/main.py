@@ -54,11 +54,11 @@ def create_app() -> FastAPI:
     # Core Routers (DO NOT swallow failures)
     # ----------------------------
     # If these fail to import, we WANT the server to error so you see the real cause.
-    from app.routers import applications, events  # noqa
+    from app.routers import applications, events, requirement_templates
 
     app.include_router(events.router)
     app.include_router(applications.router)
-
+    app.include_router(requirement_templates.router)
     # ----------------------------
     # Optional Routers (safe include)
     # ----------------------------

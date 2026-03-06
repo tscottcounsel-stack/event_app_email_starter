@@ -10,6 +10,22 @@ from pydantic import BaseModel, ConfigDict
 from app.routers.auth import get_current_user
 from app.store import _APPLICATIONS, _EVENTS, next_application_id, save_store
 
+
+def _stable_user_id_from_email(email: str) -> int:
+    """Deterministic numeric id from email.
+
+    Uses sha1(email) and takes first 12 hex chars as an int.
+    This matches ids like 136766367973 for new1@example.com.
+    """
+    import hashlib
+
+    e = (email or "").strip().lower()
+    if not e:
+        return 0
+    h = hashlib.sha1(e.encode("utf-8")).hexdigest()
+    return int(h[:12], 16)
+
+
 router = APIRouter(tags=["Applications"])
 
 
@@ -229,7 +245,13 @@ def apply_to_event(
         "id": int(app_id),
         "event_id": int(event_id),
         "vendor_email": email,
-        "vendor_id": user.get("vendor_id") or None,
+        "vendor_id": (
+            user.get("vendor_id")
+            or user.get("id")
+            or user.get("sub")
+            or _stable_user_id_from_email(email)
+        )
+        or None,  # FIX_VENDOR_ID_EMAIL
         # Policy 2: ignore booth selection on apply
         "booth_id": None,
         "booth_reserved_until": None,
@@ -417,6 +439,36 @@ def organizer_list_event_applications(event_id: int):
         a["docs"] = d
         a["payment_status"] = _coerce_payment_status(a.get("payment_status"))
     return {"applications": apps}
+
+
+# -----------------------------------------------------------------------------
+# Organizer: Get single application
+# -----------------------------------------------------------------------------
+
+
+@router.get("/organizer/events/{event_id}/applications/{app_id}")
+def organizer_get_application(event_id: int, app_id: int):
+    expire_reservations_if_needed()
+
+    # Confirm event exists
+    get_event_or_404(event_id)
+
+    # Fetch application
+    app = get_application_or_404(app_id)
+
+    # Ensure it belongs to the event
+    if int(app.get("event_id") or 0) != int(event_id):
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Normalize documents
+    d = app.get("documents") or app.get("docs") or {}
+    app["documents"] = d
+    app["docs"] = d
+
+    # Normalize payment
+    app["payment_status"] = _coerce_payment_status(app.get("payment_status"))
+
+    return {"application": app}
 
 
 # -----------------------------------------------------------------------------

@@ -1,11 +1,16 @@
 // src/pages/VendorEventMapLayoutPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   listVendorApplications,
+  vendorApplyToEvent,
   submitApplication,
   type ServerApplication,
 } from "../components/api/applications";
+
+function cx(...classes: Array<string | false | undefined | null>) {
+  return classes.filter(Boolean).join(" ");
+}
 
 /* ---------------- Vendor Requirements Progress (localStorage) ---------------- */
 
@@ -21,6 +26,7 @@ type VendorReqProgress = {
   appId?: string;
   checked: Record<string, boolean>;
   uploads: Record<string, UploadMeta[]>;
+  notes?: string;
   updatedAt: string;
 };
 
@@ -48,7 +54,9 @@ function loadVendorProfileSnapshot(): Record<string, any> {
 }
 
 function loadVendorProgress(eventId: string, appId?: string): VendorReqProgress | null {
-  const all = safeJsonParse<VendorReqProgress[]>(localStorage.getItem(LS_VENDOR_PROGRESS_KEY));
+  const all = safeJsonParse<VendorReqProgress[]>(
+    localStorage.getItem(LS_VENDOR_PROGRESS_KEY)
+  );
   if (!Array.isArray(all) || all.length === 0) return null;
 
   const eId = normalizeId(eventId);
@@ -152,9 +160,13 @@ function tileTheme(status: BoothStatus) {
   const s = String(status || "").toLowerCase();
   const base = statusColor(s);
   const isStrong =
-    s === "available" || s === "pending" || s === "booked" || s === "assigned" || s === "reserved" || s === "blocked";
+    s === "available" ||
+    s === "pending" ||
+    s === "booked" ||
+    s === "assigned" ||
+    s === "reserved" ||
+    s === "blocked";
 
-  // Vendor UX: keep strong fills for non-available too (like organizer), but slightly muted.
   const opacity = s === "available" ? 1 : 0.92;
 
   return {
@@ -166,7 +178,9 @@ function tileTheme(status: BoothStatus) {
   };
 }
 
-function pill(kind: "Pending" | "Available" | "Reserved" | "Booked" | "Blocked" | "Assigned") {
+function pill(
+  kind: "Pending" | "Available" | "Reserved" | "Booked" | "Blocked" | "Assigned" | "Info"
+) {
   const base = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold";
   switch (kind) {
     case "Pending":
@@ -179,6 +193,8 @@ function pill(kind: "Pending" | "Available" | "Reserved" | "Booked" | "Blocked" 
       return `${base} bg-slate-100 text-slate-700`;
     case "Assigned":
       return `${base} bg-purple-50 text-purple-700`;
+    case "Info":
+      return `${base} bg-sky-50 text-sky-700`;
     default:
       return `${base} bg-slate-100 text-slate-700`;
   }
@@ -204,21 +220,6 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function extractNumericAppId(created: any): number | null {
-  const candidates = [
-    created?.application?.id,
-    created?.application_id,
-    created?.id,
-    created?.applicationId,
-    created?.application?.application_id,
-  ];
-  for (const c of candidates) {
-    const n = typeof c === "number" ? c : Number(String(c ?? ""));
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return null;
-}
-
 function shortVendorLabel(v?: string | null) {
   const s = String(v ?? "").trim();
   if (!s) return "";
@@ -226,6 +227,47 @@ function shortVendorLabel(v?: string | null) {
   if (at > 0) return s.slice(0, at);
   if (s.length > 18) return s.slice(0, 18) + "…";
   return s;
+}
+
+function normalizeStatus(v?: string) {
+  const s = String(v || "").toLowerCase();
+  if (s === "draft") return "draft";
+  if (s === "submitted") return "submitted";
+  if (s === "approved") return "approved";
+  if (s === "rejected") return "rejected";
+  if (s === "reserved") return "reserved";
+  if (s === "assigned") return "assigned";
+  if (s === "paid") return "paid";
+  return s || "submitted";
+}
+
+function isPaid(app: any) {
+  const ps = String(app?.payment_status || "").toLowerCase();
+  return ps === "paid";
+}
+
+function isPaymentAvailable(app: any) {
+  if (typeof app?.payment_enabled === "boolean") return app.payment_enabled;
+  if (typeof app?.payment_link === "string" && app.payment_link.trim()) return true;
+  return true;
+}
+
+function safeHoldMs(app: any): number | null {
+  const raw = String(app?.booth_reserved_until || "").trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  const t = d.getTime();
+  if (Number.isNaN(t)) return null;
+  return t - Date.now();
+}
+
+function formatDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h <= 0) return `${m}m`;
+  return `${h}h ${m}m`;
 }
 
 /* ---------------- Confirm Modal ---------------- */
@@ -248,7 +290,9 @@ function ConfirmModal(props: {
       <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
         <div className="text-2xl font-bold text-slate-900">{props.title}</div>
         {props.subtitle ? (
-          <div className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{props.subtitle}</div>
+          <div className="mt-2 whitespace-pre-wrap text-sm text-slate-600">
+            {props.subtitle}
+          </div>
         ) : null}
 
         {props.error ? (
@@ -308,6 +352,16 @@ export default function VendorEventMapLayoutPage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // UX message when Pay Now has no link, so the click doesn't feel "dead"
+  const [payNowMsg, setPayNowMsg] = useState<string | null>(null);
+
+  // UX guidance banner tick (for hold countdown)
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => forceTick((x) => x + 1), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
 
   const levels = useMemo(() => {
     const lvls = diagram?.levels?.length
@@ -404,7 +458,9 @@ export default function VendorEventMapLayoutPage() {
 
   const selectedBooth = useMemo(() => {
     if (!selectedBoothId) return null;
-    return boothsWithServerStatus.find((b) => String(b.id) === String(selectedBoothId)) || null;
+    return (
+      boothsWithServerStatus.find((b) => String(b.id) === String(selectedBoothId)) || null
+    );
   }, [boothsWithServerStatus, selectedBoothId]);
 
   function isBoothSelectable(b: Booth) {
@@ -500,13 +556,15 @@ export default function VendorEventMapLayoutPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function goBackToRequirements() {
+  function goBackToRequirements(focus?: "payment") {
     if (!eventId) return;
-    navigate(
-      `/vendor/events/${encodeURIComponent(eventId)}/requirements${
-        appId ? `?appId=${encodeURIComponent(appId)}` : ""
-      }`
-    );
+
+    const qs = new URLSearchParams();
+    if (appId) qs.set("appId", String(appId));
+    if (focus) qs.set("focus", focus);
+
+    const q = qs.toString();
+    navigate(`/vendor/events/${encodeURIComponent(String(eventId))}/requirements${q ? `?${q}` : ""}`);
   }
 
   function goBackToEvent() {
@@ -545,53 +603,159 @@ export default function VendorEventMapLayoutPage() {
     }
 
     const progress = loadVendorProgress(String(eventId), appId || undefined);
-    const uploadSummary = progress
-      ? summarizeUploads(progress.uploads || {})
-      : { docsWithFiles: 0, totalDocs: 0, totalFiles: 0 };
-
-    const vendorProfileSnapshot = loadVendorProfileSnapshot();
+    summarizeUploads(progress?.uploads || {});
+    loadVendorProfileSnapshot();
 
     try {
-      const created = await submitApplication(eventId, {
-        booth_id: String(selectedBooth.id),
-        checked: normalizeCheckedForSubmit(progress?.checked),
-        notes: progress
-          ? `Uploads: ${uploadSummary.docsWithFiles}/${uploadSummary.totalDocs} docs • ${uploadSummary.totalFiles} file(s)`
-          : "",
-        vendor_profile: vendorProfileSnapshot,
+      const applied = await vendorApplyToEvent({
+        eventId,
+        body: {
+          booth_id: String(selectedBooth.id),
+          checked: normalizeCheckedForSubmit(progress?.checked),
+          notes: (typeof progress?.notes === "string" ? progress.notes : "") || "",
+        },
       });
 
-      await loadVendorApps();
-
-      const numericId = extractNumericAppId(created);
-      if (!numericId) {
-        navigate("/vendor/applications");
-        return;
-      }
-
-      const qs = new URLSearchParams({
-        appId: String(numericId),
-        boothId: String(selectedBooth.id),
-      });
+      await submitApplication({ applicationId: (applied as any).id });
 
       clearSelection();
-      navigate(`/vendor/events/${encodeURIComponent(String(eventId))}/apply?${qs.toString()}`);
+
+      navigate(
+        `/vendor/events/${encodeURIComponent(String(eventId))}${
+          appId ? `?appId=${encodeURIComponent(String(appId))}` : ""
+        }`
+      );
     } catch (e: any) {
       setSubmitError(e?.message || "Failed to submit request.");
     } finally {
       setSubmitBusy(false);
       setConfirmOpen(false);
+      loadVendorApps();
     }
   }
 
+  // App(s) for this event (best-effort)
+  const eventApps = useMemo(() => {
+    return (apps || []).filter((a: any) => String(a.event_id) === String(eventId));
+  }, [apps, eventId]);
+
+  // Prefer the app from the URL (?appId=...), then fallback to "latest"
+  const activeEventApp = useMemo(() => {
+    if (!eventApps.length) return null;
+
+    const wanted = String(appId || "").trim();
+    if (wanted) {
+      const exact = eventApps.find((a: any) => String(a?.id) === wanted);
+      if (exact) return exact as any;
+    }
+
+    const sorted = eventApps.slice().sort((a: any, b: any) => {
+      const ta = new Date(String(a.updated_at || a.submitted_at || "")).getTime() || 0;
+      const tb = new Date(String(b.updated_at || b.submitted_at || "")).getTime() || 0;
+      if (tb !== ta) return tb - ta;
+      return (Number(b.id || 0) || 0) - (Number(a.id || 0) || 0);
+    });
+
+    return sorted[0] as any;
+  }, [eventApps, appId]);
+
+  // Banner label helper
   const pageStatus = useMemo(() => {
-    const anyPending = apps.some(
-      (a: any) =>
-        String(a.event_id) === String(eventId) &&
-        String(a.status || "").toLowerCase() === "submitted"
+    const anyPending = eventApps.some(
+      (a: any) => String(a.status || "").toLowerCase() === "submitted"
     );
     return anyPending ? "Pending" : "";
-  }, [apps, eventId]);
+  }, [eventApps]);
+
+  const guidance = useMemo(() => {
+    const a: any = activeEventApp;
+    const status = normalizeStatus(a?.status);
+
+    const progress = loadVendorProgress(String(eventId || ""), appId || undefined);
+    const uploads = progress?.uploads || {};
+    const sum = summarizeUploads(uploads);
+    const hasDocs = sum.totalDocs > 0;
+    const reqLooksIncomplete = hasDocs && sum.docsWithFiles < sum.totalDocs;
+
+    const boothSelected = !!String(a?.booth_id || "").trim();
+    const paid = isPaid(a);
+    const paymentAvail = isPaymentAvailable(a);
+    const holdMs = safeHoldMs(a);
+
+    if (status === "approved" && paid) {
+      return {
+        tone: "emerald" as const,
+        title: "You’re confirmed ✅",
+        body: "Payment is complete. You can view the floorplan anytime.",
+        cta: { label: "View floorplan", kind: "view_floorplan" as const },
+        holdMs,
+      };
+    }
+
+    if (status === "approved" && boothSelected && paymentAvail && !paid) {
+      const holdLine =
+        typeof holdMs === "number"
+          ? holdMs > 0
+            ? `Your hold expires in ${formatDuration(holdMs)}.`
+            : "Your booth hold has expired."
+          : "";
+      return {
+        tone: "amber" as const,
+        title: "Payment required to confirm",
+        body: `You’ve selected a booth. ${holdLine} Pay now to lock it in.`,
+        cta: { label: "Pay now", kind: "pay_now" as const },
+        holdMs,
+      };
+    }
+
+    if (status === "approved" && !boothSelected) {
+      return {
+        tone: "violet" as const,
+        title: "Select a booth to continue",
+        body: "You’re approved. Choose an available booth to reserve your spot.",
+        cta: { label: "Select an available booth", kind: "select_booth" as const },
+        holdMs,
+      };
+    }
+
+    if (status !== "approved" && reqLooksIncomplete) {
+      return {
+        tone: "slate" as const,
+        title: "Complete your requirements",
+        body: "Upload any missing requirement documents, then return here to choose a booth.",
+        cta: { label: "Go to requirements", kind: "requirements" as const },
+        holdMs,
+      };
+    }
+
+    if (status === "submitted") {
+      return {
+        tone: "slate" as const,
+        title: "Waiting for approval",
+        body: "Your application is under review. Once approved, you’ll be able to select a booth here.",
+        cta: { label: "Back to event", kind: "event" as const },
+        holdMs,
+      };
+    }
+
+    if (status === "rejected") {
+      return {
+        tone: "rose" as const,
+        title: "Not approved",
+        body: "This application was not approved. You can return to events to apply to others.",
+        cta: { label: "Browse events", kind: "browse" as const },
+        holdMs,
+      };
+    }
+
+    return {
+      tone: "slate" as const,
+      title: "Select a booth to submit your request",
+      body: "Choose an available booth to submit a request. The organizer will review it.",
+      cta: { label: "Back to requirements", kind: "requirements" as const },
+      holdMs,
+    };
+  }, [activeEventApp, eventId, appId]);
 
   function boothUiLabel(b: Booth) {
     const id = String(b.id);
@@ -603,6 +767,64 @@ export default function VendorEventMapLayoutPage() {
     return owner ? shortVendorLabel(owner) : "";
   }
 
+  function bannerToneClasses(tone: "emerald" | "amber" | "violet" | "slate" | "rose") {
+    if (tone === "emerald") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    if (tone === "amber") return "border-amber-200 bg-amber-50 text-amber-900";
+    if (tone === "violet") return "border-violet-200 bg-violet-50 text-violet-900";
+    if (tone === "rose") return "border-rose-200 bg-rose-50 text-rose-900";
+    return "border-slate-200 bg-white text-slate-900";
+  }
+
+  function onGuidanceCta() {
+    const kind = guidance.cta.kind;
+
+    setPayNowMsg(null);
+
+    if (kind === "requirements") return goBackToRequirements();
+    if (kind === "event") return goBackToEvent();
+    if (kind === "browse") return navigate("/vendor/events");
+
+    if (kind === "view_floorplan") {
+      clearSelection();
+      if (scrollRef.current) {
+        scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+      }
+      return;
+    }
+
+    if (kind === "select_booth") {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+      }
+      return;
+    }
+
+    if (kind === "pay_now") {
+      const a: any = activeEventApp;
+      const link = String(a?.payment_link || "").trim();
+
+      // If backend ever provides a link, use it.
+      if (link) {
+        window.open(link, "_blank");
+        return;
+      }
+
+      // Option A: send vendor to payment instructions (Requirements page)
+      if (!eventId) {
+        setPayNowMsg("Payment link isn’t available yet for this application.");
+        return;
+      }
+
+      goBackToRequirements("payment");
+      return;
+    }
+  }
+
+  const disableSelection = useMemo(() => {
+    const a: any = activeEventApp;
+    return !!a && isPaid(a);
+  }, [activeEventApp]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto w-full max-w-6xl px-4 py-6">
@@ -613,16 +835,19 @@ export default function VendorEventMapLayoutPage() {
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-3xl font-extrabold text-slate-900">Booth Layout</h1>
               {pageStatus ? <span className={pill("Pending")}>{pageStatus}</span> : null}
+              {activeEventApp && isPaid(activeEventApp as any) ? (
+                <span className={pill("Booked")}>Confirmed</span>
+              ) : null}
             </div>
             <div className="mt-1 text-sm text-slate-600">
-              Select a booth to submit your request. Approved booths become booked.
+              Choose a booth to reserve it. If you’re approved, you can pay to confirm.
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={goBackToRequirements}
+              onClick={() => goBackToRequirements()}
               className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
             >
               Back to Requirements
@@ -650,11 +875,69 @@ export default function VendorEventMapLayoutPage() {
             <button
               type="button"
               onClick={openConfirm}
-              disabled={!selectedBooth || !isBoothSelectable(selectedBooth)}
+              disabled={disableSelection || !selectedBooth || !isBoothSelectable(selectedBooth)}
               className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:opacity-95 disabled:opacity-60"
             >
               Purchase / Apply
             </button>
+          </div>
+        </div>
+
+        {/* Step B: Guidance Banner */}
+        <div
+          className={cx(
+            "mb-6 rounded-2xl border p-4 shadow-sm",
+            bannerToneClasses(guidance.tone)
+          )}
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="text-sm font-extrabold">What’s next</div>
+              <div className="mt-1 text-xl font-black">{guidance.title}</div>
+              <div className="mt-1 text-sm font-semibold opacity-90">{guidance.body}</div>
+
+              {payNowMsg ? (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-white p-3 text-sm font-semibold text-amber-900">
+                  {payNowMsg}
+                </div>
+              ) : null}
+
+              {guidance.tone === "amber" && typeof guidance.holdMs === "number" ? (
+                <div className="mt-2 text-xs font-bold opacity-80">
+                  {guidance.holdMs > 0
+                    ? `Hold countdown: ${formatDuration(guidance.holdMs)}`
+                    : "Hold countdown: expired"}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onGuidanceCta}
+                className={cx(
+                  "rounded-full px-5 py-2 text-sm font-extrabold",
+                  guidance.tone === "emerald"
+                    ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                    : guidance.tone === "amber"
+                    ? "bg-amber-600 text-white hover:bg-amber-700"
+                    : guidance.tone === "violet"
+                    ? "bg-violet-700 text-white hover:bg-violet-800"
+                    : guidance.tone === "rose"
+                    ? "bg-rose-600 text-white hover:bg-rose-700"
+                    : "bg-slate-900 text-white hover:bg-slate-800"
+                )}
+              >
+                {guidance.cta.label}
+              </button>
+
+              <Link
+                to="/vendor/dashboard"
+                className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+              >
+                Dashboard
+              </Link>
+            </div>
           </div>
         </div>
 
@@ -701,7 +984,9 @@ export default function VendorEventMapLayoutPage() {
                   type="button"
                   onClick={() => {
                     setZoom(1);
-                    if (scrollRef.current) scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+                    if (scrollRef.current) {
+                      scrollRef.current.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+                    }
                   }}
                   className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
                 >
@@ -711,7 +996,11 @@ export default function VendorEventMapLayoutPage() {
                 <div className="ml-1 text-xs text-slate-500">
                   Source:{" "}
                   <span className="font-semibold text-slate-700">
-                    {source === "api" ? "api" : source === "localStorage" ? "localStorage" : "none"}
+                    {source === "api"
+                      ? "api"
+                      : source === "localStorage"
+                      ? "localStorage"
+                      : "none"}
                   </span>
                 </div>
               </div>
@@ -765,7 +1054,7 @@ export default function VendorEventMapLayoutPage() {
                   {/* Booths */}
                   {boothsWithServerStatus.map((b) => {
                     const sel = selectedBoothId && String(selectedBoothId) === String(b.id);
-                    const canSelect = isBoothSelectable(b);
+                    const canSelect = !disableSelection && isBoothSelectable(b);
 
                     const label = boothUiLabel(b);
                     const owner = boothOwnerLabel(b);
@@ -802,9 +1091,11 @@ export default function VendorEventMapLayoutPage() {
                           userSelect: "none",
                           boxSizing: "border-box",
                           background: theme.fill,
-                          opacity: theme.opacity,
+                          opacity: canSelect ? theme.opacity : Math.min(0.7, theme.opacity),
                           border: sel ? "3px solid #2563eb" : "2px solid rgba(255,255,255,0.35)",
-                          boxShadow: sel ? "0 14px 30px rgba(37,99,235,0.22)" : "0 3px 10px rgba(15,23,42,0.08)",
+                          boxShadow: sel
+                            ? "0 14px 30px rgba(37,99,235,0.22)"
+                            : "0 3px 10px rgba(15,23,42,0.08)",
                           color: theme.text,
                           overflow: "hidden",
                         }}
@@ -830,21 +1121,45 @@ export default function VendorEventMapLayoutPage() {
                           {fmtMoney(b.price)}
                         </div>
 
-                        <div style={{ marginTop: 8, fontSize: 11, fontWeight: 900, color: theme.subtext, lineHeight: 1.15 }}>
+                        <div
+                          style={{
+                            marginTop: 8,
+                            fontSize: 11,
+                            fontWeight: 900,
+                            color: theme.subtext,
+                            lineHeight: 1.15,
+                          }}
+                        >
                           {b.category || "Select category"}
                         </div>
 
-                        {/* Only show holder if not available */}
                         {owner && nonAvailable ? (
-                          <div style={{ marginTop: 6, fontSize: 11, fontWeight: 800, color: theme.subtext, opacity: 0.95 }}>
+                          <div
+                            style={{
+                              marginTop: 6,
+                              fontSize: 11,
+                              fontWeight: 800,
+                              color: theme.subtext,
+                              opacity: 0.95,
+                            }}
+                          >
                             Held by {owner}
                           </div>
                         ) : null}
 
-                        {/* subtle bottom hint for non-selectable */}
                         {!canSelect ? (
-                          <div style={{ position: "absolute", right: 10, bottom: 8, fontSize: 10, fontWeight: 900, color: theme.subtext, opacity: 0.9 }}>
-                            {s || "—"}
+                          <div
+                            style={{
+                              position: "absolute",
+                              right: 10,
+                              bottom: 8,
+                              fontSize: 10,
+                              fontWeight: 900,
+                              color: theme.subtext,
+                              opacity: 0.9,
+                            }}
+                          >
+                            {disableSelection ? "locked" : s || "—"}
                           </div>
                         ) : null}
                       </button>
@@ -858,7 +1173,11 @@ export default function VendorEventMapLayoutPage() {
           {/* Booth Details */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-lg font-bold text-slate-900">Booth Details</div>
-            <div className="mt-1 text-sm text-slate-600">Click an available booth on the map to select it.</div>
+            <div className="mt-1 text-sm text-slate-600">
+              {disableSelection
+                ? "You’re confirmed for this event. Booth selection is locked."
+                : "Click an available booth on the map to select it."}
+            </div>
 
             {selectedBooth ? (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
@@ -868,7 +1187,8 @@ export default function VendorEventMapLayoutPage() {
 
                 <div className="mt-2 space-y-1 text-sm text-slate-700">
                   <div>
-                    Category: <span className="font-semibold">{selectedBooth.category || "—"}</span>
+                    Category:{" "}
+                    <span className="font-semibold">{selectedBooth.category || "—"}</span>
                   </div>
                   <div>
                     Price: <span className="font-semibold">{fmtMoney(selectedBooth.price)}</span>
@@ -880,13 +1200,15 @@ export default function VendorEventMapLayoutPage() {
                   <div>
                     Size:{" "}
                     <span className="font-semibold">
-                      {Math.round(Number(selectedBooth.width || 0))}×{Math.round(Number(selectedBooth.height || 0))}
+                      {Math.round(Number(selectedBooth.width || 0))}×
+                      {Math.round(Number(selectedBooth.height || 0))}
                     </span>
                   </div>
 
                   {(() => {
                     const owner = boothOwnerLabel(selectedBooth);
-                    const nonAvailable = String(selectedBooth.status || "").toLowerCase() !== "available";
+                    const nonAvailable =
+                      String(selectedBooth.status || "").toLowerCase() !== "available";
                     return owner && nonAvailable ? (
                       <div>
                         Held by: <span className="font-semibold">{owner}</span>
@@ -899,7 +1221,7 @@ export default function VendorEventMapLayoutPage() {
                   <button
                     type="button"
                     onClick={openConfirm}
-                    disabled={!isBoothSelectable(selectedBooth)}
+                    disabled={disableSelection || !isBoothSelectable(selectedBooth)}
                     className="w-full rounded-full bg-indigo-600 px-5 py-3 text-sm font-extrabold text-white hover:opacity-95 disabled:opacity-60"
                   >
                     Purchase / Apply
@@ -943,7 +1265,11 @@ export default function VendorEventMapLayoutPage() {
           title="Confirm booth request"
           subtitle={
             selectedBooth
-              ? `${boothUiLabel(selectedBooth)} for ${fmtMoney(selectedBooth.price)}?\n\nYour request will be submitted as Pending until the organizer reviews it.`
+              ? `${boothUiLabel(selectedBooth)} for ${fmtMoney(
+                  selectedBooth.price
+                )}?
+
+Your request will be submitted as Pending until the organizer reviews it.`
               : "Your request will be submitted as Pending until the organizer reviews it."
           }
           confirmText="Submit Request"

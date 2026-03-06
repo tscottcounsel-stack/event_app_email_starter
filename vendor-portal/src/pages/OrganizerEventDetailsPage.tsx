@@ -36,6 +36,12 @@ type EventModel = {
   imageUrls?: string[];
   videoUrls?: string[];
 
+  // ✅ Category fields (best-effort)
+  category?: string | null;
+  event_type?: string | null;
+  industry?: string | null;
+  type?: string | null;
+
   // Backend canonical
   ticket_sales_url?: string;
   google_maps_url?: string;
@@ -54,7 +60,9 @@ function safeStr(x: any) {
 
 function asArrayOfStrings(x: any): string[] {
   if (!Array.isArray(x)) return [];
-  return x.map((v) => String(v ?? "").trim()).filter(Boolean);
+  return x
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
 }
 
 function isLikelyHttpUrl(s: string) {
@@ -109,6 +117,36 @@ function localInputToIso(value?: string | null) {
   // Store DATE-ONLY to avoid timezone shifts
   return datePart;
 }
+
+/* ---------------- Category ---------------- */
+
+const CATEGORY_OPTIONS = [
+  "Food",
+  "Tech",
+  "Arts & Crafts",
+  "Fashion",
+  "Music",
+  "Health & Wellness",
+  "Business / Trade Show",
+  "Community",
+  "Holiday / Seasonal",
+  "Other",
+] as const;
+
+function pickCategoryFromEvent(ev: any) {
+  const raw =
+    safeStr(ev?.category) ||
+    safeStr(ev?.event_type) ||
+    safeStr(ev?.industry) ||
+    safeStr(ev?.type);
+  return raw || "";
+}
+
+function normalizeCategory(v: string) {
+  const s = safeStr(v);
+  return s;
+}
+
 /* ---------------- Page ---------------- */
 
 export default function OrganizerEventDetailsPage() {
@@ -130,6 +168,9 @@ export default function OrganizerEventDetailsPage() {
   const [streetAddress, setStreetAddress] = useState("");
   const [city, setCity] = useState("");
   const [stateCode, setStateCode] = useState("");
+
+  // ✅ Category
+  const [category, setCategory] = useState("");
 
   // datetime-local values
   const [startLocal, setStartLocal] = useState("");
@@ -188,6 +229,9 @@ export default function OrganizerEventDetailsPage() {
         setCity(safeStr(ev.city));
         setStateCode(safeStr(ev.state));
 
+        // ✅ Category load (best-effort)
+        setCategory(pickCategoryFromEvent(ev));
+
         // ✅ Convert ISO -> datetime-local
         setStartLocal(isoToLocalInput(ev.start_date ?? null));
         setEndLocal(isoToLocalInput(ev.end_date ?? null));
@@ -229,6 +273,8 @@ export default function OrganizerEventDetailsPage() {
     try {
       const headers = { ...buildAuthHeaders(), "Content-Type": "application/json" };
 
+      const cat = normalizeCategory(category);
+
       const payload: Partial<EventModel> = {
         title: safeStr(title) || undefined,
         description: safeStr(description) || undefined,
@@ -243,6 +289,11 @@ export default function OrganizerEventDetailsPage() {
         // ✅ store as ISO; empty -> null (prevents 1970)
         start_date: localInputToIso(startLocal),
         end_date: localInputToIso(endLocal),
+
+        // ✅ category (best-effort)
+        category: cat || undefined,
+        // Mirror to event_type for compatibility with older code/DB fields
+        event_type: cat || undefined,
 
         // ✅ backend canonical
         ticket_sales_url: safeStr(ticketSalesUrl) || undefined,
@@ -289,6 +340,9 @@ export default function OrganizerEventDetailsPage() {
         );
         setCity(safeStr(next.city));
         setStateCode(safeStr(next.state));
+
+        // ✅ reload category from server response
+        setCategory(pickCategoryFromEvent(next));
 
         setStartLocal(isoToLocalInput(next.start_date ?? null));
         setEndLocal(isoToLocalInput(next.end_date ?? null));
@@ -448,6 +502,26 @@ export default function OrganizerEventDetailsPage() {
               onChange={(e) => setVenue(e.target.value)}
               placeholder="Venue / location name"
             />
+          </label>
+
+          {/* ✅ Category */}
+          <label className="block">
+            <div className="mb-1 text-sm font-medium text-gray-700">Category</div>
+            <select
+              className="w-full rounded-lg border px-3 py-2"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="">Select category</option>
+              {CATEGORY_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </select>
+            <div className="mt-1 text-xs text-gray-500">
+              This powers the “Food / Tech / …” pill on vendor event cards.
+            </div>
           </label>
 
           <label className="block md:col-span-2">
@@ -629,7 +703,10 @@ export default function OrganizerEventDetailsPage() {
                     <div className="truncate text-xs text-gray-600">
                       {url.startsWith("data:image/") ? "(uploaded image)" : url}
                     </div>
-                    <button className="rounded border px-2 py-1 text-xs" onClick={() => removeImage(url)}>
+                    <button
+                      className="rounded border px-2 py-1 text-xs"
+                      onClick={() => removeImage(url)}
+                    >
                       Remove
                     </button>
                   </div>
@@ -653,7 +730,10 @@ export default function OrganizerEventDetailsPage() {
               value={vidDraft}
               onChange={(e) => setVidDraft(e.target.value)}
             />
-            <button className="rounded-lg bg-green-600 px-4 py-2 font-medium text-white" onClick={addVideoUrl}>
+            <button
+              className="rounded-lg bg-green-600 px-4 py-2 font-medium text-white"
+              onClick={addVideoUrl}
+            >
               Add
             </button>
           </div>
@@ -661,13 +741,22 @@ export default function OrganizerEventDetailsPage() {
           {videoUrls.length > 0 ? (
             <div className="mt-4 space-y-2">
               {videoUrls.map((url) => (
-                <div key={url} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+                <div
+                  key={url}
+                  className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
+                >
                   <div className="truncate text-sm text-gray-700">{url}</div>
                   <div className="flex gap-2">
-                    <button className="rounded border px-3 py-1 text-sm" onClick={() => window.open(url, "_blank", "noopener,noreferrer")}>
+                    <button
+                      className="rounded border px-3 py-1 text-sm"
+                      onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+                    >
                       Open
                     </button>
-                    <button className="rounded border px-3 py-1 text-sm" onClick={() => removeVideo(url)}>
+                    <button
+                      className="rounded border px-3 py-1 text-sm"
+                      onClick={() => removeVideo(url)}
+                    >
                       Remove
                     </button>
                   </div>

@@ -81,8 +81,18 @@ function formatLocation(ev: Event) {
 }
 
 function formatDateRange(ev: Event) {
-  const start = ev.start_date ? new Date(ev.start_date) : null;
-  const end = ev.end_date ? new Date(ev.end_date) : null;
+  // Guard against the common "epoch default" bug (1970/1971) and invalid dates.
+  const parse = (s?: string) => {
+    if (!s) return null;
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return null;
+    // Treat 1970/1971 as unset placeholders.
+    if (d.getFullYear() <= 1971) return null;
+    return d;
+  };
+
+  const start = parse(ev.start_date);
+  const end = parse(ev.end_date);
 
   const fmt = (d: Date) =>
     `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
@@ -90,7 +100,7 @@ function formatDateRange(ev: Event) {
   if (start && end) return `${fmt(start)} - ${fmt(end)}`;
   if (start) return fmt(start);
   if (end) return fmt(end);
-  return "—";
+  return "Dates TBD";
 }
 
 async function getJson<T>(path: string): Promise<T> {

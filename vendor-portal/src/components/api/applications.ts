@@ -139,7 +139,27 @@ function idPath(name: string, v: any): string {
 }
 
 function unwrapApplication(data: any): ServerApplication {
-  return (data as any)?.application ? ((data as any).application as ServerApplication) : (data as ServerApplication);
+  return (data as any)?.application
+    ? ((data as any).application as ServerApplication)
+    : (data as ServerApplication);
+}
+
+/** Accept both calling styles safely */
+function isObj(v: any): v is Record<string, any> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function pickAppIdFromUnknownShape(v: any): any {
+  return (
+    v?.applicationId ??
+    v?.appId ??
+    v?.application_id ??
+    v?.id ??
+    v?.application?.id ??
+    v?.application?.appId ??
+    v?.data?.id ??
+    v?.data?.appId
+  );
 }
 
 /* ---------------- Optional URL helpers ---------------- */
@@ -166,11 +186,27 @@ export async function listVendorApplications(): Promise<ServerApplication[]> {
 }
 
 /* ---------------- Vendor: get application ---------------- */
+/**
+ * Supports BOTH:
+ *  - vendorGetApplication({ applicationId })
+ *  - vendorGetApplication(eventId, appId)  // eventId ignored, kept for compatibility
+ *  - vendorGetApplication(appId)          // also supported
+ */
+export async function vendorGetApplication(
+  a1: any,
+  a2?: any
+): Promise<ServerApplication> {
+  let applicationId: any;
 
-export async function vendorGetApplication(args: {
-  applicationId: string | number;
-}): Promise<ServerApplication> {
-  const appId = idPath("applicationId", args.applicationId);
+  if (isObj(a1)) {
+    applicationId = a1.applicationId;
+  } else if (a2 != null) {
+    applicationId = a2; // called as (eventId, appId)
+  } else {
+    applicationId = a1; // called as (appId)
+  }
+
+  const appId = idPath("applicationId", applicationId);
 
   const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${appId}`, {
     method: "GET",
@@ -198,27 +234,52 @@ export async function vendorApplyToEvent(args: {
 }
 
 /* ---------------- Vendor: get or create draft (compat) ---------------- */
-
-export async function vendorGetOrCreateDraftApplication(args: {
-  eventId: string | number;
-}): Promise<ServerApplication> {
-  return vendorApplyToEvent({ eventId: args.eventId, body: {} });
+/**
+ * Supports BOTH:
+ *  - vendorGetOrCreateDraftApplication({ eventId })
+ *  - vendorGetOrCreateDraftApplication(eventId)
+ */
+export async function vendorGetOrCreateDraftApplication(
+  a1: any
+): Promise<ServerApplication> {
+  const eventId = isObj(a1) ? a1.eventId : a1;
+  return vendorApplyToEvent({ eventId, body: {} });
 }
 
-export async function vendorGetOrCreateDraftApplicationLegacy(args: {
-  eventId: string | number;
-}): Promise<ServerApplication> {
-  return vendorGetOrCreateDraftApplication(args);
+export async function vendorGetOrCreateDraftApplicationLegacy(
+  a1: any
+): Promise<ServerApplication> {
+  return vendorGetOrCreateDraftApplication(a1);
 }
 
 /* ---------------- Vendor: save progress (checked/docs/notes) ---------------- */
+/**
+ * Supports BOTH:
+ *  - vendorSaveProgress({ applicationId, body })
+ *  - vendorSaveProgress(eventId, { appId, checked, docs, documents, notes })
+ *
+ * NOTE: vendor endpoints are keyed by applicationId, not eventId,
+ * but some callers pass eventId as the first arg. We ignore it safely.
+ */
+export async function vendorSaveProgress(
+  a1: any,
+  a2?: any
+): Promise<ServerApplication> {
+  let applicationId: any;
+  let body: any;
 
-export async function vendorSaveProgress(args: {
-  applicationId: string | number;
-  body: ProgressBody;
-}): Promise<ServerApplication> {
-  const applicationId = idPath("applicationId", args.applicationId);
-  const body = args.body || {};
+  if (isObj(a1)) {
+    // { applicationId, body }
+    applicationId = a1.applicationId;
+    body = a1.body || {};
+  } else {
+    // (eventId, payload) OR (payload)
+    const payload = a2 != null ? a2 : a1;
+    applicationId = payload?.applicationId ?? payload?.appId ?? pickAppIdFromUnknownShape(payload);
+    body = payload || {};
+  }
+
+  const applicationIdPath = idPath("applicationId", applicationId);
 
   const documents = body.documents ?? body.docs;
 
@@ -232,18 +293,26 @@ export async function vendorSaveProgress(args: {
     payload.docs = documents;
   }
 
-  const data = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${applicationId}/progress`, {
-    method: "PUT",
-    headers: buildVendorHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
+  const data = await fetchJsonOrThrow(
+    `${API_BASE}/vendor/applications/${applicationIdPath}/progress`,
+    {
+      method: "PUT",
+      headers: buildVendorHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    }
+  );
 
   const appFromResp = (data as any)?.application;
   if (appFromResp) return appFromResp as ServerApplication;
 
-  const appId = (data as any)?.app_id ?? (data as any)?.appId ?? applicationId;
+  const appId =
+    (data as any)?.app_id ??
+    (data as any)?.appId ??
+    (data as any)?.id ??
+    applicationIdPath;
+
   if (appId) {
-    const fresh = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${appId}`, {
+    const fresh = await fetchJsonOrThrow(`${API_BASE}/vendor/applications/${idPath("applicationId", appId)}`, {
       method: "GET",
       headers: buildVendorHeaders(),
     });
@@ -253,11 +322,11 @@ export async function vendorSaveProgress(args: {
   return unwrapApplication(data);
 }
 
-export async function vendorUpdateApplication(args: {
-  applicationId: string | number;
-  body: ProgressBody;
-}): Promise<ServerApplication> {
-  return vendorSaveProgress(args);
+export async function vendorUpdateApplication(
+  a1: any,
+  a2?: any
+): Promise<ServerApplication> {
+  return vendorSaveProgress(a1 as any, a2 as any);
 }
 
 /* ---------------- Vendor: submit application (compat) ---------------- */

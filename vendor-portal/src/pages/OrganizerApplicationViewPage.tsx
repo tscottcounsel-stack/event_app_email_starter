@@ -9,6 +9,16 @@ type DocMeta = {
   lastModified?: number;
 };
 
+type DiagramDoc = {
+  levels?: Array<{
+    id: string;
+    name: string;
+    booths: Array<{ id: string; label?: string }>;
+    elements?: any[];
+  }>;
+  booths?: Array<{ id: string; label?: string }>; // legacy
+};
+
 function chipClass(kind: "neutral" | "good" | "bad" | "warn") {
   const base = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border";
   if (kind === "good") return `${base} border-green-200 bg-green-50 text-green-800`;
@@ -63,12 +73,80 @@ function formatBytes(n?: number) {
   return `${shown} ${units[idx]}`;
 }
 
+function parseDateMaybe(s?: string | null) {
+  const v = String(s ?? "").trim();
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function formatDateTimeLocal(d: Date | null) {
+  if (!d) return "—";
+  try {
+    return d.toLocaleString();
+  } catch {
+    return d.toISOString();
+  }
+}
+
+function minsUntil(d: Date | null) {
+  if (!d) return null;
+  const ms = d.getTime() - Date.now();
+  return Math.floor(ms / 60000);
+}
+
+function shortenId(id: string, head = 14, tail = 4) {
+  const v = String(id || "").trim();
+  if (!v) return "—";
+  if (v.length <= head + tail + 1) return v;
+  return `${v.slice(0, head)}…${v.slice(-tail)}`;
+}
+
+function safeJsonParse<T = any>(s: string | null): T | null {
+  if (!s) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
+}
+
+function lsDiagramKey(eventId: string) {
+  return `event:${String(eventId)}:diagram`;
+}
+
+function getBoothLabelFromCachedDiagram(eventId: string, boothId: string): string | null {
+  const cached = safeJsonParse<any>(localStorage.getItem(lsDiagramKey(eventId)));
+  const doc = (cached?.diagram ?? null) as DiagramDoc | null;
+  if (!doc) return null;
+
+  const target = String(boothId || "").trim();
+  if (!target) return null;
+
+  if (Array.isArray(doc.levels) && doc.levels.length) {
+    for (const lvl of doc.levels) {
+      const booths = Array.isArray(lvl?.booths) ? lvl.booths : [];
+      const hit = booths.find((b) => String((b as any)?.id) === target);
+      const label = hit?.label ? String(hit.label).trim() : "";
+      if (label) return label;
+    }
+  }
+
+  if (Array.isArray(doc.booths) && doc.booths.length) {
+    const hit = doc.booths.find((b) => String((b as any)?.id) === target);
+    const label = hit?.label ? String(hit.label).trim() : "";
+    if (label) return label;
+  }
+
+  return null;
+}
+
 export default function OrganizerApplicationViewPage() {
   const nav = useNavigate();
-  const { eventId, appId } = useParams();
+  const { eventId, appId, applicationId } = useParams();
 
   const eid = String(eventId ?? "").trim();
-  const aid = String(appId ?? "").trim();
+  const aid = String(appId ?? applicationId ?? "").trim();
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -83,8 +161,8 @@ export default function OrganizerApplicationViewPage() {
       setErr(null);
 
       try {
-        if (!eid || !aid) throw new Error("Missing eventId or appId in route.");
-        const a = await ApplicationsAPI.organizerGetApplication({ eventId: eid, appId: aid });
+        if (!eid || !aid) throw new Error("Missing eventId or application id in route.");
+        const a = await ApplicationsAPI.organizerGetApplication({ eventId: eid, appId: aid } as any);
         if (!cancelled) setApp(a);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ? String(e.message) : "Failed to load application");
@@ -100,17 +178,35 @@ export default function OrganizerApplicationViewPage() {
   }, [eid, aid]);
 
   const status = normalizeStatus(app?.status);
-  const payment = normalizePayment(app?.payment_status);
+  const payment = normalizePayment((app as any)?.payment_status);
   const checkedCounts = useMemo(() => countChecked(app?.checked), [app?.checked]);
   const docs = useMemo(() => (app ? docsToList(app) : []), [app]);
 
-  const vendorId = String(app?.vendor_id ?? "").trim();
-  const vendorEmail = String(app?.vendor_email ?? "").trim();
+  const vendorId = String((app as any)?.vendor_id ?? "").trim();
+  const vendorEmail = String((app as any)?.vendor_email ?? "").trim();
 
-  const profileHref = vendorId
-    ? `/organizer/vendors/${encodeURIComponent(vendorId)}`
-    : vendorEmail
-      ? `/organizer/vendors/${encodeURIComponent(vendorEmail)}`
+  const boothId = String((app as any)?.booth_id ?? "").trim();
+  const boothReservedUntilRaw = String((app as any)?.booth_reserved_until ?? "").trim();
+  const boothReservedUntil = useMemo(() => parseDateMaybe(boothReservedUntilRaw), [boothReservedUntilRaw]);
+  const holdMins = useMemo(() => minsUntil(boothReservedUntil), [boothReservedUntil]);
+  const holdActive = typeof holdMins === "number" ? holdMins > 0 : false;
+
+  const boothLabel = useMemo(() => {
+    if (!eid || !boothId) return null;
+    return getBoothLabelFromCachedDiagram(eid, boothId);
+  }, [eid, boothId]);
+
+  // Vendor profile route fallback order:
+  // 1) vendor_id
+  // 2) vendor_email
+  // 3) app.id (last-resort legacy fallback)
+  //
+  // Current App.tsx route:
+  // /organizer/events/:eventId/vendor/:vendorId
+  const vendorProfileKey = vendorId || vendorEmail || String((app as any)?.id ?? "").trim();
+  const profileHref =
+    eid && vendorProfileKey
+      ? `/organizer/events/${encodeURIComponent(eid)}/vendor/${encodeURIComponent(vendorProfileKey)}`
       : "";
 
   function statusChip() {
@@ -125,6 +221,19 @@ export default function OrganizerApplicationViewPage() {
     return <span className={chipClass("warn")}>unpaid</span>;
   }
 
+  function boothChip() {
+    if (!boothId) return <span className={chipClass("neutral")}>no booth</span>;
+    if (holdActive) return <span className={chipClass("warn")}>held</span>;
+    return <span className={chipClass("neutral")}>assigned</span>;
+  }
+
+  function gotoAssignBooth(appIdForAssign: string | number) {
+    const qs = new URLSearchParams();
+    qs.set("assignAppId", String(appIdForAssign));
+    qs.set("assignAction", "reserve");
+    nav(`/organizer/events/${encodeURIComponent(eid)}/layout?${qs.toString()}`);
+  }
+
   async function onApprove() {
     if (!app) return;
 
@@ -132,15 +241,16 @@ export default function OrganizerApplicationViewPage() {
       setBusy("approve");
       setErr(null);
 
-      const updated = await ApplicationsAPI.organizerApproveApplication({ appId: app.id });
+      // If already approved, skip API call and go straight to assign
+      if (normalizeStatus((app as any)?.status) === "approved") {
+        gotoAssignBooth((app as any).id);
+        return;
+      }
+
+      const updated = await ApplicationsAPI.organizerApproveApplication({ appId: (app as any).id });
       setApp(updated);
 
-      const vendorCtx = String(updated.vendor_id || updated.vendor_email || "").trim();
-      const qs = new URLSearchParams();
-      qs.set("appId", String(updated.id));
-      if (vendorCtx) qs.set("vendorId", vendorCtx);
-
-      nav(`/organizer/events/${encodeURIComponent(eid)}/layout?${qs.toString()}`);
+      gotoAssignBooth((updated as any).id);
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : "Approve failed");
     } finally {
@@ -155,7 +265,7 @@ export default function OrganizerApplicationViewPage() {
       setBusy("reject");
       setErr(null);
 
-      const updated = await ApplicationsAPI.organizerRejectApplication({ appId: app.id });
+      const updated = await ApplicationsAPI.organizerRejectApplication({ appId: (app as any).id });
       setApp(updated);
 
       nav(`/organizer/events/${encodeURIComponent(eid)}/applications`);
@@ -168,13 +278,7 @@ export default function OrganizerApplicationViewPage() {
 
   function onAssignBooth() {
     if (!app) return;
-
-    const vendorCtx = String(app.vendor_id || app.vendor_email || "").trim();
-    const qs = new URLSearchParams();
-    qs.set("appId", String(app.id));
-    if (vendorCtx) qs.set("vendorId", vendorCtx);
-
-    nav(`/organizer/events/${encodeURIComponent(eid)}/layout?${qs.toString()}`);
+    gotoAssignBooth((app as any).id);
   }
 
   return (
@@ -203,6 +307,7 @@ export default function OrganizerApplicationViewPage() {
             ) : (
               <button
                 disabled
+                title="Vendor profile is unavailable because this application has no vendor id or vendor email yet."
                 className="cursor-not-allowed rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-400"
               >
                 View Vendor Profile
@@ -224,9 +329,10 @@ export default function OrganizerApplicationViewPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   {statusChip()}
                   {paymentChip()}
+                  {boothChip()}
                   <span className="text-xs text-gray-500">
-                    app_id: <span className="font-mono">{app.id}</span> • event_id:{" "}
-                    <span className="font-mono">{app.event_id}</span>
+                    app_id: <span className="font-mono">{(app as any).id}</span> • event_id:{" "}
+                    <span className="font-mono">{(app as any).event_id}</span>
                   </span>
                 </div>
 
@@ -254,11 +360,61 @@ export default function OrganizerApplicationViewPage() {
                   </div>
                 </div>
 
-                {app.notes ? (
+                <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-gray-900">Booth</div>
+                    <div className="text-xs text-gray-600">
+                      {boothLabel ? (
+                        <span className="font-semibold text-gray-900">{boothLabel}</span>
+                      ) : boothId ? (
+                        <span title={boothId} className="font-mono">
+                          {shortenId(boothId)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">Not assigned</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div>
+                      <div className="text-xs font-semibold text-gray-500">Hold Expires</div>
+                      <div className="mt-0.5 text-sm text-gray-900">{formatDateTimeLocal(boothReservedUntil)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-gray-500">Hold Status</div>
+                      <div className="mt-0.5 text-sm text-gray-900">
+                        {!boothId ? (
+                          <span className={chipClass("neutral")}>none</span>
+                        ) : holdActive ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className={chipClass("warn")}>active</span>
+                            <span className="text-xs text-gray-600">
+                              {typeof holdMins === "number" ? `${Math.max(holdMins, 0)} min left` : ""}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className={chipClass("neutral")}>inactive</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {boothLabel && boothId ? (
+                    <div className="mt-2 text-xs text-gray-500">
+                      booth_id:{" "}
+                      <span className="font-mono" title={boothId}>
+                        {shortenId(boothId, 18, 6)}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+
+                {(app as any).notes ? (
                   <div className="mt-4">
                     <div className="text-xs font-semibold text-gray-500">Notes</div>
                     <div className="mt-1 whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-900">
-                      {app.notes}
+                      {(app as any).notes}
                     </div>
                   </div>
                 ) : null}
@@ -296,7 +452,7 @@ export default function OrganizerApplicationViewPage() {
                   disabled={busy !== null || status === "approved"}
                   className="w-full rounded-lg bg-green-600 px-3 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {busy === "approve" ? "Approving…" : status === "approved" ? "Approved" : "Approve"}
+                  {busy === "approve" ? "Approving…" : status === "approved" ? "Approved" : "Approve — Assign Booth"}
                 </button>
 
                 <button
@@ -315,7 +471,7 @@ export default function OrganizerApplicationViewPage() {
                 </button>
 
                 <div className="mt-3 text-xs text-gray-500">
-                  Approve redirects to the booth map editor with app context.
+                  Approve opens the booth picker for this application. Vendor profile opens organizer-safe preview.
                 </div>
               </div>
 
@@ -325,6 +481,11 @@ export default function OrganizerApplicationViewPage() {
                   status: <span className="font-mono">{status}</span>
                   <br />
                   payment_status: <span className="font-mono">{payment}</span>
+                  <br />
+                  booth_id:{" "}
+                  <span className="font-mono" title={boothId || ""}>
+                    {boothId || "—"}
+                  </span>
                 </div>
               </div>
             </div>

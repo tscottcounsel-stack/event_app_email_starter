@@ -170,17 +170,37 @@ export default function OrganizerLayout() {
             )}
           </NavLink>
 
+
+<NavLink
+  to="/organizer/messages"
+  className={({ isActive }) =>
+    [
+      "flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition",
+      isActive
+        ? "bg-blue-50 text-blue-700"
+        : "text-slate-700 hover:bg-slate-50",
+    ].join(" ")
+  }
+>
+  {({ isActive }) => (
+    <>
+      <MessageSquare
+        className={[
+          "h-5 w-5",
+          isActive ? "text-blue-600" : "text-slate-500",
+        ].join(" ")}
+      />
+      <span>Messaging</span>
+    </>
+  )}
+</NavLink>
+
           {/* Optional future routes (disabled so we don't create broken links) */}
           <div className="mt-2">
             <div className="px-4 pb-2 pt-3 text-[11px] font-extrabold uppercase tracking-wide text-slate-400">
               Coming soon
             </div>
-
-            <div className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-400">
-              <MessageSquare className="h-5 w-5 text-slate-300" />
-              Messaging
-            </div>
-            <div className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-400">
+<div className="flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-400">
               <CreditCard className="h-5 w-5 text-slate-300" />
               Billing
             </div>

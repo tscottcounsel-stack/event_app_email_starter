@@ -1,3 +1,4 @@
+// src/App.tsx
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
@@ -11,8 +12,6 @@ import PublicFindVenuesPage from "./pages/PublicFindVenuesPage";
 import PublicForgotPasswordPage from "./pages/PublicForgotPasswordPage";
 import PublicGetStartedPage from "./pages/PublicGetStartedPage";
 import CreateAccountPage from "./pages/CreateAccountPage";
-
-// ✅ NEW public pages (list + detail)
 import PublicEventsListPage from "./pages/PublicEventsListPage";
 import PublicEventDetailPage from "./pages/PublicEventDetailPage";
 
@@ -34,6 +33,8 @@ import OrganizerVendorPreviewPage from "./pages/OrganizerVendorPreviewPage";
 import OrganizerEventDetailsPage from "./pages/OrganizerEventDetailsPage";
 import OrganizerContactsPage from "./pages/OrganizerContactsPage";
 import MapEditorPage from "./pages/MapEditorPage";
+import OrganizerProfilePage from "./pages/OrganizerProfilePage";
+import OrganizerMessagesPage from "./pages/OrganizerMessagesPage";
 
 /* ---------------- VENDOR ---------------- */
 
@@ -57,55 +58,45 @@ export default function App() {
       {/* ---------- PUBLIC ---------- */}
       <Route path="/" element={<PublicHomePage />} />
 
-      {/* ✅ Public marketplace pages */}
       <Route path="/events" element={<PublicEventsListPage />} />
       <Route path="/events/:eventId" element={<PublicEventDetailPage />} />
 
       <Route path="/vendors" element={<PublicVendorsPage />} />
+      <Route path="/vendors/:vendorId" element={<VendorPublicProfilePage />} />
+
       <Route path="/pricing" element={<PublicPricingPage />} />
       <Route path="/login" element={<PublicLoginPage />} />
       <Route path="/forgot-password" element={<PublicForgotPasswordPage />} />
-
-      {/* Figma flow */}
+      <Route path="/forgot" element={<Navigate to="/forgot-password" replace />} />
+      <Route path="/forgotpassword" element={<Navigate to="/forgot-password" replace />} />
+      <Route path="/reset-password" element={<Navigate to="/forgot-password" replace />} />
       <Route path="/get-started" element={<PublicGetStartedPage />} />
       <Route path="/create-account" element={<CreateAccountPage />} />
-
       <Route path="/venues" element={<PublicFindVenuesPage />} />
 
       {/* ---------- ORGANIZER PROTECTED ---------- */}
       <Route element={<RequireAuth allow={["organizer", "admin"]} />}>
         <Route path="/organizer" element={<OrganizerLayout />}>
           <Route index element={<Navigate to="dashboard" replace />} />
-
           <Route path="dashboard" element={<OrganizerDashboard />} />
           <Route path="events" element={<OrganizerEventsPage />} />
           <Route path="events/create" element={<OrganizerCreateEventPage />} />
+          <Route path="profile" element={<OrganizerProfilePage />} />
+          <Route path="messages" element={<OrganizerMessagesPage />} />
 
-          {/* ✅ DETAILS ROUTE */}
           <Route path="events/:eventId/details" element={<OrganizerEventDetailsPage />} />
-
-          {/* ✅ Keep requirements editor available */}
-          <Route
-            path="events/:eventId/requirements"
-            element={<OrganizerEventRequirementsPage />}
-          />
+          <Route path="events/:eventId/requirements" element={<OrganizerEventRequirementsPage />} />
           <Route path="events/:eventId/review" element={<OrganizerEventReviewPage />} />
           <Route path="events/:eventId/layout" element={<MapEditorPage />} />
-
-          {/* ✅ Applications list */}
           <Route path="events/:eventId/applications" element={<OrganizerApplicationsPage />} />
 
-          {/* ✅ Application details */}
-          <Route
-            path="events/:eventId/applications/:appId"
-            element={<OrganizerApplicationViewPage />}
-          />
+          <Route path="events/:eventId/application/:applicationId" element={<OrganizerApplicationViewPage />} />
+          <Route path="events/:eventId/applications/:appId" element={<OrganizerApplicationViewPage />} />
+
+          <Route path="events/:eventId/vendor/:vendorId" element={<VendorPublicProfilePage />} />
 
           <Route path="vendor-preview/:applicationId" element={<OrganizerVendorPreviewPage />} />
           <Route path="contacts" element={<OrganizerContactsPage />} />
-
-          {/* ✅ Organizer read-only vendor profile */}
-          <Route path="vendors/:vendorId" element={<VendorPublicProfilePage />} />
         </Route>
       </Route>
 
@@ -113,18 +104,16 @@ export default function App() {
       <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
         <Route path="/vendor" element={<VendorLayout />}>
           <Route index element={<Navigate to="dashboard" replace />} />
-
           <Route path="dashboard" element={<VendorDashboard />} />
           <Route path="events" element={<VendorAvailableEventsPage />} />
           <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
-
           <Route path="events/:eventId/requirements" element={<VendorEventRequirementsPage />} />
           <Route path="events/:eventId/map" element={<VendorEventMapLayoutPage />} />
           <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
-
           <Route path="applications" element={<VendorApplicationsPage />} />
           <Route path="verify" element={<VendorGetVerifiedPage />} />
           <Route path="profile/setup" element={<VendorBusinessProfileSetupPage />} />
+          <Route path="profile" element={<VendorPublicProfilePage />} />
           <Route path="profile/public" element={<VendorPublicProfilePage />} />
           <Route path="messages" element={<VendorMessagesPage />} />
           <Route path="settings" element={<VendorSettingsPage />} />

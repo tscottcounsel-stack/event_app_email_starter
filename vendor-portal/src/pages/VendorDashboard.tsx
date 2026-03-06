@@ -1,21 +1,42 @@
-// src/pages/VendorDashboardPage.tsx
+// src/pages/VendorDashboard.tsx
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
 
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
+/* ---------------- Types ---------------- */
+
 type VendorApplication = {
   id?: number;
   event_id?: number;
+
   booth_id?: string | null;
+
   app_ref?: string | null;
   notes?: string;
+
   checked?: Record<string, boolean>;
   status?: string; // submitted | approved | rejected | draft | etc
+
+  payment_status?: string; // unpaid | pending | paid | expired
+  payment_enabled?: boolean;
+  payment_link?: string | null;
+
+  notifications?: Array<{
+    id?: string;
+    type?: string;
+    message?: string;
+    created_at?: string;
+    read?: boolean;
+  }>;
+
   submitted_at?: string;
   updated_at?: string;
+
+  // If your backend ever adds this, we will use it safely.
+  booth_reserved_until?: string | null;
 };
 
 type DiagramDoc = {
@@ -27,12 +48,84 @@ type DiagramDoc = {
   }>;
 };
 
+type EventGroup = {
+  eventId: string;
+  apps: VendorApplication[];
+  activeApp: VendorApplication;
+};
+
+type EventSummary = {
+  id?: number | string;
+  title?: string;
+  start_date?: string;
+  end_date?: string;
+  venue_name?: string;
+  city?: string;
+  state?: string;
+  heroImageUrl?: string;
+};
+
+function cx(...classes: Array<string | false | undefined | null>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+/* ---------------- Dates ---------------- */
+
 function formatDate(iso?: string) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString();
 }
+
+function formatShortDate(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatDateRange(start?: string, end?: string) {
+  const s = start ? new Date(start) : null;
+  const e = end ? new Date(end) : null;
+
+  if (s && !Number.isNaN(s.getTime()) && e && !Number.isNaN(e.getTime())) {
+    const sameYear = s.getFullYear() === e.getFullYear();
+    const sameMonth = s.getMonth() === e.getMonth();
+
+    const sFmt = s.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(sameYear ? {} : { year: "numeric" }),
+    });
+
+    const eFmt = e.toLocaleDateString(undefined, {
+      month: sameMonth ? undefined : "short",
+      day: "numeric",
+      year: "numeric",
+    });
+
+    return `${sFmt} – ${eFmt}`;
+  }
+
+  if (s && !Number.isNaN(s.getTime())) return formatShortDate(start);
+  return "";
+}
+
+function formatDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h <= 0) return `${m}m`;
+  return `${h}h ${m}m`;
+}
+
+/* ---------------- Status normalization ---------------- */
 
 function normalizeStatus(s?: string) {
   const v = String(s || "").toLowerCase();
@@ -42,6 +135,8 @@ function normalizeStatus(s?: string) {
   if (v === "draft") return "draft";
   return v || "submitted";
 }
+
+/* ---------------- Requirements completion ---------------- */
 
 function calcCompletion(app: VendorApplication) {
   const checked = app.checked || {};
@@ -53,50 +148,262 @@ function calcCompletion(app: VendorApplication) {
   return { done, total, pct };
 }
 
+function requirementsComplete(app: VendorApplication) {
+  const c = calcCompletion(app);
+  // If there are no keys we treat as complete (matches previous behavior).
+  if (c.total === 0) return true;
+  return c.done >= c.total;
+}
+
+/* ---------------- Booth display helpers ---------------- */
+
 function shortBoothId(id?: string | null) {
   const s = String(id || "").trim();
   if (!s) return "";
-  // if you prefix ids like "booth-xxxx", keep last chunk
-  const tail = s.split("-").slice(-2).join("-"); // last two chunks reads nicer
-  return tail.length > 14 ? tail.slice(-14) : tail;
+  const tail = s.split("-").slice(-2).join("-");
+  return tail.length > 18 ? tail.slice(-18) : tail;
 }
 
-function extractBoothLabelIndex(doc: DiagramDoc | any): Record<string, string> {
-  const out: Record<string, string> = {};
-  const d: DiagramDoc =
-    doc?.diagram && typeof doc.diagram === "object" ? doc.diagram : doc;
+/* ------------------------ Notification read storage ------------------------ */
 
-  const add = (booths: Array<{ id: string; label?: string }> | undefined) => {
-    if (!Array.isArray(booths)) return;
-    for (const b of booths) {
-      const id = String(b?.id || "").trim();
-      if (!id) continue;
-      const label = String(b?.label || "").trim();
-      if (label) out[id] = label;
-    }
-  };
+const LS_VENDOR_NOTIF_READ_KEY = "vendor_notif_read_v1";
 
-  if (Array.isArray(d?.levels)) {
-    for (const lvl of d.levels) add(lvl?.booths);
-  } else {
-    add(d?.booths);
+function safeJsonParse<T = any>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
   }
-
-  return out;
 }
 
-export default function VendorDashboardPage() {
+function loadNotifReadMap(): Record<string, boolean> {
+  return (
+    safeJsonParse<Record<string, boolean>>(
+      localStorage.getItem(LS_VENDOR_NOTIF_READ_KEY)
+    ) || {}
+  );
+}
+
+function saveNotifReadMap(map: Record<string, boolean>) {
+  localStorage.setItem(LS_VENDOR_NOTIF_READ_KEY, JSON.stringify(map || {}));
+}
+
+function notifIdFor(appId?: number, n?: any) {
+  const raw = String(n?.id || "").trim();
+  if (raw) return raw;
+  const t = String(n?.type || "").trim() || "note";
+  return `${t}:${String(appId ?? "")}`;
+}
+
+/* ----------------------------- Diagram helpers ---------------------------- */
+
+function extractBoothLabelIndex(payload: any): Record<string, string> {
+  const j = payload?.diagram ?? payload ?? {};
+  const doc = j as DiagramDoc;
+  const idx: Record<string, string> = {};
+
+  if (Array.isArray(doc.levels) && doc.levels.length > 0) {
+    for (const lvl of doc.levels) {
+      for (const b of lvl.booths || []) {
+        if (b?.id) idx[String(b.id)] = String(b.label || b.id);
+      }
+    }
+  } else if (Array.isArray(doc.booths)) {
+    for (const b of doc.booths) {
+      if (b?.id) idx[String(b.id)] = String(b.label || b.id);
+    }
+  }
+  return idx;
+}
+
+/* ----------------------------- Control center ----------------------------- */
+
+function appSortKey(a: VendorApplication) {
+  const t =
+    new Date(a.updated_at || a.submitted_at || "").getTime() ||
+    (a.id ? Number(a.id) : 0);
+  return t || 0;
+}
+
+function pickActiveApp(apps: VendorApplication[]) {
+  const sorted = apps
+    .slice()
+    .sort((x, y) => {
+      const tx = appSortKey(x);
+      const ty = appSortKey(y);
+      if (ty !== tx) return ty - tx;
+      return (Number(y.id || 0) || 0) - (Number(x.id || 0) || 0);
+    });
+
+  // Prefer non-rejected if there are multiple (keeps dashboard usable)
+  const nonRejected = sorted.find((a) => normalizeStatus(a.status) !== "rejected");
+  return nonRejected || sorted[0];
+}
+
+function isPaymentAvailable(app: VendorApplication) {
+  if (typeof app.payment_enabled === "boolean") return app.payment_enabled;
+  if (typeof app.payment_link === "string" && app.payment_link.trim()) return true;
+  // fallback: assume available if approved (MVP)
+  return true;
+}
+
+function isPaid(app: VendorApplication) {
+  const ps = String(app.payment_status || "").toLowerCase();
+  return ps === "paid";
+}
+
+function hasBoothSelected(app: VendorApplication) {
+  const boothId = String(app.booth_id || "").trim();
+  return !!boothId;
+}
+
+function msUntilHoldExpires(app: VendorApplication, nowMs: number) {
+  const raw = String((app as any).booth_reserved_until || "").trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  const t = d.getTime();
+  if (Number.isNaN(t)) return null;
+  return t - nowMs;
+}
+
+/* ------------------------------ UI helpers ------------------------------ */
+
+function Badge(props: {
+  tone: "emerald" | "rose" | "slate" | "amber" | "violet";
+  children: any;
+}) {
+  const cls =
+    props.tone === "emerald"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : props.tone === "rose"
+      ? "border-rose-200 bg-rose-50 text-rose-700"
+      : props.tone === "amber"
+      ? "border-amber-200 bg-amber-50 text-amber-900"
+      : props.tone === "violet"
+      ? "border-violet-200 bg-violet-50 text-violet-900"
+      : "border-slate-200 bg-slate-50 text-slate-700";
+
+  return (
+    <span className={cx("rounded-full border px-3 py-1 text-xs font-extrabold", cls)}>
+      {props.children}
+    </span>
+  );
+}
+
+function BtnClass(variant: "primary" | "secondary" | "outline" | "success") {
+  const base =
+    "rounded-full px-4 py-2 text-sm font-extrabold transition inline-flex items-center justify-center";
+  if (variant === "primary") return cx(base, "bg-violet-600 text-white hover:bg-violet-700");
+  if (variant === "secondary") return cx(base, "bg-slate-900 text-white hover:bg-slate-800");
+  if (variant === "success") return cx(base, "bg-emerald-700 text-white hover:bg-emerald-800");
+  return cx(base, "border border-slate-200 bg-white text-slate-900 hover:bg-slate-50");
+}
+
+function HeroStat(props: { label: string; value: number }) {
+  return (
+    <div className="rounded-2xl border border-white/20 bg-white/15 p-4 backdrop-blur-md">
+      <div className="text-xs font-extrabold text-purple-100">{props.label}</div>
+      <div className="mt-1 text-3xl font-black text-white">{props.value}</div>
+    </div>
+  );
+}
+
+/* ------------------------------ Sections ------------------------------ */
+
+type ActionKind =
+  | "continue_application"
+  | "complete_requirements"
+  | "select_booth"
+  | "pay_now";
+
+type ActionItem = {
+  kind: ActionKind;
+  group: EventGroup;
+  app: VendorApplication;
+  event: EventSummary | undefined;
+  boothLabel: string;
+  holdMs: number | null;
+};
+
+function sectionTitle(kind: ActionKind) {
+  switch (kind) {
+    case "continue_application":
+      return "Continue Application";
+    case "complete_requirements":
+      return "Complete Requirements";
+    case "select_booth":
+      return "Select Booth";
+    case "pay_now":
+      return "Pay Now";
+    default:
+      return "Action Needed";
+  }
+}
+
+function sectionHint(kind: ActionKind) {
+  switch (kind) {
+    case "continue_application":
+      return "Finish and submit your application.";
+    case "complete_requirements":
+      return "Upload any missing requirement documents.";
+    case "select_booth":
+      return "Choose a booth to reserve your spot.";
+    case "pay_now":
+      return "Complete payment to confirm your reservation.";
+    default:
+      return "";
+  }
+}
+
+function actionCtaLabel(kind: ActionKind) {
+  switch (kind) {
+    case "continue_application":
+      return "Continue Application";
+    case "complete_requirements":
+      return "Complete Requirements";
+    case "select_booth":
+      return "Select Booth";
+    case "pay_now":
+      return "Pay Now";
+    default:
+      return "Continue";
+  }
+}
+
+export default function VendorDashboard() {
   const nav = useNavigate();
-  const location = useLocation();
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [apps, setApps] = useState<VendorApplication[]>([]);
 
+  const [notifRead, setNotifRead] = useState<Record<string, boolean>>(() =>
+    loadNotifReadMap()
+  );
+
+  // Live refresh for hold timers / payment windows
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+
   // eventId -> (boothId -> label)
   const [boothLabelsByEvent, setBoothLabelsByEvent] = useState<
     Record<string, Record<string, string>>
   >({});
+
+  // eventId -> event summary
+  const [eventsById, setEventsById] = useState<Record<string, EventSummary>>({});
+
+  function markNotificationRead(nid: string) {
+    setNotifRead((prev) => {
+      const next = { ...(prev || {}), [nid]: true };
+      saveNotifReadMap(next);
+      return next;
+    });
+  }
 
   async function loadApps() {
     setLoading(true);
@@ -147,11 +454,11 @@ export default function VendorDashboardPage() {
     const unique = Array.from(new Set(eventIds.filter(Boolean)));
     if (unique.length === 0) return;
 
-    // only fetch ones we don't already have
     const missing = unique.filter((eid) => !boothLabelsByEvent[String(eid)]);
     if (missing.length === 0) return;
 
     const updates: Record<string, Record<string, string>> = {};
+
     await Promise.all(
       missing.map(async (eid) => {
         try {
@@ -175,281 +482,796 @@ export default function VendorDashboardPage() {
     setBoothLabelsByEvent((prev) => ({ ...prev, ...updates }));
   }
 
-  // Load on mount + when returning to this route
+  async function loadEventInfo(eventIds: string[]) {
+    const unique = Array.from(new Set(eventIds.filter(Boolean)));
+    if (unique.length === 0) return;
+
+    const missing = unique.filter((eid) => !eventsById[String(eid)]);
+    if (missing.length === 0) return;
+
+    const updates: Record<string, EventSummary> = {};
+
+    await Promise.all(
+      missing.map(async (eid) => {
+        try {
+          // Best-guess endpoint: /events/:id (public). If your API differs, this still fails safely.
+          const url = `${API_BASE}/events/${encodeURIComponent(eid)}`;
+          const res = await fetch(url, { headers: { Accept: "application/json" } });
+          if (!res.ok) return;
+
+          const data = await res.json().catch(() => null);
+          if (!data) return;
+
+          const ev = (data as any)?.event ?? data;
+
+          updates[eid] = {
+            id: ev?.id ?? eid,
+            title: ev?.title,
+            start_date: ev?.start_date,
+            end_date: ev?.end_date,
+            venue_name: ev?.venue_name,
+            city: ev?.city,
+            state: ev?.state,
+            heroImageUrl: ev?.heroImageUrl,
+          };
+        } catch {
+          // ignore
+        }
+      })
+    );
+
+    if (Object.keys(updates).length > 0) {
+      setEventsById((prev) => ({ ...prev, ...updates }));
+    }
+  }
+
   useEffect(() => {
     loadApps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname]);
-
-  // Refresh on tab focus/visibility
-  useEffect(() => {
-    function onFocus() {
-      loadApps();
-    }
-    function onVis() {
-      if (document.visibilityState === "visible") loadApps();
-    }
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Whenever apps change, fetch diagram labels for those events (so booth display is human-friendly)
   useEffect(() => {
-    const eids = apps
-      .map((a) => String(a.event_id ?? "").trim())
-      .filter(Boolean);
-    loadBoothLabelsForEvents(eids);
+    const ids = apps.map((a) => String(a.event_id || "")).filter(Boolean);
+    loadBoothLabelsForEvents(ids);
+    loadEventInfo(ids);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apps]);
+  }, [apps.length]);
 
-  const stats = useMemo(() => {
-    const total = apps.length;
-    let submitted = 0;
-    let drafts = 0;
-
-    for (const a of apps) {
-      const st = normalizeStatus(a.status);
-      if (st === "draft") drafts += 1;
-      else submitted += 1;
+  // Group apps by event and pick active one per event
+  const groups: EventGroup[] = useMemo(() => {
+    const byEvent: Record<string, VendorApplication[]> = {};
+    for (const a of apps || []) {
+      const eid = String(a.event_id || "");
+      if (!eid) continue;
+      if (!byEvent[eid]) byEvent[eid] = [];
+      byEvent[eid].push(a);
     }
 
-    return { total, submitted, drafts };
-  }, [apps]);
-
-  const topApps = useMemo(() => {
-    const list = apps.slice();
-    list.sort((a, b) => {
-      const ta = new Date(a.submitted_at || a.updated_at || 0).getTime();
-      const tb = new Date(b.submitted_at || b.updated_at || 0).getTime();
-      return tb - ta;
+    const out: EventGroup[] = Object.keys(byEvent).map((eventId) => {
+      const arr = byEvent[eventId];
+      const active = pickActiveApp(arr);
+      return { eventId, apps: arr, activeApp: active };
     });
-    return list.slice(0, 3);
+
+    out.sort((g1, g2) => appSortKey(g2.activeApp) - appSortKey(g1.activeApp));
+    return out;
   }, [apps]);
 
-  function boothDisplay(eventId?: string, boothId?: string | null) {
-    const eid = String(eventId || "").trim();
-    const bid = String(boothId || "").trim();
-    const label = eid && bid ? boothLabelsByEvent[eid]?.[bid] : "";
-    if (label) return label;
-    if (!bid) return "";
-    return `Booth ${shortBoothId(bid)}`;
+  // Approval notifications: use notifications from ACTIVE app per event (avoids duplicates)
+  const unreadApproved = useMemo(() => {
+    const out: Array<{ group: EventGroup; notif: any; nid: string }> = [];
+    for (const g of groups) {
+      const a = g.activeApp;
+      const ns = Array.isArray((a as any)?.notifications) ? (a as any).notifications : [];
+      for (const n of ns) {
+        const type = String(n?.type || "").toLowerCase();
+        if (type !== "approved") continue;
+        const nid = notifIdFor(a.id, n);
+        const alreadyRead = !!notifRead[nid] || !!n?.read;
+        if (!alreadyRead) out.push({ group: g, notif: n, nid });
+      }
+    }
+
+    out.sort((x, y) => {
+      const ax = new Date(String(x.notif?.created_at || "")).getTime() || 0;
+      const ay = new Date(String(y.notif?.created_at || "")).getTime() || 0;
+      return ay - ax;
+    });
+
+    return out;
+  }, [groups, notifRead]);
+
+  const stats = useMemo(() => {
+    const active = groups.length;
+    const approved = groups.filter((g) => normalizeStatus(g.activeApp.status) === "approved").length;
+    const pendingPay = groups.filter((g) => {
+      const a = g.activeApp;
+      return (
+        normalizeStatus(a.status) === "approved" &&
+        hasBoothSelected(a) &&
+        isPaymentAvailable(a) &&
+        !isPaid(a)
+      );
+    }).length;
+    const drafts = groups.filter((g) => normalizeStatus(g.activeApp.status) === "draft").length;
+    return { active, approved, pendingPay, drafts };
+  }, [groups]);
+
+  // Build control-center sections (Action Needed, Reserved, Paid)
+  const controlCenter = useMemo(() => {
+    const actionNeeded: ActionItem[] = [];
+    const reserved: ActionItem[] = [];
+    const paid: ActionItem[] = [];
+
+    for (const g of groups) {
+      const a = g.activeApp;
+      const status = normalizeStatus(a.status);
+
+      const eid = String(g.eventId || "");
+      const ev = eventsById[eid];
+
+      const boothId = String(a.booth_id || "").trim();
+      const boothLabel =
+        eid && boothId ? boothLabelsByEvent[eid]?.[boothId] || boothId : "";
+
+      const holdMs = msUntilHoldExpires(a, nowMs);
+
+      const reqComplete = requirementsComplete(a);
+      const boothSelected = hasBoothSelected(a);
+      const paymentAvail = isPaymentAvailable(a);
+      const paidFlag = isPaid(a);
+
+      // Paid / Confirmed
+      if (status === "approved" && paidFlag) {
+        paid.push({
+          kind: "pay_now",
+          group: g,
+          app: a,
+          event: ev,
+          boothLabel,
+          holdMs,
+        });
+        continue;
+      }
+
+      // Approved + booth selected + not paid -> Reserved / Awaiting payment
+      if (status === "approved" && boothSelected && paymentAvail && !paidFlag) {
+        reserved.push({
+          kind: "pay_now",
+          group: g,
+          app: a,
+          event: ev,
+          boothLabel,
+          holdMs,
+        });
+        continue;
+      }
+
+      // Action Needed
+      if (status === "draft") {
+        actionNeeded.push({
+          kind: "continue_application",
+          group: g,
+          app: a,
+          event: ev,
+          boothLabel,
+          holdMs,
+        });
+        continue;
+      }
+
+      if (status !== "approved" && status !== "rejected" && !reqComplete) {
+        actionNeeded.push({
+          kind: "complete_requirements",
+          group: g,
+          app: a,
+          event: ev,
+          boothLabel,
+          holdMs,
+        });
+        continue;
+      }
+
+      if (status === "approved" && !boothSelected) {
+        actionNeeded.push({
+          kind: "select_booth",
+          group: g,
+          app: a,
+          event: ev,
+          boothLabel,
+          holdMs,
+        });
+        continue;
+      }
+
+      actionNeeded.push({
+        kind:
+          status === "approved"
+            ? "select_booth"
+            : status === "rejected"
+            ? "continue_application"
+            : "complete_requirements",
+        group: g,
+        app: a,
+        event: ev,
+        boothLabel,
+        holdMs,
+      });
+    }
+
+    actionNeeded.sort((x, y) => appSortKey(y.app) - appSortKey(x.app));
+    reserved.sort((x, y) => appSortKey(y.app) - appSortKey(x.app));
+    paid.sort((x, y) => appSortKey(y.app) - appSortKey(x.app));
+
+    return { actionNeeded, reserved, paid };
+  }, [groups, eventsById, boothLabelsByEvent, nowMs]);
+
+  function goToAction(kind: ActionKind, eid: string, appId?: number) {
+    const appIdParam = encodeURIComponent(String(appId || ""));
+    const safeEid = encodeURIComponent(String(eid || ""));
+
+    if (kind === "continue_application") {
+      nav(`/vendor/events/${safeEid}?appId=${appIdParam}`);
+      return;
+    }
+
+    if (kind === "complete_requirements") {
+      nav(`/vendor/events/${safeEid}/requirements?appId=${appIdParam}`);
+      return;
+    }
+
+    if (kind === "select_booth") {
+      nav(`/vendor/events/${safeEid}/map?appId=${appIdParam}`);
+      return;
+    }
+
+    const g = groups.find((gg) => String(gg.eventId) === String(eid));
+    const a = g?.activeApp;
+    const link = String((a as any)?.payment_link || "").trim();
+    if (link) {
+      window.open(link, "_blank");
+      return;
+    }
+    nav(`/vendor/events/${safeEid}/map?appId=${appIdParam}`);
+  }
+
+  function EventMiniCard(props: {
+    item: ActionItem;
+    showHold?: boolean;
+    showStatusLine?: boolean;
+    ctaKind: ActionKind;
+    ctaVariant?: "primary" | "secondary" | "outline" | "success";
+    footerSlot?: React.ReactNode;
+  }) {
+    const { item } = props;
+    const eid = String(item.group.eventId || "");
+    const a = item.app;
+    const ev = item.event;
+
+    const title = ev?.title || `Event #${eid}`;
+    const range = formatDateRange(ev?.start_date, ev?.end_date);
+
+    const locationLine =
+      ev?.venue_name || ev?.city || ev?.state
+        ? [ev?.venue_name, [ev?.city, ev?.state].filter(Boolean).join(", ")]
+            .filter(Boolean)
+            .join(" • ")
+        : "";
+
+    const status = normalizeStatus(a.status);
+    const completion = calcCompletion(a);
+
+    const boothSelected = hasBoothSelected(a);
+    const paymentAvail = isPaymentAvailable(a);
+    const paidFlag = isPaid(a);
+    const awaitingPayment = status === "approved" && boothSelected && paymentAvail && !paidFlag;
+
+    const holdMs = item.holdMs;
+    const holdLine =
+      props.showHold && holdMs !== null
+        ? holdMs > 0
+          ? `Hold expires in: ${formatDuration(holdMs)}`
+          : "Hold expired"
+        : null;
+
+    return (
+      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <div className="text-base font-black text-slate-900">{title}</div>
+
+            {(range || locationLine) ? (
+              <div className="mt-1 text-sm font-semibold text-slate-600">
+                {range ? range : ""}
+                {range && locationLine ? " • " : ""}
+                {locationLine ? locationLine : ""}
+              </div>
+            ) : null}
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Badge tone="slate">
+                Booth: {item.boothLabel ? shortBoothId(item.boothLabel) : "—"}
+              </Badge>
+
+              {props.showStatusLine ? (
+                <>
+                  <Badge
+                    tone={
+                      status === "approved"
+                        ? "emerald"
+                        : status === "rejected"
+                        ? "rose"
+                        : status === "draft"
+                        ? "slate"
+                        : "amber"
+                    }
+                  >
+                    {status.toUpperCase()}
+                  </Badge>
+
+                  {awaitingPayment ? <Badge tone="rose">AWAITING PAYMENT</Badge> : null}
+
+                  <Badge tone="slate">Progress: {completion.pct}%</Badge>
+                </>
+              ) : null}
+
+              {holdLine ? <Badge tone="amber">{holdLine}</Badge> : null}
+            </div>
+
+            <div className="mt-2 text-xs font-semibold text-slate-600">
+              Updated: {formatDate(a.updated_at || a.submitted_at)}
+            </div>
+
+            {props.footerSlot ? <div className="mt-3">{props.footerSlot}</div> : null}
+          </div>
+
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => goToAction(props.ctaKind, eid, a.id)}
+              className={BtnClass(props.ctaVariant || "primary")}
+            >
+              {actionCtaLabel(props.ctaKind)}
+            </button>
+
+            <Link
+              to={`/vendor/events/${encodeURIComponent(eid)}?appId=${encodeURIComponent(
+                String(a.id || "")
+              )}`}
+              className={BtnClass("outline")}
+            >
+              View event
+            </Link>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          {a.notes ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+              {a.notes}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-4xl font-black tracking-tight text-slate-900">
-              Vendor Dashboard
-            </h1>
-            <p className="mt-2 text-sm font-semibold text-slate-600">
-              Server-synced overview of your applications.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => nav("/vendor/events")}
-              className="rounded-full bg-violet-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-violet-700"
-              type="button"
-            >
-              Browse Events
-            </button>
-          </div>
-        </div>
-
-        {/* Status banner */}
-        <div className="mt-6">
-          {loading ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-700 shadow-sm">
-              Loading dashboard…
-            </div>
-          ) : err ? (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-800">
-              {err}
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
-              Loaded server applications:{" "}
-              <span className="font-black">{apps.length}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Stat cards */}
-        <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="text-sm font-bold text-slate-600">
-              Total Applications
-            </div>
-            <div className="mt-2 text-3xl font-black text-slate-900">
-              {stats.total}
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="text-sm font-bold text-slate-600">Submitted</div>
-            <div className="mt-2 text-3xl font-black text-slate-900">
-              {stats.submitted}
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="text-sm font-bold text-slate-600">Drafts</div>
-            <div className="mt-2 text-3xl font-black text-slate-900">
-              {stats.drafts}
-            </div>
-          </div>
-        </div>
-
-        {/* My Applications */}
-        <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <div className="text-xl font-black text-slate-900">
-                My Applications
+      <section className="w-full bg-gradient-to-r from-purple-900 via-purple-800 to-indigo-900">
+        <div className="mx-auto max-w-6xl px-6 py-10">
+          <div className="text-white">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-extrabold text-white">
+                  VendorConnect • Vendor Portal
+                </div>
+                <h1 className="mt-3 text-4xl font-black tracking-tight text-white">
+                  Vendor Dashboard
+                </h1>
+                <p className="mt-2 text-sm font-semibold text-purple-100">
+                  Your control center — what to do next, per event.
+                </p>
               </div>
-              <div className="mt-1 text-sm font-semibold text-slate-600">
-                Drafts and submissions
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => nav("/vendor/events")}
+                  className={cx(
+                    BtnClass("outline"),
+                    "border-white/30 bg-white/10 text-white hover:bg-white/15"
+                  )}
+                >
+                  Browse Events
+                </button>
+                <button
+                  type="button"
+                  onClick={() => loadApps()}
+                  className={cx(
+                    BtnClass("outline"),
+                    "border-white/30 bg-white/10 text-white hover:bg-white/15"
+                  )}
+                >
+                  Refresh
+                </button>
               </div>
             </div>
 
-            <Link
-              to="/vendor/applications"
-              className="rounded-xl border border-violet-200 bg-white px-4 py-2 text-sm font-extrabold text-violet-700 hover:bg-violet-50"
-            >
-              View All →
-            </Link>
+            <div className="mt-6 h-px w-full bg-white/20" />
+
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <HeroStat label="Active Events" value={stats.active} />
+              <HeroStat label="Approved" value={stats.approved} />
+              <HeroStat label="Awaiting Payment" value={stats.pendingPay} />
+              <HeroStat label="Drafts" value={stats.drafts} />
+            </div>
           </div>
+        </div>
+      </section>
 
-          {loading ? (
-            <div className="mt-6 text-sm font-semibold text-slate-700">
-              Loading…
-            </div>
-          ) : apps.length === 0 ? (
-            <div className="mt-8 text-center">
-              <div className="text-sm font-semibold text-slate-600">
-                No applications yet
+      <div className="mx-auto max-w-6xl px-6 pb-10">
+        {/* Notifications (Approval) */}
+        {unreadApproved.length > 0 ? (
+          <div className="mt-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="text-sm font-extrabold text-emerald-900">
+                  You&apos;re approved 🎉
+                </div>
+                <div className="mt-1 text-sm font-semibold text-emerald-800">
+                  {unreadApproved.length === 1
+                    ? "One event was approved. Choose a booth and complete payment."
+                    : `${unreadApproved.length} events were approved. Choose booths and complete payment.`}
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => nav("/vendor/events")}
-                className="mt-4 rounded-full bg-violet-600 px-5 py-2 text-sm font-extrabold text-white hover:bg-violet-700"
-              >
-                Browse Events
-              </button>
-            </div>
-          ) : (
-            <div className="mt-6 grid gap-4">
-              {topApps.map((a, idx) => {
-                const eventId = String(a.event_id ?? "");
-                const boothId = a.booth_id ? String(a.booth_id) : "";
-                const st = normalizeStatus(a.status);
-                const { done, total, pct } = calcCompletion(a);
 
-                const viewUrl = eventId
-                  ? `/vendor/events/${eventId}/apply?` +
-                    new URLSearchParams({
-                      ...(a.app_ref ? { appId: String(a.app_ref) } : {}),
-                      ...(boothId ? { boothId } : {}),
-                    }).toString()
-                  : "/vendor/applications";
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const top = unreadApproved[0];
+                    const a = top?.group?.activeApp;
+                    const eid = top?.group?.eventId;
+                    if (!eid || !a?.id) return;
+
+                    markNotificationRead(top.nid);
+
+                    nav(
+                      `/vendor/events/${encodeURIComponent(eid)}/map?appId=${encodeURIComponent(
+                        String(a.id)
+                      )}`
+                    );
+                  }}
+                  className={BtnClass("success")}
+                >
+                  Continue
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    for (const row of unreadApproved) markNotificationRead(row.nid);
+                  }}
+                  className={BtnClass("outline")}
+                >
+                  Mark all read
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {unreadApproved.slice(0, 3).map((row) => {
+                const a = row.group.activeApp;
+                const eid = String(row.group.eventId || "");
+                const ev = eventsById[eid];
+                const title = ev?.title || `Event #${eid}`;
+                const range = formatDateRange(ev?.start_date, ev?.end_date);
 
                 return (
                   <div
-                    key={`${a.id ?? idx}`}
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-6"
+                    key={row.nid}
+                    className="flex flex-col gap-2 rounded-2xl border border-emerald-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between"
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="text-lg font-black text-slate-900">
-                          Event #{eventId || "—"}
-                          {boothId ? (
-                            <span className="ml-2 text-sm font-extrabold text-slate-500">
-                              • {boothDisplay(eventId, boothId)}
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="mt-1 text-xs font-semibold text-slate-500">
-                          Last updated: {formatDate(a.updated_at)}
-                          {a.submitted_at ? (
-                            <span className="ml-2">
-                              • Submitted: {formatDate(a.submitted_at)}
-                            </span>
-                          ) : null}
-                        </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-extrabold text-slate-900">
+                        {title} • Application #{a.id}
                       </div>
-
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={
-                            "rounded-full px-3 py-1 text-xs font-extrabold " +
-                            (st === "approved"
-                              ? "bg-emerald-50 text-emerald-700"
-                              : st === "rejected"
-                              ? "bg-rose-50 text-rose-700"
-                              : st === "draft"
-                              ? "bg-slate-100 text-slate-700"
-                              : "bg-violet-50 text-violet-700")
-                          }
-                        >
-                          {st === "approved"
-                            ? "Approved"
-                            : st === "rejected"
-                            ? "Rejected"
-                            : st === "draft"
-                            ? "Draft"
-                            : "Submitted"}
-                        </span>
-
-                        <div className="text-sm font-extrabold text-slate-700">
-                          {pct}%{" "}
-                          <span className="font-semibold text-slate-500">
-                            ({done}/{total})
-                          </span>
-                        </div>
+                      <div className="mt-1 text-xs font-semibold text-slate-600">
+                        {range ? `${range} • ` : ""}
+                        {row.notif?.message ||
+                          "Approved. Choose a booth and complete payment to lock in your spot."}
+                        {row.notif?.created_at ? ` • ${formatDate(row.notif.created_at)}` : ""}
                       </div>
                     </div>
 
-                    <div className="mt-4">
-                      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                        <div
-                          className="h-2 rounded-full bg-violet-500"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      <Link
-                        to={viewUrl}
-                        className="rounded-full bg-violet-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-violet-700"
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          markNotificationRead(row.nid);
+                          nav(
+                            `/vendor/events/${encodeURIComponent(
+                              String(row.group.eventId)
+                            )}/map?appId=${encodeURIComponent(String(a.id || ""))}`
+                          );
+                        }}
+                        className={BtnClass("success")}
                       >
-                        View
-                      </Link>
-
-                      {eventId ? (
-                        <Link
-                          to={`/vendor/events/${eventId}`}
-                          className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
-                        >
-                          View Event
-                        </Link>
-                      ) : null}
+                        Booth Map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => markNotificationRead(row.nid)}
+                        className={BtnClass("outline")}
+                      >
+                        Dismiss
+                      </button>
                     </div>
                   </div>
                 );
               })}
+
+              {unreadApproved.length > 3 ? (
+                <div className="text-xs font-semibold text-emerald-900">
+                  + {unreadApproved.length - 3} more…
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {/* Status banner */}
+        <div className="mt-6">
+          {loading ? (
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 text-sm font-semibold text-slate-700 shadow-sm">
+              Loading applications…
+            </div>
+          ) : err ? (
+            <div className="rounded-3xl border border-rose-200 bg-rose-50 p-5 text-sm font-semibold text-rose-700 shadow-sm">
+              {err}
+            </div>
+          ) : (
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 text-sm font-semibold text-slate-700 shadow-sm">
+              {groups.length === 1 ? "1 event found." : `${groups.length} events found.`}
+              <span className="ml-2 text-xs font-bold text-slate-500">
+                (Grouped by event — duplicates hidden)
+              </span>
             </div>
           )}
         </div>
+
+        {/* =========================
+            CONTROL CENTER SECTIONS
+           ========================= */}
+
+        {/* Section 1: Action Needed */}
+        <div className="mt-6">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-xl font-black text-slate-900">⚠️ Action Needed</div>
+              <div className="mt-1 text-sm font-semibold text-slate-600">
+                Events where you have a next step to keep things moving.
+              </div>
+            </div>
+            <div className="text-xs font-semibold text-slate-500">
+              {controlCenter.actionNeeded.length} item
+              {controlCenter.actionNeeded.length === 1 ? "" : "s"}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4">
+            {controlCenter.actionNeeded.map((item) => {
+              const eid = String(item.group.eventId || "");
+              const a = item.app;
+              const status = normalizeStatus(a.status);
+
+              const boothSelected = hasBoothSelected(a);
+              const paidFlag = isPaid(a);
+              const paymentAvail = isPaymentAvailable(a);
+
+              let ctaKind: ActionKind = item.kind;
+              if (status === "approved" && boothSelected && paymentAvail && !paidFlag) ctaKind = "pay_now";
+              else if (status === "approved" && !boothSelected) ctaKind = "select_booth";
+              else if (status === "draft") ctaKind = "continue_application";
+              else if (!requirementsComplete(a)) ctaKind = "complete_requirements";
+
+              return (
+                <EventMiniCard
+                  key={`action_${eid}_${a.id || ""}`}
+                  item={item}
+                  showHold={ctaKind === "pay_now"}
+                  showStatusLine={true}
+                  ctaKind={ctaKind}
+                  ctaVariant={ctaKind === "pay_now" ? "success" : ctaKind === "select_booth" ? "primary" : "secondary"}
+                  footerSlot={
+                    <div className="text-sm font-semibold text-slate-700">
+                      <span className="font-black">{sectionTitle(ctaKind)}:</span>{" "}
+                      {sectionHint(ctaKind)}
+                    </div>
+                  }
+                />
+              );
+            })}
+
+            {(!loading && !err && controlCenter.actionNeeded.length === 0) ? (
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-700 shadow-sm">
+                No action needed right now. 🎉
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Section 2: Approved / Booth Reserved (Awaiting Payment) */}
+        <div className="mt-10">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-xl font-black text-slate-900">✅ Approved / Booth Reserved</div>
+              <div className="mt-1 text-sm font-semibold text-slate-600">
+                You&apos;re approved and your booth is selected — payment is required to confirm.
+              </div>
+            </div>
+            <div className="text-xs font-semibold text-slate-500">
+              {controlCenter.reserved.length} item{controlCenter.reserved.length === 1 ? "" : "s"}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4">
+            {controlCenter.reserved.map((item) => {
+              const eid = String(item.group.eventId || "");
+              const a = item.app;
+              const holdMs = item.holdMs;
+
+              return (
+                <div key={`reserved_${eid}_${a.id || ""}`} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="text-lg font-black text-slate-900">
+                        {item.event?.title || `Event #${eid}`}
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge tone="emerald">APPROVED</Badge>
+                        <Badge tone="slate">Booth: {item.boothLabel ? shortBoothId(item.boothLabel) : "—"}</Badge>
+                        <Badge tone="rose">Status: Awaiting payment</Badge>
+                        {holdMs !== null ? (
+                          <Badge tone="amber">
+                            {holdMs > 0 ? `Hold expires in: ${formatDuration(holdMs)}` : "Hold expired"}
+                          </Badge>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-3 text-xs font-semibold text-slate-600">
+                        Updated: {formatDate(a.updated_at || a.submitted_at)}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => goToAction("pay_now", eid, a.id)}
+                        className={BtnClass("success")}
+                      >
+                        Pay Now
+                      </button>
+
+                      <Link
+                        to={`/vendor/events/${encodeURIComponent(eid)}/map?appId=${encodeURIComponent(
+                          String(a.id || "")
+                        )}`}
+                        className={cx(
+                          BtnClass("outline"),
+                          "border-violet-200 text-violet-900 hover:bg-violet-50"
+                        )}
+                      >
+                        View Floorplan
+                      </Link>
+                    </div>
+                  </div>
+
+                  {a.notes ? (
+                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                      {a.notes}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+
+            {(!loading && !err && controlCenter.reserved.length === 0) ? (
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-700 shadow-sm">
+                No reserved booths awaiting payment.
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Section 3: Confirmed / Paid */}
+        <div className="mt-10">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-xl font-black text-slate-900">🎟 Confirmed / Paid</div>
+              <div className="mt-1 text-sm font-semibold text-slate-600">
+                You&apos;re confirmed — view the floorplan anytime.
+              </div>
+            </div>
+            <div className="text-xs font-semibold text-slate-500">
+              {controlCenter.paid.length} item{controlCenter.paid.length === 1 ? "" : "s"}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4">
+            {controlCenter.paid.map((item) => {
+              const eid = String(item.group.eventId || "");
+              const a = item.app;
+
+              return (
+                <div key={`paid_${eid}_${a.id || ""}`} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="text-lg font-black text-slate-900">
+                        {item.event?.title || `Event #${eid}`}
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge tone="emerald">Status: Confirmed</Badge>
+                        <Badge tone="slate">Booth: {item.boothLabel ? shortBoothId(item.boothLabel) : "—"}</Badge>
+                        <Badge tone="emerald">Payment: Paid</Badge>
+                        <Badge tone="violet">Booth locked</Badge>
+                      </div>
+
+                      <div className="mt-3 text-xs font-semibold text-slate-600">
+                        Updated: {formatDate(a.updated_at || a.submitted_at)}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <Link
+                        to={`/vendor/events/${encodeURIComponent(eid)}/map?appId=${encodeURIComponent(
+                          String(a.id || "")
+                        )}`}
+                        className={cx(
+                          BtnClass("outline"),
+                          "border-violet-200 text-violet-900 hover:bg-violet-50"
+                        )}
+                      >
+                        View Floorplan
+                      </Link>
+
+                      <Link
+                        to={`/vendor/events/${encodeURIComponent(eid)}?appId=${encodeURIComponent(
+                          String(a.id || "")
+                        )}`}
+                        className={BtnClass("outline")}
+                      >
+                        View event
+                      </Link>
+                    </div>
+                  </div>
+
+                  {a.notes ? (
+                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                      {a.notes}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+
+            {(!loading && !err && controlCenter.paid.length === 0) ? (
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-700 shadow-sm">
+                No paid / confirmed events yet.
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Legacy empty state */}
+        {!loading && !err && groups.length === 0 ? (
+          <div className="mt-10 rounded-3xl border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-700 shadow-sm">
+            No applications yet. Click <span className="font-extrabold">Browse Events</span> to apply.
+          </div>
+        ) : null}
       </div>
     </div>
   );

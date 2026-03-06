@@ -51,10 +51,23 @@ export default function VendorEventsPage() {
   }
 
   function formatDateRange(e: EventModel) {
-    if (!e.start_date || !e.end_date) return "Dates TBD";
-    const start = new Date(e.start_date).toLocaleDateString();
-    const end = new Date(e.end_date).toLocaleDateString();
-    return `${start} – ${end}`;
+    const parse = (s?: string) => {
+      if (!s) return null;
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) return null;
+      if (d.getFullYear() <= 1971) return null; // treat epoch placeholder as unset
+      return d;
+    };
+
+    const start = parse(e.start_date);
+    const end = parse(e.end_date);
+
+    const fmt = (d: Date) => d.toLocaleDateString();
+
+    if (start && end) return `${fmt(start)} – ${fmt(end)}`;
+    if (start) return fmt(start);
+    if (end) return fmt(end);
+    return "Dates TBD";
   }
 
   function handleViewEvent(id: number) {

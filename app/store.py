@@ -48,7 +48,7 @@ def _lower_str_keyed(d: dict) -> Dict[str, Any]:
 
 
 def load_store() -> None:
-    global _EVENTS, _REQUIREMENTS, _DIAGRAMS, _APPLICATIONS
+    global _EVENTS, _REQUIREMENTS, _REQUIREMENT_TEMPLATES, _DIAGRAMS, _APPLICATIONS
     global _LAYOUT_META, _BOOTHS, _TEMPLATES
     global _VENDORS
     global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
@@ -70,6 +70,7 @@ def load_store() -> None:
 
         _EVENTS = _int_keyed(raw.get("events", {}))
         _REQUIREMENTS = _int_keyed(raw.get("requirements", {}))
+        _REQUIREMENT_TEMPLATES = raw.get("requirement_templates", {}) or {}
         _DIAGRAMS = _int_keyed(raw.get("diagrams", {}))
         _APPLICATIONS = _int_keyed(raw.get("applications", {}))
 
@@ -125,6 +126,7 @@ def save_store() -> None:
         payload = {
             "events": _str_keyed(_EVENTS),
             "requirements": _str_keyed(_REQUIREMENTS),
+            "requirement_templates": _REQUIREMENT_TEMPLATES,
             "diagrams": _str_keyed(_DIAGRAMS),
             "applications": _str_keyed(_APPLICATIONS),
             "layout_meta": _str_keyed(_LAYOUT_META),
@@ -149,6 +151,7 @@ def save_store() -> None:
 
 _EVENTS: Dict[int, Dict[str, Any]] = {}
 _REQUIREMENTS: Dict[int, Dict[str, Any]] = {}
+_REQUIREMENT_TEMPLATES: Dict[str, Dict[str, Any]] = {}
 _DIAGRAMS: Dict[int, Dict[str, Any]] = {}
 _APPLICATIONS: Dict[int, Dict[str, Any]] = {}
 

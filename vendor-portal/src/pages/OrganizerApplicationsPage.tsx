@@ -1,632 +1,623 @@
-// src/pages/OrganizerApplicationsPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { buildAuthHeaders } from "../auth/authHeaders";
+// vendor-portal/src/pages/OrganizerApplicationsPage.tsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { readSession } from "../auth/authStorage";
 
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
 
-/* ---------------- Types ---------------- */
+type OrganizerApp = {
+  id: number;
+  event_id?: number;
 
-type AppStatus = "draft" | "submitted" | "approved" | "rejected" | string;
+  vendor_id?: number | string | null;
+  vendor_email?: string | null;
+  vendor_company_name?: string | null;
+  vendor_display_name?: string | null;
 
-type OrganizerApplication = {
-  id: number | string;
-  status?: AppStatus;
-
-  vendor_id?: number | string;
-  vendorId?: number | string;
-  vendor?: {
-    id?: number | string;
-    company_name?: string;
-    companyName?: string;
-    display_name?: string;
-    displayName?: string;
-    email?: string;
-  };
-
-  company_name?: string;
-  companyName?: string;
-  vendor_name?: string;
-  vendorName?: string;
-  email?: string;
+  status?: string; // "draft" | "submitted" | "approved" | "rejected"
+  payment_status?: string | null; // "unpaid" | "paid" | "pending" | ...
+  booth_id?: string | null;
+  booth_reserved_until?: string | null;
 
   created_at?: string;
-  submitted_at?: string;
   updated_at?: string;
 
-  booth_id?: string | number | null;
-  boothId?: string | number | null;
-
-  reserved_booth_id?: string | number | null;
-  reservedBoothId?: string | number | null;
-
-  reserved_until?: string | null;
-  reservedUntil?: string | null;
-
-  reservation_expires_at?: string | null;
-  reservationExpiresAt?: string | null;
-
-  reservation?: {
-    booth_id?: string | number | null;
-    boothId?: string | number | null;
-    expires_at?: string | null;
-    expiresAt?: string | null;
-  } | null;
-
-  is_paid?: boolean;
-  isPaid?: boolean;
-  paid?: boolean;
-  paid_at?: string | null;
-  paidAt?: string | null;
-  payment_status?: string | null;
-  paymentStatus?: string | null;
+  // Anything else is fine
+  [k: string]: any;
 };
 
-/* ---------------- Helpers ---------------- */
+type CanonStatus = "draft" | "submitted" | "approved" | "rejected" | "unknown";
 
-function normalizeStatus(s?: string): string {
-  return String(s || "").trim().toLowerCase();
+function normalizeStatus(s: any): CanonStatus {
+  const v = String(s || "").trim().toLowerCase();
+  if (v === "draft") return "draft";
+  if (v === "submitted") return "submitted";
+  if (v === "approved") return "approved";
+  if (v === "rejected") return "rejected";
+  return "unknown";
 }
 
-function pickVendorId(app: OrganizerApplication): string | number | undefined {
-  return app.vendor_id ?? app.vendorId ?? app.vendor?.id ?? undefined;
+function normalizePaymentStatus(s: any): "paid" | "unpaid" | "pending" | "unknown" {
+  const v = String(s || "").trim().toLowerCase();
+  if (v === "paid") return "paid";
+  if (v === "unpaid") return "unpaid";
+  if (v === "pending") return "pending";
+  if (!v) return "unknown";
+  return "unknown";
 }
 
-function pickCompanyName(app: OrganizerApplication): string {
-  return (
-    app.vendor?.company_name ??
-    app.vendor?.companyName ??
-    app.vendor?.display_name ??
-    app.vendor?.displayName ??
-    app.company_name ??
-    app.companyName ??
-    app.vendor_name ??
-    app.vendorName ??
-    "Vendor"
-  );
-}
-
-function pickEmail(app: OrganizerApplication): string | undefined {
-  return app.vendor?.email ?? app.email ?? undefined;
-}
-
-function pickBoothId(app: OrganizerApplication): string | number | null {
-  return (
-    app.reservation?.booth_id ??
-    app.reservation?.boothId ??
-    app.booth_id ??
-    app.boothId ??
-    app.reserved_booth_id ??
-    app.reservedBoothId ??
-    null
-  );
-}
-
-function pickReservedUntil(app: OrganizerApplication): string | null {
-  return (
-    app.reservation?.expires_at ??
-    app.reservation?.expiresAt ??
-    app.reservation_expires_at ??
-    app.reservationExpiresAt ??
-    app.reserved_until ??
-    app.reservedUntil ??
-    null
-  );
-}
-
-function isPaid(app: OrganizerApplication): boolean {
-  const paidFlag = app.is_paid ?? app.isPaid ?? app.paid ?? false;
-  const paidAt = app.paid_at ?? app.paidAt;
-  const status = (app.payment_status ?? app.paymentStatus ?? "").toLowerCase();
-  return Boolean(paidFlag || paidAt || status === "paid" || status === "succeeded");
-}
-
-function parseDateSafe(iso: string | null | undefined): Date | null {
-  if (!iso) return null;
+function safeDateLabel(iso?: string | null) {
+  if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? null : d;
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
 }
 
-function formatLocalTimestamp(d: Date): string {
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function isFutureIso(iso: string) {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return false;
+  return t > Date.now();
 }
 
-function isReservationExpired(reservedUntilIso: string | null | undefined): boolean {
-  const d = parseDateSafe(reservedUntilIso);
-  if (!d) return false;
-  return d.getTime() <= Date.now();
+function cx(...classes: Array<string | false | undefined | null>) {
+  return classes.filter(Boolean).join(" ");
 }
 
-/* ---------------- Component ---------------- */
+function statusPill(s: any) {
+  const v = normalizeStatus(s);
+  const base = "inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold";
+  if (v === "draft") return `${base} border-slate-200 text-slate-700 bg-slate-50`;
+  if (v === "submitted") return `${base} border-blue-200 text-blue-800 bg-blue-50`;
+  if (v === "approved") return `${base} border-emerald-200 text-emerald-800 bg-emerald-50`;
+  if (v === "rejected") return `${base} border-rose-200 text-rose-800 bg-rose-50`;
+  return `${base} border-slate-200 text-slate-600 bg-white`;
+}
 
-export default function OrganizerApplicationsPage() {
-  const navigate = useNavigate();
-  const { eventId } = useParams();
+function paymentPill(paymentStatus: any) {
+  const v = normalizePaymentStatus(paymentStatus);
+  const base = "inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold";
+  if (v === "paid") return { klass: `${base} border-emerald-200 bg-emerald-50 text-emerald-800`, label: "Paid" };
+  if (v === "pending") return { klass: `${base} border-amber-200 bg-amber-50 text-amber-800`, label: "Payment pending" };
+  if (v === "unpaid") return { klass: `${base} border-slate-200 bg-white text-slate-700`, label: "Unpaid" };
+  return { klass: `${base} border-slate-200 bg-white text-slate-600`, label: "Payment —" };
+}
 
-  const [apps, setApps] = useState<OrganizerApplication[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [err, setErr] = useState<string>("");
-  const [busyId, setBusyId] = useState<string>("");
+function pipelinePill(app: OrganizerApp) {
+  // Pipeline: Applied (submitted) -> Approved -> Booth Assigned (booth_id) -> Paid
+  const st = normalizeStatus(app.status);
+  const pay = normalizePaymentStatus(app.payment_status);
+  const hasBooth = !!String(app.booth_id || "").trim();
 
-  const authHeaders = useMemo(() => buildAuthHeaders(), []);
+  const base = "inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold";
 
-  async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
-      ...(init || {}),
-      headers: {
-        ...(authHeaders as any),
-        "Content-Type": "application/json",
-        ...(init?.headers || {}),
-      },
-    });
+  if (st === "rejected") return { label: "Rejected", klass: `${base} border-rose-200 bg-rose-50 text-rose-800` };
+  if (st === "draft") return { label: "Draft", klass: `${base} border-slate-200 bg-slate-50 text-slate-700` };
 
-    const text = await res.text();
-    let data: any = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = text || null;
-    }
-
-    if (!res.ok) {
-      const msg =
-        (data && (data.detail || data.error || data.message)) ||
-        (typeof data === "string" ? data : "") ||
-        `${res.status} ${res.statusText}`;
-      throw new Error(msg);
-    }
-    return data as T;
+  if (st === "approved" && pay === "paid") {
+    return { label: "Paid", klass: `${base} border-emerald-200 bg-emerald-50 text-emerald-800` };
+  }
+  if (st === "approved" && hasBooth) {
+    return { label: "Booth Assigned", klass: `${base} border-indigo-200 bg-indigo-50 text-indigo-800` };
+  }
+  if (st === "approved") {
+    return { label: "Approved", klass: `${base} border-emerald-200 bg-emerald-50 text-emerald-800` };
+  }
+  if (st === "submitted") {
+    return { label: "Applied", klass: `${base} border-blue-200 bg-blue-50 text-blue-800` };
   }
 
-  async function load() {
-    if (!eventId) return;
+  return { label: "—", klass: `${base} border-slate-200 bg-white text-slate-600` };
+}
+
+export default function OrganizerApplicationsPage() {
+  const nav = useNavigate();
+  const loc = useLocation();
+  const { eventId } = useParams<{ eventId: string }>();
+
+  const eid = String(eventId || "").trim();
+
+  const [apps, setApps] = useState<OrganizerApp[]>([]);
+  const [boothLabelMap, setBoothLabelMap] = useState<Record<string, string>>({});
+
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "submitted" | "approved" | "rejected" | "draft"
+  >("all");
+
+  const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  const authHeaders = useMemo(() => {
+    const s = readSession();
+    const token = s?.access_token;
+    return token
+      ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      : { "Content-Type": "application/json" };
+  }, []);
+
+  async function fetchApps() {
+    if (!eid) {
+      setApps([]);
+      return;
+    }
+
     setLoading(true);
-    setErr("");
+    setErr(null);
+
     try {
-      const url = `${API_BASE}/organizer/events/${encodeURIComponent(
-        String(eventId)
-      )}/applications`;
-      const data = await apiJson<any>(url, { method: "GET" });
+      const res = await fetch(
+        `${API_BASE}/organizer/events/${encodeURIComponent(eid)}/applications`,
+        {
+          headers: authHeaders,
+        }
+      );
 
-      const items: OrganizerApplication[] = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.items)
-        ? data.items
-        : Array.isArray(data?.applications)
-        ? data.applications
-        : [];
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `Failed to load applications (${res.status})`);
+      }
 
-      setApps(items);
+      const data = await res.json();
+      const list =
+        Array.isArray(data)
+          ? data
+          : Array.isArray((data as any)?.applications)
+          ? (data as any).applications
+          : Array.isArray((data as any)?.items)
+          ? (data as any).items
+          : Array.isArray((data as any)?.results)
+          ? (data as any).results
+          : [];
+
+      setApps(Array.isArray(list) ? list : []);
     } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Failed to load applications.");
+      setErr(e?.message ? String(e.message) : "Failed to load applications");
       setApps([]);
     } finally {
       setLoading(false);
     }
   }
 
+  async function fetchDiagram() {
+    if (!eid) {
+      setBoothLabelMap({});
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(String(eid))}/diagram`,
+        {
+          headers: authHeaders,
+        }
+      );
+
+      if (!res.ok) {
+        // Diagram is optional for this page; don't fail the entire view.
+        setBoothLabelMap({});
+        return;
+      }
+
+      const data = await res.json();
+
+      const map: Record<string, string> = {};
+
+      const scan = (obj: any) => {
+        if (!obj) return;
+        if (Array.isArray(obj)) {
+          obj.forEach(scan);
+          return;
+        }
+        if (typeof obj === "object") {
+          // Booth nodes usually have id + label
+          if (typeof obj.id === "string" && typeof obj.label === "string") {
+            map[obj.id] = obj.label;
+          }
+          Object.values(obj).forEach(scan);
+        }
+      };
+
+      scan(data);
+      setBoothLabelMap(map);
+    } catch (e) {
+      console.error("diagram parse error", e);
+      setBoothLabelMap({});
+    }
+  }
+
   useEffect(() => {
-    load();
+    fetchApps();
+    fetchDiagram();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventId]);
+  }, [eid]);
 
-  async function approve(appId: string | number) {
-    setBusyId(String(appId));
-    setErr("");
-    try {
-      await apiJson(`${API_BASE}/applications/${encodeURIComponent(String(appId))}/approve`, {
+  // Refresh if navigated back here (common after assignment).
+  useEffect(() => {
+    const qs = new URLSearchParams(loc.search);
+    if (qs.get("refresh") === "1") fetchApps();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loc.key]);
+
+  async function approveApp(appId: number) {
+    const res = await fetch(
+      `${API_BASE}/organizer/applications/${encodeURIComponent(String(appId))}/approve`,
+      {
         method: "POST",
-      });
-      await load();
-    } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Approve failed.");
-    } finally {
-      setBusyId("");
+        headers: authHeaders,
+      }
+    );
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || `Approve failed (${res.status})`);
     }
+    return res.json();
   }
 
-  async function reject(appId: string | number) {
-    setBusyId(String(appId));
-    setErr("");
-    try {
-      await apiJson(`${API_BASE}/applications/${encodeURIComponent(String(appId))}/reject`, {
+  async function rejectApp(appId: number) {
+    const res = await fetch(
+      `${API_BASE}/organizer/applications/${encodeURIComponent(String(appId))}/reject`,
+      {
         method: "POST",
-      });
-      await load();
-    } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Reject failed.");
-    } finally {
-      setBusyId("");
+        headers: authHeaders,
+      }
+    );
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || `Reject failed (${res.status})`);
     }
+    return res.json();
   }
 
-  async function del(appId: string | number) {
-    const ok = window.confirm("Delete this application? This cannot be undone.");
-    if (!ok) return;
-
-    setBusyId(String(appId));
-    setErr("");
-    try {
-      await apiJson(`${API_BASE}/applications/${encodeURIComponent(String(appId))}`, {
+  async function deleteApp(appId: number) {
+    const res = await fetch(
+      `${API_BASE}/organizer/applications/${encodeURIComponent(String(appId))}`,
+      {
         method: "DELETE",
+        headers: authHeaders,
+      }
+    );
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || `Delete failed (${res.status})`);
+    }
+    return res.json().catch(() => ({}));
+  }
+
+  async function refresh() {
+    await fetchApps();
+    await fetchDiagram();
+  }
+
+  async function onApprove(appId: number) {
+    if (!window.confirm("Approve this vendor application?")) return;
+    try {
+      await approveApp(appId);
+      await refresh();
+    } catch (e: any) {
+      window.alert(e?.message ? String(e.message) : "Approve failed");
+    }
+  }
+
+  async function onReject(appId: number) {
+    if (!window.confirm("Reject this vendor application?")) return;
+    try {
+      await rejectApp(appId);
+      await refresh();
+    } catch (e: any) {
+      window.alert(e?.message ? String(e.message) : "Reject failed");
+    }
+  }
+
+  async function onDelete(appId: number) {
+    if (!window.confirm("Delete this application?")) return;
+    try {
+      await deleteApp(appId);
+      await refresh();
+    } catch (e: any) {
+      window.alert(e?.message ? String(e.message) : "Delete failed");
+    }
+  }
+
+  // Policy 2: backend cleans expired holds on load; we treat expiration client-side too.
+  function isReservationExpired(app: OrganizerApp) {
+    // If a booth is already assigned, do NOT treat it as expired just because a timestamp is missing.
+    if (app.booth_id) return false;
+
+    const until = app.booth_reserved_until || null;
+
+    // No timestamp + no booth assignment => no active hold (so Reserve is available)
+    if (!until) return true;
+
+    return !isFutureIso(until);
+  }
+
+  function boothDisplayLabel(boothId?: string | null) {
+    if (!boothId) return "—";
+    const label = boothLabelMap[boothId];
+    return label || "Booth selected";
+  }
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return (apps || [])
+      .filter((a) => {
+        const st = normalizeStatus(a.status);
+        if (statusFilter !== "all" && st !== statusFilter) return false;
+        if (!q) return true;
+
+        const hay = [
+          a.vendor_company_name,
+          a.vendor_display_name,
+          a.vendor_email,
+          String(a.id),
+          String(a.vendor_id ?? ""),
+          // avoid leaking raw booth_id as the primary search surface, but allow it if pasted
+          String(a.booth_id ?? ""),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return hay.includes(q);
+      })
+      .sort((a, b) => {
+        const at = new Date(a.updated_at || a.created_at || 0).getTime();
+        const bt = new Date(b.updated_at || b.created_at || 0).getTime();
+        return bt - at;
       });
-      await load();
-    } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Delete failed.");
-    } finally {
-      setBusyId("");
-    }
-  }
+  }, [apps, search, statusFilter]);
 
-  async function extendReservation(appId: string | number) {
-    setBusyId(String(appId));
-    setErr("");
-    try {
-      await apiJson(
-        `${API_BASE}/applications/${encodeURIComponent(String(appId))}/reservation/extend`,
-        { method: "POST" }
-      );
-      await load();
-    } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Extend failed.");
-    } finally {
-      setBusyId("");
-    }
-  }
-
-  async function releaseReservation(appId: string | number) {
-    const ok = window.confirm("Release this booth reservation?");
-    if (!ok) return;
-
-    setBusyId(String(appId));
-    setErr("");
-    try {
-      await apiJson(
-        `${API_BASE}/applications/${encodeURIComponent(String(appId))}/reservation/release`,
-        { method: "POST" }
-      );
-      await load();
-    } catch (e: any) {
-      setErr(e?.message ? String(e.message) : "Release failed.");
-    } finally {
-      setBusyId("");
-    }
-  }
-
-  function goReserve(app: OrganizerApplication) {
-    if (!eventId) return;
-    navigate(
-      `/organizer/events/${encodeURIComponent(
-        String(eventId)
-      )}/layout?assignAppId=${encodeURIComponent(String(app.id))}&assignAction=reserve`
+  // Protected organizer route for reviewing a single application.
+  function goPreview(appId: number | string) {
+    nav(
+      `/organizer/events/${encodeURIComponent(eid)}/application/${encodeURIComponent(
+        String(appId)
+      )}`
     );
   }
 
-  function goChange(app: OrganizerApplication) {
-    if (!eventId) return;
-    navigate(
-      `/organizer/events/${encodeURIComponent(
-        String(eventId)
-      )}/layout?assignAppId=${encodeURIComponent(String(app.id))}&assignAction=change`
-    );
+  function goAssign(app: OrganizerApp, action: "reserve" | "change") {
+    const qs = new URLSearchParams();
+    qs.set("assignAppId", String(app.id));
+    qs.set("assignAction", action);
+    nav(`/organizer/events/${encodeURIComponent(eid)}/layout?${qs.toString()}`);
   }
 
-  function viewApp(app: OrganizerApplication) {
-    // ✅ FIX: pass eventId to the preview page (both query param + location state)
-    const eid = String(eventId || "");
-    const aid = String(app.id);
-    navigate(`/organizer/vendor-preview/${encodeURIComponent(aid)}?eventId=${encodeURIComponent(eid)}`, {
-      state: { eventId: eid, applicationId: aid },
-    });
-  }
-
-  function viewProfile(app: OrganizerApplication) {
-    const vid = pickVendorId(app);
-    if (!vid) return;
-    navigate(`/organizer/vendors/${encodeURIComponent(String(vid))}`);
-  }
-
-  const sorted = useMemo(() => {
-    const copy = [...apps];
-    copy.sort((a, b) => {
-      const da =
-        parseDateSafe(a.submitted_at || a.created_at || a.updated_at || "")?.getTime() || 0;
-      const db =
-        parseDateSafe(b.submitted_at || b.created_at || b.updated_at || "")?.getTime() || 0;
-      return db - da;
-    });
-    return copy;
+  const summary = useMemo(() => {
+    const total = (apps || []).length;
+    const submitted = (apps || []).filter((a) => normalizeStatus(a.status) === "submitted").length;
+    const approved = (apps || []).filter((a) => normalizeStatus(a.status) === "approved").length;
+    const rejected = (apps || []).filter((a) => normalizeStatus(a.status) === "rejected").length;
+    const paid = (apps || []).filter((a) => normalizePaymentStatus(a.payment_status) === "paid").length;
+    const withBooth = (apps || []).filter((a) => !!String(a.booth_id || "").trim()).length;
+    return { total, submitted, approved, rejected, paid, withBooth };
   }, [apps]);
 
   return (
     <div className="min-h-screen bg-white p-6">
       <div className="mx-auto max-w-6xl">
-        <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="mb-6 flex items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold">Applications</h1>
-            <div className="mt-1 text-sm text-gray-500">
-              Review applications and manage booth reservations.
+            <h1 className="text-2xl font-black tracking-tight">Applications</h1>
+            <p className="text-sm text-slate-600">
+              Review vendors, approve/reject, and assign booths. Event ID:{" "}
+              <span className="font-mono">{eid || "—"}</span>
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-slate-200 bg-white text-slate-700")}>
+                Total: {summary.total}
+              </span>
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-blue-200 bg-blue-50 text-blue-800")}>
+                Applied: {summary.submitted}
+              </span>
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-emerald-200 bg-emerald-50 text-emerald-800")}>
+                Approved: {summary.approved}
+              </span>
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-indigo-200 bg-indigo-50 text-indigo-800")}>
+                Booth assigned: {summary.withBooth}
+              </span>
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-emerald-200 bg-emerald-50 text-emerald-800")}>
+                Paid: {summary.paid}
+              </span>
+              <span className={cx("inline-flex items-center rounded-full border px-3 py-1 text-xs font-extrabold", "border-rose-200 bg-rose-50 text-rose-800")}>
+                Rejected: {summary.rejected}
+              </span>
             </div>
           </div>
 
           <button
-            onClick={load}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
+            onClick={() => refresh()}
+            className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold hover:bg-slate-50"
             disabled={loading}
-            title="Refresh"
           >
-            Refresh
+            {loading ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 
+        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-slate-600">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as any)}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              >
+                <option value="all">All</option>
+                <option value="submitted">Submitted</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="draft">Draft</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-slate-600">Search</label>
+              <input
+                ref={searchRef}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Vendor name, email, booth..."
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm md:w-80"
+              />
+            </div>
+          </div>
+        </div>
+
         {err ? (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
             {err}
           </div>
         ) : null}
 
-        {loading ? (
-          <div className="rounded-lg border border-gray-200 p-6 text-sm text-gray-600">
-            Loading applications…
+        <div className="overflow-hidden rounded-2xl border border-slate-200">
+          {/* Header row */}
+          <div className="grid grid-cols-12 gap-2 bg-slate-50 px-4 py-3 text-xs font-black uppercase tracking-wide text-slate-600">
+            <div className="col-span-2">Vendor</div>
+            <div className="col-span-2">Pipeline</div>
+            <div className="col-span-2">Status</div>
+            <div className="col-span-2">Booth</div>
+            <div className="col-span-1">Updated</div>
+            <div className="col-span-3 text-right">Actions</div>
           </div>
-        ) : sorted.length === 0 ? (
-          <div className="rounded-lg border border-gray-200 p-6 text-sm text-gray-600">
-            No applications found.
-          </div>
-        ) : (
-          <div className="overflow-hidden rounded-xl border border-gray-200">
-            <div className="grid grid-cols-12 bg-gray-50 px-4 py-3 text-xs font-medium uppercase tracking-wide text-gray-600">
-              <div className="col-span-4">Vendor</div>
-              <div className="col-span-2">Status</div>
-              <div className="col-span-3">Reservation</div>
-              <div className="col-span-3 text-right">Actions</div>
-            </div>
 
-            <div className="divide-y divide-gray-200">
-              {sorted.map((app) => {
-                const status = normalizeStatus(app.status);
-                const paid = isPaid(app);
+          {loading ? (
+            <div className="p-6 text-sm text-slate-600">Loading...</div>
+          ) : filtered.length === 0 ? (
+            <div className="p-6 text-sm text-slate-600">No applications found.</div>
+          ) : (
+            <div className="divide-y divide-slate-200">
+              {filtered.map((app) => {
+                const vendorLabel =
+                  app.vendor_company_name ||
+                  app.vendor_display_name ||
+                  app.vendor_email ||
+                  `Vendor ${String(app.vendor_id || "").trim() || "—"}`;
 
-                const boothId = pickBoothId(app);
-                const reservedUntilIso = pickReservedUntil(app);
-                const reservedUntilDate = parseDateSafe(reservedUntilIso);
-                const hasReservation = Boolean(boothId && reservedUntilDate);
-                const expired = hasReservation ? isReservationExpired(reservedUntilIso) : false;
+                const st = normalizeStatus(app.status);
+                const hasBooth = Boolean(app.booth_id);
+                const expired = isReservationExpired(app);
 
-                const isDraftOrSubmitted = status === "draft" || status === "submitted";
-                const isApproved = status === "approved";
-                const isRejected = status === "rejected";
-
-                const approvedNoHold = isApproved && !paid && (!hasReservation || expired);
-                const approvedHeldUnpaidActive = isApproved && !paid && hasReservation && !expired;
-                const approvedPaid = isApproved && paid;
-
-                const name = pickCompanyName(app);
-                const email = pickEmail(app);
-                const isBusy = busyId === String(app.id);
+                const pipe = pipelinePill(app);
+                const pay = paymentPill(app.payment_status);
 
                 return (
-                  <div key={String(app.id)} className="grid grid-cols-12 items-start px-4 py-4">
+                  <div key={app.id} className="grid grid-cols-12 gap-2 px-4 py-4 text-sm">
                     {/* Vendor */}
-                    <div className="col-span-4">
-                      <div className="flex flex-col">
-                        <div className="text-sm font-semibold text-gray-900">{name}</div>
-                        <div className="mt-0.5 text-xs text-gray-500">
-                          App #{String(app.id)}
-                          {email ? <span className="ml-2">• {email}</span> : null}
-                        </div>
+                    <div className="col-span-2">
+                      <div className="font-extrabold">{vendorLabel}</div>
+                      <div className="text-xs text-slate-600">{app.vendor_email || "—"}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        App #{app.id}
                       </div>
+                    </div>
 
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <button
-                          onClick={() => viewApp(app)}
-                          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50"
-                          title="View application"
-                        >
-                          View App
-                        </button>
-
-                        <button
-                          onClick={() => viewProfile(app)}
-                          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-60"
-                          title="View vendor profile"
-                          disabled={!pickVendorId(app)}
-                        >
-                          View Profile
-                        </button>
+                    {/* Pipeline */}
+                    <div className="col-span-2">
+                      <span className={pipe.klass}>{pipe.label}</span>
+                      <div className="mt-2">
+                        <span className={pay.klass}>{pay.label}</span>
                       </div>
                     </div>
 
                     {/* Status */}
                     <div className="col-span-2">
-                      <div className="inline-flex rounded-full border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-700">
-                        {status || "unknown"}
-                      </div>
-
-                      {approvedPaid ? (
-                        <div className="mt-2 text-xs font-medium text-green-700">
-                          Paid ✅ / Booth locked
+                      <span className={statusPill(st)}>{st}</span>
+                      {app.booth_id ? (
+                        <div className="mt-2 text-xs text-slate-600">
+                          Booth: <span className="font-semibold">{boothDisplayLabel(app.booth_id)}</span>
                         </div>
-                      ) : null}
-
-                      {isApproved && !paid && expired ? (
-                        <div className="mt-2 text-xs font-medium text-amber-700">
-                          Reservation expired
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {/* Reservation */}
-                    <div className="col-span-3">
-                      {isApproved ? (
-                        approvedPaid ? (
-                          <div className="text-xs text-gray-700">
-                            {boothId ? (
-                              <div className="font-medium">
-                                Booth <span className="font-semibold">{String(boothId)}</span> locked
-                              </div>
-                            ) : (
-                              <div className="font-medium">Booth locked</div>
-                            )}
-                          </div>
-                        ) : hasReservation && reservedUntilDate ? (
-                          <div className="text-xs text-gray-700">
-                            <div>
-                              Reserved: Booth{" "}
-                              <span className="font-semibold">{String(boothId)}</span>{" "}
-                              until{" "}
-                              <span className="font-semibold">
-                                {formatLocalTimestamp(reservedUntilDate)}
-                              </span>
-                            </div>
-                            {expired ? (
-                              <div className="mt-1 text-xs text-amber-700">
-                                This hold is expired; you can reserve again.
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <div className="text-xs text-gray-500">No reservation</div>
-                        )
                       ) : (
-                        <div className="text-xs text-gray-400">—</div>
+                        <div className="mt-2 text-xs text-slate-500">No booth assigned</div>
                       )}
                     </div>
 
-                    {/* Actions */}
-                    <div className="col-span-3">
-                      <div className="flex flex-wrap justify-end gap-2">
-                        {isDraftOrSubmitted ? (
-                          <>
-                            <button
-                              onClick={() => approve(app.id)}
-                              className="rounded-lg bg-black px-3 py-2 text-xs font-medium text-white hover:bg-gray-900 disabled:opacity-60"
-                              disabled={isBusy}
-                              title="Approve application"
-                            >
-                              {isBusy ? "Working…" : "Approve"}
-                            </button>
-
-                            <button
-                              onClick={() => reject(app.id)}
-                              className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium hover:bg-gray-50 disabled:opacity-60"
-                              disabled={isBusy}
-                              title="Reject application"
-                            >
-                              {isBusy ? "Working…" : "Reject"}
-                            </button>
-
-                            <button
-                              onClick={() => del(app.id)}
-                              className="rounded-lg border border-red-300 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
-                              disabled={isBusy}
-                              title="Delete application"
-                            >
-                              Delete
-                            </button>
-                          </>
-                        ) : null}
-
-                        {isRejected ? (
-                          <button
-                            onClick={() => del(app.id)}
-                            className="rounded-lg border border-red-300 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
-                            disabled={isBusy}
-                            title="Delete application"
-                          >
-                            {isBusy ? "Working…" : "Delete"}
-                          </button>
-                        ) : null}
-
-                        {isApproved ? (
-                          <>
-                            {approvedPaid ? (
-                              <>
-                                <button
-                                  className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white opacity-90"
-                                  disabled
-                                  title="Booth is locked (paid)"
-                                >
-                                  Booth Locked
-                                </button>
-                              </>
-                            ) : null}
-
-                            {approvedNoHold ? (
-                              <button
-                                onClick={() => goReserve(app)}
-                                className="rounded-lg bg-black px-3 py-2 text-xs font-medium text-white hover:bg-gray-900"
-                                title="Reserve booth"
-                              >
-                                Reserve Booth
-                              </button>
-                            ) : null}
-
-                            {approvedHeldUnpaidActive ? (
-                              <>
-                                <button
-                                  className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white opacity-90"
-                                  disabled
-                                  title="Booth is currently reserved"
-                                >
-                                  Reserved
-                                </button>
-
-                                <button
-                                  onClick={() => extendReservation(app.id)}
-                                  className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium hover:bg-gray-50 disabled:opacity-60"
-                                  disabled={isBusy}
-                                  title="Extend reservation"
-                                >
-                                  {isBusy ? "Working…" : "Extend"}
-                                </button>
-
-                                <button
-                                  onClick={() => goChange(app)}
-                                  className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium hover:bg-gray-50"
-                                  title="Change booth"
-                                >
-                                  Change Booth
-                                </button>
-
-                                <button
-                                  onClick={() => releaseReservation(app.id)}
-                                  className="rounded-lg border border-red-300 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
-                                  disabled={isBusy}
-                                  title="Release reservation"
-                                >
-                                  {isBusy ? "Working…" : "Release"}
-                                </button>
-                              </>
-                            ) : null}
-                          </>
-                        ) : null}
-
-                        {!isDraftOrSubmitted && !isRejected && !isApproved ? (
-                          <button
-                            onClick={() => del(app.id)}
-                            className="rounded-lg border border-red-300 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
-                            disabled={isBusy}
-                            title="Delete application"
-                          >
-                            {isBusy ? "Working…" : "Delete"}
-                          </button>
-                        ) : null}
+                    {/* Booth */}
+                    <div className="col-span-2">
+                      <div className="font-semibold">{boothDisplayLabel(app.booth_id)}</div>
+                      <div className="text-xs text-slate-600">
+                        Hold until:{" "}
+                        {app.booth_reserved_until ? safeDateLabel(app.booth_reserved_until) : "—"}
                       </div>
+                      {!hasBooth && expired ? (
+                        <div className="mt-1 text-xs font-bold text-amber-700">Hold expired</div>
+                      ) : null}
+                    </div>
+
+                    {/* Updated */}
+                    <div className="col-span-1 text-xs text-slate-700">
+                      {safeDateLabel(app.updated_at || app.created_at)}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="col-span-3 flex flex-wrap justify-end gap-2">
+                      <button
+                        onClick={() => goPreview(app.id)}
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-extrabold hover:bg-slate-50"
+                      >
+                        View App
+                      </button>
+
+                      {st === "submitted" ? (
+                        <>
+                          <button
+                            onClick={() => onApprove(app.id)}
+                            className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-extrabold text-white hover:bg-emerald-700"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => onReject(app.id)}
+                            className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-extrabold text-white hover:bg-rose-700"
+                          >
+                            Reject
+                          </button>
+                        </>
+                      ) : null}
+
+                      {st === "approved" ? (
+                        <>
+                          {!hasBooth || expired ? (
+                            <button
+                              onClick={() => goAssign(app, "reserve")}
+                              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-extrabold text-white hover:bg-blue-700"
+                            >
+                              Reserve Booth
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => goAssign(app, "change")}
+                              className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-extrabold text-blue-800 hover:bg-blue-100"
+                              title="Change booth assignment"
+                            >
+                              Change Booth
+                            </button>
+                          )}
+                        </>
+                      ) : null}
+
+                      <button
+                        onClick={() => onDelete(app.id)}
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-extrabold text-slate-600 hover:bg-slate-50"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
                 );
               })}
             </div>
-          </div>
-        )}
+          )}
+        </div>
+
+        <div className="mt-6 text-xs text-slate-500">
+          Tip: After assigning a booth, return here and hit{" "}
+          <span className="font-bold">Refresh</span> to confirm pipeline + payment.
+        </div>
       </div>
     </div>
   );
