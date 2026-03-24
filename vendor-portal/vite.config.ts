@@ -6,9 +6,13 @@ export default defineConfig({
   base: "/",
   server: {
     proxy: {
-      // only proxy API/auth paths (not SPA routes)
       "/api": "http://localhost:8002",
       "/auth": "http://localhost:8002",
     },
+  },
+  preview: {
+    host: "0.0.0.0",
+    port: Number(process.env.PORT) || 4173,
+    allowedHosts: true,
   },
 });
