@@ -1,0 +1,15 @@
+from auth import hash_pw
+from database import SessionLocal
+from models import User
+
+db = SessionLocal()
+
+organizer = db.query(User).filter(User.email == "organizer@example.com").first()
+if organizer:
+    organizer.hashed_password = hash_pw("testpass")
+    db.commit()
+    print("âœ… Organizer password reset to 'testpass'")
+else:
+    print("âŒ Organizer not found")
+
+db.close()

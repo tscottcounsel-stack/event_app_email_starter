@@ -1,0 +1,60 @@
+name: Quality Checks
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  quality:
+    name: Pre-commit & Line-Endings
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@v3.0.1
+
+      - name: Enforce LF for non-Windows scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # List tracked files, exclude binaries and Windows script extensions
+          mapfile -t FILES < <(git ls-files \
+            | grep -Ev '\.(png|jpg|jpeg|gif|pdf|ico|zip|7z|rar|exe|dll|so|dylib|mp3|mp4|mov|webp|woff|woff2)$' \
+            | grep -Ev '\.(ps1|psm1|psd1|bat|cmd)$')
+
+          if (( ${#FILES[@]} == 0 )); then
+            echo "No candidate files to check."
+            exit 0
+          fi
+
+          # Find any files containing CR bytes (carriage return)
+          mapfile -t OFFENDERS < <(LC_ALL=C grep -Il $'\r' -- "${FILES[@]}" || true)
+
+          if (( ${#OFFENDERS[@]} > 0 )); then
+            echo "::error title=CRLF detected::The following files contain CRLF (\r) line endings but are not Windows scripts:"
+            printf '%s\n' "${OFFENDERS[@]}"
+            echo "Please normalize these to LF. You can run: pwsh -File scripts/Fix-LineEndings.ps1 -Stage"
+            exit 1
+          fi
+
+          echo "LF-only verified for non-Windows script files."
+
+      # Optional: run your fixer in dry-run mode so contributors see proposed changes
+      - name: Dry-check with fixer (optional)
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y powershell
+          pwsh -NoLogo -NoProfile -Command "Set-Location .; ./scripts/Fix-LineEndings.ps1 -DryRun"

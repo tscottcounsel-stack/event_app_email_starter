@@ -1,0 +1,27 @@
+﻿$yaml = @'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+'@
+
+# Write as UTF-8 (no BOM) to avoid hidden characters that break YAML
+$enc = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText("$PWD/.pre-commit-config.yaml", $yaml, $enc)

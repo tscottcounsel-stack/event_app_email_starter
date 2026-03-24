@@ -1,0 +1,29 @@
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # e.g., v0.1.0, v1.2.3
+
+permissions:
+  contents: write   # required to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # (Optional) Build a source archive to attach to the release
+      # - name: Create source archive
+      #   run: git archive -o source.zip HEAD
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          # Mark pre-releases automatically if the tag includes -alpha/-beta/-rc
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+          # (Optional) Attach files to the release
+          # files: |
+          #   source.zip

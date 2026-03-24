@@ -1,0 +1,295 @@
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------
+   Global Typography Normalization
+--------------------------------*/
+
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* ------------------------------------------------
+   VendorConnect Global Typography System
+------------------------------------------------ */
+
+:root {
+  /* Base font sizing (slightly smaller than default) */
+  font-size: 16px;
+
+  /* Font stack */
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* Type scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 0.95rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.35rem;
+  --text-2xl: 1.65rem;
+  --text-3xl: 2.2rem;
+}
+
+/* Global base */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  color: #111827;
+}
+
+/* Form controls inherit font */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* Headings */
+
+h1 {
+  font-size: var(--text-3xl);
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+}
+
+h3 {
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+h4 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+h5 {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+p {
+  font-size: var(--text-base);
+}
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+/* Make form controls inherit font */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* Consistent heading rendering */
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.2;
+}
+
+/* Improve font rendering */
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.card,
+.panel {
+  padding: var(--space-lg);
+  border-radius: 18px;
+  background: #fff;
+}
+
+section {
+  margin-bottom: var(--space-xl);
+}
+
+button {
+  padding: 8px 14px;
+  font-weight: 500;
+}
+
+.stat-card {
+  padding: 18px 20px;
+  border-radius: 16px;
+}
+
+.container {
+  max-width: 1280px;
+}
+
+:root {
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 6px 18px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 12px 30px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 18px 42px rgba(15, 23, 42, 0.12);
+  --border-soft: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.card,
+.panel,
+.surface {
+  background: #fff;
+  border: var(--border-soft);
+  box-shadow: var(--shadow-sm);
+}
+
+.card:hover,
+.panel:hover,
+.surface:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.stat-card {
+  padding: 16px 20px;
+}
+
+.stat-number {
+  font-size: 2.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.event-card {
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+Page background
+   └ container
+        └ cards
+
+
+/* ------------------------------------------------
+   Layout Rhythm System
+------------------------------------------------ */
+
+:root {
+  --space-xs: 6px;
+  --space-sm: 10px;
+  --space-md: 16px;
+  --space-lg: 22px;
+  --space-xl: 30px;
+  --space-xxl: 42px;
+}
+/* ------------------------------------------------
+   Global UI Polish
+------------------------------------------------ */
+
+:root {
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 20px;
+
+  --shadow-soft: 0 4px 18px rgba(15, 23, 42, 0.06);
+  --shadow-hover: 0 10px 28px rgba(15, 23, 42, 0.1);
+
+  --border-soft: 1px solid rgba(15, 23, 42, 0.08);
+  --surface: #ffffff;
+}
+
+/* Smoother rendering */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Better media defaults */
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* Make cards/panels feel more polished */
+.card,
+.panel,
+section,
+aside {
+  border-radius: var(--radius-lg);
+}
+
+/* Better default button feel */
+button {
+  border-radius: var(--radius-md);
+  transition:
+    transform 0.14s ease,
+    box-shadow 0.14s ease,
+    opacity 0.14s ease,
+    background-color 0.14s ease,
+    border-color 0.14s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+/* Inputs feel more premium */
+input,
+select,
+textarea {
+  border-radius: var(--radius-md);
+}
+
+/* Cleaner focus states */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.35);
+  outline-offset: 2px;
+}font-size
+/* Optional app-wide base tweaks */
+html,
+body,
+#root {
+  height: 100%;
+}
+html {
+  font-size: 20px;
+}
+
+body {
+  background:
+    radial-gradient(circle at 15% 10%, rgba(99,102,241,0.06), transparent 25%),
+    radial-gradient(circle at 85% 5%, rgba(168,85,247,0.06), transparent 30%),
+    linear-gradient(180deg, #f8fafc 0%, #f3f6fb 100%);
+}
+
+.card,
+.panel {
+  background: white;
+  border: 1px solid rgba(15,23,42,0.06);
+  box-shadow: 0 10px 28px rgba(15,23,42,0.06);
+}

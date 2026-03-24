@@ -1,0 +1,188 @@
+﻿name: Tests (All Branches)
+
+on:
+  push:
+  pull_request:
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  linux-tests:
+    name: Linux • Python 3.11 • Postgres+Redis
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: Tazvendor
+          POSTGRES_USER: postgres
+          POSTGRES_DB: eventdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d eventdb"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping || exit 1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      DATABASE_URL: postgresql+psycopg2://postgres:Tazvendor@localhost:5432/eventdb
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.cfg') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system clients
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip install ".[dev]" || pip install .
+          else
+            echo "No dependency manifest found" && exit 1
+          fi
+
+      - name: Wait for DB & apply migrations (if present)
+        run: |
+          for i in {1..30}; do
+            psql "host=localhost user=postgres password=Tazvendor dbname=eventdb" -c "select 1" && break || sleep 2
+          done
+          if [ -f alembic.ini ]; then
+            alembic upgrade head
+          else
+            echo "alembic.ini not found; skipping migrations"
+          fi
+
+      - name: Sanity check DB URL and connectivity
+        run: |
+          python - <<'PY'
+          import os, sqlalchemy as sa
+          url = os.environ.get("DATABASE_URL")
+          print("DB URL =", url)
+          e = sa.create_engine(url, pool_pre_ping=True)
+          with e.connect() as c:
+              v = c.exec_driver_sql("select version()").scalar()
+              print("Connected OK:", v)
+          PY
+
+      - name: Run tests with coverage (Linux full)
+        run: |
+          pip install pytest-cov coverage[toml] || true
+          pytest -q --maxfail=1 --disable-warnings \
+                 --cov=app --cov=main --cov-report=xml --cov-report=html
+
+      - name: Upload HTML coverage (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-linux
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload coverage to Codecov (Linux)
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: linux
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  windows-tests:
+    name: Windows • Python 3.11 • SQLite
+    runs-on: windows-latest
+
+    env:
+      DATABASE_URL: sqlite:///./ci_test.db
+      REDIS_URL: ""
+      RATE_LIMIT_DISABLED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.cfg') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements-dev.txt) {
+            pip install -r requirements-dev.txt
+          } elseif (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          } elseif (Test-Path pyproject.toml) {
+            pip install ".[dev]" 2>$null; if ($LASTEXITCODE -ne 0) { pip install . }
+          } else {
+            Write-Error "No dependency manifest found"; exit 1
+          }
+
+      - name: Run tests with coverage (Windows)
+        shell: pwsh
+        run: |
+          pip install pytest-cov coverage[toml] | Out-Null
+          pytest -q --maxfail=1 --disable-warnings `
+                 --cov=app --cov=main --cov-report=xml --cov-report=html
+
+      - name: Upload HTML coverage (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-windows
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload coverage to Codecov (Windows)
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: windows
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

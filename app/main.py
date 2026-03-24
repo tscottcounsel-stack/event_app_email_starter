@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.routers import vendors
+
+load_dotenv(override=True)
+
+
+RUNTIME_DIR = Path("/tmp/vendorconnect")
+DATA_DIR = RUNTIME_DIR / "data"
+UPLOADS_DIR = RUNTIME_DIR / "uploads"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
+    try:
+        mod = __import__(module_path, fromlist=[attr])
+        r = getattr(mod, attr, None)
+        if r is not None:
+            app.include_router(r)
+    except Exception as e:
+        print(f"FAILED TO LOAD {module_path}: {e}")
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="VendorConnect API")
+
+    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+    # ✅ IMPORT + RUN DB INIT HERE
+    from app.db import init_db
+
+    init_db()
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/")
+    def root():
+        return {"status": "ok"}
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    _try_include(app, "app.routers.admin", "router")
+    _try_include(app, "app.routers.events", "router")
+    _try_include(app, "app.routers.applications", "router")
+    _try_include(app, "app.routers.requirement_templates", "router")
+    _try_include(app, "app.routers.reviews", "router")
+    _try_include(app, "app.routers.auth", "router")
+    _try_include(app, "app.routers.vendors", "router")
+    _try_include(app, "app.routers.stats", "router")
+    _try_include(app, "app.routers.check_fk", "router")
+
+    return app
+
+
+app = create_app()
