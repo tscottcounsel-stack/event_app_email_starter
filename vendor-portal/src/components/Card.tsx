@@ -26,3 +26,6 @@ export function CardBody({
 }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("p-5", className)} {...props} />;
 }
+
+
+

@@ -144,7 +144,7 @@ type DiagramResponse = {
 };
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 /* ---------------- Visual helpers (match Organizer tile feel) ---------------- */
 
@@ -1438,3 +1438,6 @@ Your request will be submitted and marked as awaiting organizer approval.`
     </div>
   );
 }
+
+
+

@@ -5,7 +5,7 @@ import { readSession } from "../auth/authStorage";
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE ||
   (import.meta as any).env?.VITE_API_BASE_URL ||
-  "https://event-app-api-production-f382.up.railway.app";
+  "https://event-app-api-production-ccce.up.railway.app";
 
 type VendorEvent = {
   id?: number | string;
@@ -253,3 +253,6 @@ export default function VendorEventsPage() {
     </div>
   );
 }
+
+
+

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+const API_BASE = (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 type VendorProfile = {
   businessName: string;
@@ -680,3 +680,6 @@ export default function VendorBusinessProfileSetupPage() {
     </div>
   );
 }
+
+
+

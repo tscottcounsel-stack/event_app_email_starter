@@ -77,3 +77,6 @@ export function saveApplication(app: Application) {
   localStorage.setItem(appsKey(app.eventId), JSON.stringify(list));
   return app;
 }
+
+
+

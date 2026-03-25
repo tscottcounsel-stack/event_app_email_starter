@@ -39,7 +39,7 @@ type BoothCategory = {
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE ||
   (import.meta as any).env?.VITE_API_BASE_URL ||
-  "http://127.0.0.1:8002";
+  "https://event-app-api-production-ccce.up.railway.app";
 
 async function fetchRequirements(eventId: string) {
   const res = await fetch(`${API_BASE}/events/${encodeURIComponent(eventId)}/requirements`);
@@ -354,3 +354,6 @@ export default function VendorEventApplyPage() {
     </div>
   );
 }
+
+
+

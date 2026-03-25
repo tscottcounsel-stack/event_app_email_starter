@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE_URL ||
   (import.meta as any).env?.VITE_API_BASE ||
-  "http://127.0.0.1:8002";
+  "https://event-app-api-production-ccce.up.railway.app";
 
 const VERIFICATION_FORM_STORAGE_KEY = "vendor_verification_form";
 
@@ -533,3 +533,6 @@ export default function VendorGetVerifiedPage() {
     </div>
   );
 }
+
+
+

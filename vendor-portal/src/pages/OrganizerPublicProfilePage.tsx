@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE_URL ||
   (import.meta as any).env?.VITE_API_BASE ||
-  "http://127.0.0.1:8002";
+  "https://event-app-api-production-ccce.up.railway.app";
 
 type OrganizerReview = {
   id?: number;
@@ -713,3 +713,6 @@ export default function OrganizerPublicProfilePage() {
     </div>
   );
 }
+
+
+

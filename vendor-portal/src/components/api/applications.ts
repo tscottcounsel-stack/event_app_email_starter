@@ -2,7 +2,7 @@
 import { readSession } from "../../auth/authStorage";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 export type UploadedDocMeta = {
   name: string;
@@ -475,3 +475,6 @@ export async function organizerConfirmPayment(args: {
 
   return unwrapApplication(data);
 }
+
+
+

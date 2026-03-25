@@ -6,7 +6,7 @@ import { getAppIdFromSearch } from "../utils/applicationId";
 const API_BASE =
   (import.meta as any).env?.VITE_API_BASE ||
   (import.meta as any).env?.VITE_API_BASE_URL ||
-  "http://127.0.0.1:8002";
+  "https://event-app-api-production-ccce.up.railway.app";
 
 type EventModel = {
   id?: number | string;
@@ -283,3 +283,6 @@ export default function VendorEventDetailsPage() {
     </div>
   );
 }
+
+
+

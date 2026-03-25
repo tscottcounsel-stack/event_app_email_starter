@@ -56,3 +56,4 @@ def login(payload: dict, db: Session = Depends(get_db)):
 @router.get("/me")
 def get_me(current_user: User = Depends(...)):
     return current_user
+

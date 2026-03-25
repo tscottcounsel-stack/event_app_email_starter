@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8002";
+  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 type DashboardStat = {
   label: string;
@@ -694,3 +694,6 @@ export default function AdminDashboardPage() {
     </div>
   );
 }
+
+
+
