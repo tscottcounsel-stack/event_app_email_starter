@@ -85,7 +85,7 @@ export default function VendorEventApplyPage() {
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
 
   const rawAppId =
-    cleanAppId(searchParams.get("appId")) || cleanAppId(searchParams.get("appld")) || "";
+    cleanAppId(searchParams.get("appId")) || "";
 
   const appIdFromUrl = useMemo(() => coerceNumericAppId(rawAppId), [rawAppId]);
   const boothIdFromUrl = useMemo(
