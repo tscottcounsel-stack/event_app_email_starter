@@ -30,17 +30,17 @@ def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="VendorConnect API")
 
-  app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://eventappemailstarter-production.up.railway.app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://your-frontend-domain.up.railway.app",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
@@ -70,4 +70,5 @@ def create_app() -> FastAPI:
     return app
 
 
+app = create_app()
 app = create_app()
