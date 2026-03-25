@@ -1,6 +1,5 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -8,10 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import vendors
-
 load_dotenv(override=True)
-
 
 RUNTIME_DIR = Path("/tmp/vendorconnect")
 DATA_DIR = RUNTIME_DIR / "data"
@@ -34,13 +30,6 @@ def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="VendorConnect API")
 
-    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-
-    # ? IMPORT + RUN DB INIT HERE
-    from app.db import init_db
-
-    init_db()
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -54,6 +43,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+    from app.db import init_db
+    init_db()
 
     @app.get("/")
     def root():
@@ -70,8 +64,10 @@ def create_app() -> FastAPI:
     _try_include(app, "app.routers.reviews", "router")
     _try_include(app, "app.routers.auth", "router")
     _try_include(app, "app.routers.vendors", "router")
-    #_try_include(app, "app.routers.stats", "router")
-    _try_include(app, "app.routers.check_fk", "router")
+
+    # Temporarily disabled because these modules currently fail to load:
+    # _try_include(app, "app.routers.stats", "router")
+    # _try_include(app, "app.routers.check_fk", "router")
 
     return app
 
