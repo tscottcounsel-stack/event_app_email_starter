@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -30,15 +30,13 @@ def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="VendorConnect API")
 
-   from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # TEMPORARY
-    allow_credentials=False,  # MUST be False when using "*"
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # temporary test
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
@@ -69,4 +67,3 @@ app.add_middleware(
 
 
 app = create_app()
-
