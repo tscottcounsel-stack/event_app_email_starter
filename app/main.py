@@ -70,7 +70,7 @@ def create_app() -> FastAPI:
     _try_include(app, "app.routers.reviews", "router")
     _try_include(app, "app.routers.auth", "router")
     _try_include(app, "app.routers.vendors", "router")
-    _try_include(app, "app.routers.stats", "router")
+    #_try_include(app, "app.routers.stats", "router")
     _try_include(app, "app.routers.check_fk", "router")
 
     return app
