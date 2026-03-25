@@ -326,7 +326,6 @@ export default function BoothMapEditor() {
   const vendorAppIdRaw = (
     searchParams.get("appId") ||
     searchParams.get("applicationId") ||
-    searchParams.get("appld") ||
     ""
   ).trim();
 
@@ -2613,6 +2612,8 @@ const overlayDetail = overlayName
     </div>
   );
 }
+
+
 
 
 
