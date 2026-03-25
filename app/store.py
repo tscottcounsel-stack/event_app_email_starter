@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Any, Dict
 
 _DATA_PATH = Path("/tmp/vendorconnect/data/_data_store.json")
+# 🔥 FORCE RESET STORE ON STARTUP (TEMPORARY)
+if _DATA_PATH.exists():
+    try:
+        _DATA_PATH.unlink()
+        print("🔥 Store reset on startup")
+    except Exception as e:
+        print(f"Failed to reset store: {e}")
 _LOCK = threading.RLock()
 
 
