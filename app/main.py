@@ -63,12 +63,7 @@ def create_app() -> FastAPI:
     _try_include(app, "app.routers.auth", "router")
     _try_include(app, "app.routers.vendors", "router")
 
-    # Temporarily disabled because these modules currently fail to load:
-    # _try_include(app, "app.routers.stats", "router")
-    # _try_include(app, "app.routers.check_fk", "router")
-
     return app
 
 
-app = create_app()
 app = create_app()
