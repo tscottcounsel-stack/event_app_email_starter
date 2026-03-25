@@ -12,17 +12,28 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 # ======================================================================================
 # App setup
 # ======================================================================================
-app = FastAPI(title="Event Organizer-Vendor API")
-# Important: weâ€™ll keep strict paths, but we register BOTH variants where it matters.
-app.router.redirect_slashes = False
+from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://eventappemailstarter-production.up.railway.app",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from fastapi import Request, Response
 
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "https://eventappemailstarter-production.up.railway.app"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    return response
 
 # --------------------------------------------------------------------------------------
 # Debug helpers: confirm weâ€™re hitting THIS file and list routes.
