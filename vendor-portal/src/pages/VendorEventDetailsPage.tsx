@@ -4,8 +4,8 @@ import { readSession } from "../auth/authStorage";
 import { getAppIdFromSearch } from "../utils/applicationId";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE ||
-  (import.meta as any).env?.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 type EventModel = {
@@ -283,6 +283,8 @@ export default function VendorEventDetailsPage() {
     </div>
   );
 }
+
+
 
 
 

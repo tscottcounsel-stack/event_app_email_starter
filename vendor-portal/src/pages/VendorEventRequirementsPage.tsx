@@ -5,8 +5,8 @@ import { readSession } from "../auth/authStorage";
 import * as ApplicationsAPI from "../components/api/applications";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE ||
-  (import.meta as any).env?.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 function normalizeId(v: any) {
@@ -639,6 +639,8 @@ export default function VendorEventRequirementsPage() {
     </div>
   );
 }
+
+
 
 
 

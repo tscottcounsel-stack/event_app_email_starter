@@ -22,7 +22,7 @@ import {
 import { buildAuthHeaders } from "../auth/authHeaders";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 /* ---------------- Types ---------------- */
 
@@ -1371,6 +1371,8 @@ export default function OrganizerEventDetailsPage() {
     </div>
   );
 }
+
+
 
 
 

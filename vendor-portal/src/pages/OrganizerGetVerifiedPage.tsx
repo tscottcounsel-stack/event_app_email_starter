@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE_URL ||
-  (import.meta as any).env?.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 type VerificationDocument = {
@@ -511,6 +511,8 @@ export default function OrganizerGetVerifiedPage() {
     </div>
   );
 }
+
+
 
 
 

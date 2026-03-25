@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { buildAuthHeaders } from "../auth/authHeaders";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 type PaymentItem = {
   id?: number | string;
@@ -821,6 +821,8 @@ export default function AdminPaymentsPage() {
     </div>
   );
 }
+
+
 
 
 

@@ -3,8 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE ||
-  (import.meta as any).env?.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 type VendorEvent = {
@@ -253,6 +253,8 @@ export default function VendorEventsPage() {
     </div>
   );
 }
+
+
 
 
 

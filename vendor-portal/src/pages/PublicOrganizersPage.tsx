@@ -18,7 +18,7 @@ type RatingMap = {
   };
 };
 
-const API_BASE = "http://localhost:8002";
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 function TopNav() {
   return (
@@ -465,6 +465,8 @@ export default function PublicOrganizersPage() {
     </div>
   );
 }
+
+
 
 
 

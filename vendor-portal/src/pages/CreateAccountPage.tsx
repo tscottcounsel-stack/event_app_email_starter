@@ -4,7 +4,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 type Role = "vendor" | "organizer";
 
-const API_BASE = "https://event-app-api-production-ccce.up.railway.app";
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 type AgreementItem = {
   id: string;
@@ -629,6 +629,8 @@ export default function CreateAccountPage() {
     </div>
   );
 }
+
+
 
 
 

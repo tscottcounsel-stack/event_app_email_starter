@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE_URL ||
-  (import.meta as any).env?.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 type OrganizerReview = {
@@ -713,6 +713,8 @@ export default function OrganizerPublicProfilePage() {
     </div>
   );
 }
+
+
 
 
 

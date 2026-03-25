@@ -37,8 +37,8 @@ type BoothCategory = {
 };
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE ||
-  (import.meta as any).env?.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 async function fetchRequirements(eventId: string) {
@@ -354,6 +354,8 @@ export default function VendorEventApplyPage() {
     </div>
   );
 }
+
+
 
 
 

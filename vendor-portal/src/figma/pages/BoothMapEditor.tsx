@@ -69,7 +69,7 @@ type OrganizerApp = {
 };
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 const INVITE_STORAGE_KEY = "vendorconnect_invites";
 const INVITE_SESSION_KEY = "vendorconnect_invite_id";
@@ -2567,6 +2567,8 @@ const overlayDetail = overlayName
     </div>
   );
 }
+
+
 
 
 

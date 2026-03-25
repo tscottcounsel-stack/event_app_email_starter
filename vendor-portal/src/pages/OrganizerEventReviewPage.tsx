@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-const API_BASE = "https://event-app-api-production-ccce.up.railway.app";
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 type RequirementsResponse = {
   data: any;
@@ -237,6 +237,8 @@ const hintBox: React.CSSProperties = {
   fontSize: 13,
   opacity: 0.9,
 };
+
+
 
 
 

@@ -2,7 +2,7 @@
 import { readSession } from "../../../auth/authStorage";
 
 const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
 export type Booth = {
   id: string;
@@ -175,6 +175,8 @@ export async function getPublicEventDiagram(
 export const getDiagram = async (eventId: number) => getEventDiagram(eventId);
 export const saveDiagram = async (eventId: number, payload: DiagramResponse) =>
   saveEventDiagram(eventId, payload.diagram, payload.version);
+
+
 
 
 

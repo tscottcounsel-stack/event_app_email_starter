@@ -7,7 +7,7 @@ import {
   type AuthSession,
 } from "./authStorage";
 
-const API_BASE = "https://event-app-api-production-ccce.up.railway.app";
+const API_BASE = import.meta.env.VITE_API_BASE;
 
 type AuthState = {
   session: AuthSession | null;
@@ -225,6 +225,8 @@ export function useAuth() {
   if (!v) throw new Error("useAuth must be used within AuthProvider");
   return v;
 }
+
+
 
 
 
