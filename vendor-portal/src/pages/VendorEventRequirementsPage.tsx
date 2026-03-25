@@ -64,7 +64,7 @@ export default function VendorEventRequirementsPage() {
   const eventId = useMemo(() => normalizeId((params as any).eventId), [params]);
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
 
-  const rawAppId = searchParams.get("appId") || searchParams.get("appld") || "";
+  const rawAppId = searchParams.get("appId") || "";
   const appId = useMemo(() => coerceNumericAppId(rawAppId), [rawAppId]);
   const boothIdFromUrl = searchParams.get("boothId") || "";
 

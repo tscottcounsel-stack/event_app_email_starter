@@ -27,7 +27,6 @@ export function getAppIdFromSearch(
   const raw =
     search.get("appId") ||
     search.get("applicationId") ||
-    search.get("appld") || // legacy typo
     "";
 
   return resolveApplicationId(raw);
