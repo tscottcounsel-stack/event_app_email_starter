@@ -335,7 +335,49 @@ export default function BoothMapEditor() {
 
   const isVendorRoute = location.pathname.startsWith("/vendor/");
   const vendorMode = Boolean(isVendorRoute && !pickerMode);
+  useEffect(() => {
+  if (!vendorMode) return;
+  if (!eventId) return;
+  if (vendorAppId) return;
 
+  let cancelled = false;
+
+  async function fixAppId() {
+    try {
+      const draft = await vendorGetOrCreateDraftApplication(Number(eventId));
+
+      const resolvedDraftId =
+        (draft as any)?.id ??
+        (draft as any)?.application?.id ??
+        (draft as any)?.applicationId ??
+        (draft as any)?.application_id ??
+        (draft as any)?.data?.id ??
+        (draft as any)?.data?.application?.id ??
+        (draft as any)?.data?.applicationId ??
+        (draft as any)?.data?.application_id;
+
+      const numericId = Number(resolvedDraftId);
+      if (!numericId || Number.isNaN(numericId)) return;
+      if (cancelled) return;
+
+      const params = new URLSearchParams(location.search);
+      params.set("appId", String(numericId));
+
+      navigate(
+        `/vendor/events/${encodeURIComponent(String(eventId))}/map?${params.toString()}`,
+        { replace: true }
+      );
+    } catch (e) {
+      console.error("Failed to self-heal appId", e);
+    }
+  }
+
+  fixAppId();
+
+  return () => {
+    cancelled = true;
+  };
+}, [vendorMode, vendorAppId, eventId, location.search, navigate]);
   const [isPublished, setIsPublished] = useState<boolean>(false);
   const [layoutOverrideUntil, setLayoutOverrideUntil] = useState<number | null>(null);
 
