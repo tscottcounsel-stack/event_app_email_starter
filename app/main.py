@@ -36,7 +36,7 @@ def create_app() -> FastAPI:
 
     app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
-    # ✅ IMPORT + RUN DB INIT HERE
+    # ? IMPORT + RUN DB INIT HERE
     from app.db import init_db
 
     init_db()
@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:5173",
             "http://localhost:3000",
             "http://127.0.0.1:3000",
+            "https://eventappemailstarter-production.up.railway.app",
         ],
         allow_credentials=True,
         allow_methods=["*"],
