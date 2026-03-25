@@ -1,10 +1,10 @@
-// src/pages/CreateAccountPage.tsx
+﻿// src/pages/CreateAccountPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 type Role = "vendor" | "organizer";
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE || "https://YOUR-BACKEND-URL.up.railway.app";
+const API_BASE = "https://event-app-api-production-ccce.up.railway.app";
 
 type AgreementItem = {
   id: string;
@@ -164,7 +164,7 @@ function RoleCard({
           <ul className="mt-5 space-y-2 text-sm font-semibold text-slate-700">
             {bullets.map((b) => (
               <li key={b} className="flex items-start gap-3">
-                <span className={active ? "text-indigo-600" : "text-slate-400"}>•</span>
+                <span className={active ? "text-indigo-600" : "text-slate-400"}>â€¢</span>
                 <span>{b}</span>
               </li>
             ))}
@@ -172,7 +172,7 @@ function RoleCard({
 
           {active ? (
             <div className="mt-6 inline-flex items-center gap-2 text-sm font-black text-indigo-700">
-              <span className="grid h-6 w-6 place-items-center rounded-full bg-indigo-600 text-white">✓</span>
+              <span className="grid h-6 w-6 place-items-center rounded-full bg-indigo-600 text-white">âœ“</span>
               Selected
             </div>
           ) : null}
@@ -207,7 +207,7 @@ function AgreementRow({
           ].join(" ")}
           aria-label={checked ? "Checked" : "Unchecked"}
         >
-          {checked ? "✓" : ""}
+          {checked ? "âœ“" : ""}
         </button>
 
         <div className="min-w-0 flex-1">
@@ -219,7 +219,7 @@ function AgreementRow({
             className="mt-2 inline-flex items-center gap-2 text-sm font-bold text-indigo-700 hover:text-indigo-800"
           >
             View details
-            <span className={["transition", open ? "rotate-180" : ""].join(" ")}>▾</span>
+            <span className={["transition", open ? "rotate-180" : ""].join(" ")}>â–¾</span>
           </button>
 
           {open ? <div className="mt-3 text-sm font-semibold text-slate-600">{details}</div> : null}
@@ -241,7 +241,7 @@ export default function CreateAccountPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  // If you arrive from /get-started → we often route to /create-account?role=vendor|organizer
+  // If you arrive from /get-started â†’ we often route to /create-account?role=vendor|organizer
   const roleFromUrl = useMemo(() => normalizeRole(searchParams.get("role")), [searchParams]);
 
   const [step, setStep] = useState<1 | 2 | 3>(roleFromUrl ? 2 : 1);
@@ -355,7 +355,7 @@ export default function CreateAccountPage() {
         <div className="mx-auto max-w-6xl px-6 py-12">
           <div className="flex justify-center">
             <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-white px-4 py-2 text-sm font-extrabold text-indigo-700 shadow-sm">
-              <span className="text-indigo-600">🛡️</span> Verified Partners Only
+              <span className="text-indigo-600">ðŸ›¡ï¸</span> Verified Partners Only
             </div>
           </div>
 
@@ -371,7 +371,7 @@ export default function CreateAccountPage() {
                 onClick={() => navigate("/get-started")}
                 className="inline-flex items-center gap-2 text-sm font-extrabold text-slate-600 hover:text-slate-900"
               >
-                ← Back to role selection
+                â† Back to role selection
               </button>
 
               <div className="flex items-center gap-6">
@@ -453,7 +453,7 @@ export default function CreateAccountPage() {
                           role === "vendor" ? "bg-indigo-50 text-indigo-700" : "bg-purple-50 text-purple-700",
                         ].join(" ")}
                       >
-                        🛡️
+                        ðŸ›¡ï¸
                       </div>
                       <div className="min-w-0">
                         <div className="text-2xl font-black text-slate-900">
@@ -520,7 +520,7 @@ export default function CreateAccountPage() {
               {/* STEP 3: DETAILS */}
               {step === 3 ? (
                 <>
-                  <div className="text-sm font-bold text-slate-500">Step 3 of 3 — Account Details</div>
+                  <div className="text-sm font-bold text-slate-500">Step 3 of 3 â€” Account Details</div>
 
                   <div className="mt-4">
                     <div className="text-4xl font-black text-slate-900">Account Details</div>
