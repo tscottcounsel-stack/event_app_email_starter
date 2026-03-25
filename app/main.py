@@ -31,16 +31,16 @@ def create_app() -> FastAPI:
     app = FastAPI(title="VendorConnect API")
 
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "https://eventappemailstarter-production.up.railway.app",
-]
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://eventappemailstarter-production.up.railway.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
     app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
