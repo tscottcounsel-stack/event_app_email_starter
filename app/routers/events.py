@@ -1090,3 +1090,14 @@ def get_event_stats(event_id: int):
         "booths_remaining": booths_remaining,
         "approval_rate": approval_rate,
     }
+
+@router.post("/dev/reset")
+def dev_reset():
+    from app.store import _EVENTS, _REQUIREMENTS, _DIAGRAMS, save_store
+
+    _EVENTS.clear()
+    _REQUIREMENTS.clear()
+    _DIAGRAMS.clear()
+    save_store()
+
+    return {"ok": True, "message": "Store reset"}
