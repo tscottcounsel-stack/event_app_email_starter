@@ -815,7 +815,7 @@ export default function OrganizerEventRequirementsPage() {
     const payload = normalizeForApi(model);
     const attempts: Array<{ method: "PUT" | "POST"; path: string }> = [
       { method: "PUT", path: API.organizerPut(eid) },
-      { method: "POST", path: API.organizerPost(eid) },
+      { method: "PUT", path: API.organizerPut(eid) },
     ];
 
     for (const attempt of attempts) {
@@ -1604,6 +1604,7 @@ export default function OrganizerEventRequirementsPage() {
     </div>
   );
 }
+
 
 
 
