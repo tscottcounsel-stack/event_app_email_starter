@@ -1,5 +1,4 @@
-﻿import os
-# app/store.py
+﻿# app/store.py
 from __future__ import annotations
 
 import json
@@ -10,7 +9,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/vendorconnect/data"))
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DATA_PATH = DATA_DIR / "_data_store.json"
@@ -399,5 +399,4 @@ def get_or_create_application(
         _APPLICATIONS[app_id] = application
         save_store()
         return application
-
 
