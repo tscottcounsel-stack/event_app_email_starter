@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import logging
 import os
 from pathlib import Path
@@ -66,17 +66,12 @@ allowed_origins = [
 if frontend_origin:
     allowed_origins.append(frontend_origin)
 
-# Remove duplicates while preserving order
-allowed_origins = list(dict.fromkeys([o for o in allowed_origins if o]))
+allowed_origins = list(dict.fromkeys([origin for origin in allowed_origins if origin]))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_origin_regex=r"https://.*\.up\.railway\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -109,4 +104,3 @@ for module_name in [
     "app.routers.vendors",
 ]:
     _try_include(app, module_name, "router")
-
