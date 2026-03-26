@@ -95,23 +95,13 @@ def health():
 
 
 for module_name in [
-    "app.routers.auth",
     "app.routers.admin",
     "app.routers.events",
     "app.routers.applications",
-    "app.routers.organizer_applications",
-    "app.routers.organizer_diagram",
-    "app.routers.diagrams",
-    "app.routers.layout",
-    "app.routers.requirements",
-    "app.routers.requirements_alias",
     "app.routers.requirement_templates",
     "app.routers.reviews",
-    "app.routers.slots",
-    "app.routers.users",
+    "auth",
     "app.routers.vendors",
-    "app.routers.vendors_v2",
 ]:
     _try_include(app, module_name, "router")
-
 
