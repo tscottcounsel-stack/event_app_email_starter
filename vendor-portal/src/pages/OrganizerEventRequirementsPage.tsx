@@ -1,1580 +1,820 @@
-
 // src/pages/OrganizerEventRequirementsPage.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { useAuth } from "../auth/AuthContext";
-import PaymentSettingsSection, {
-  type PaymentSettings as OffPlatformPaymentSettings,
-} from "../components/PaymentSettingsSection";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { buildAuthHeaders } from "../auth/authHeaders";
 
-type BoothCategory = {
-  id: string;
-  name: string;
-  baseSize: string;
-  basePrice: number;
-  additionalPerFt?: number;
-  cornerPremium?: number;
-  fireMarshalFee?: number;
-  electricalNote?: string;
-};
-
-type VendorRestriction = {
-  id: string;
-  text: string;
-};
-
-type ComplianceRequirement = {
-  id: string;
-  text: string;
-  required: boolean;
-};
-
-type DocumentRequirement = {
-  id: string;
-  name: string;
-  required: boolean;
-  dueBy?: string;
-};
-
-type PaymentSettings = OffPlatformPaymentSettings;
-
-type RequirementsModel = {
-  version: string;
-  eventId: number;
-  boothCategories: BoothCategory[];
-  customRestrictions: VendorRestriction[];
-  complianceItems: ComplianceRequirement[];
-  documentRequirements: DocumentRequirement[];
-  paymentSettings: PaymentSettings;
-  updatedAt?: string;
-};
-
-type EventTemplate = {
-  id: string;
-  name: string;
-  subtitle: string;
-  category: string;
-  boothDefaults: BoothCategory[];
-  restrictionQuickAdds: string[];
-  complianceQuickAdds: string[];
-  documentQuickAdds: string[];
-  restrictionsDefaults: string[];
-  complianceDefaults: Array<{ text: string; required: boolean }>;
-  documentsDefaults: Array<{ name: string; required: boolean; dueBy?: string }>;
-  paymentDefaults: PaymentSettings;
-};
-
-type SavedRequirementTemplate = {
-  id: string;
-  name: string;
-  category?: string;
-  payload: RequirementsModel;
-  updatedAt?: string;
-};
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
-const LS_EVENT_REQ_PREFIX = "organizer:event";
-
-const API = {
-  organizerGet: (eventId: number) => `/organizer/events/${eventId}/requirements`,
-  organizerPut: (eventId: number) => `/organizer/events/${eventId}/requirements`,
-  organizerPost: (eventId: number) => `/organizer/events/${eventId}/requirements`,
-  publicGet: (eventId: number) => `/events/${eventId}/requirements`,
-
-  templateList: "/organizer/requirement-templates",
-  templateCreate: "/organizer/requirement-templates",
-  templateUpdate: (templateId: string) => `/organizer/requirement-templates/${templateId}`,
-  templateDelete: (templateId: string) => `/organizer/requirement-templates/${templateId}`,
-  templateRead: (templateId: string) => `/organizer/requirement-templates/${templateId}`,
+type RequirementItem = {
+  id: string;
+  text: string;
+  required?: boolean;
 };
 
-function uid(prefix = "id") {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
-}
+type DocumentItem = {
+  id: string;
+  name: string;
+  required?: boolean;
+  dueBy?: string;
+};
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
+type RequirementTemplate = {
+  id: string;
+  name: string;
+  description?: string;
+  compliance: RequirementItem[];
+  documents: DocumentItem[];
+};
 
-function toNumber(v: string, fallback = 0) {
-  const s = (v ?? "").trim();
-  if (s === "") return fallback;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function fetchHeaders(accessToken?: string) {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  return headers;
-}
-
-function saveHeaders(accessToken?: string) {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
+type RequirementsPayload = {
+  requirements: {
+    compliance: RequirementItem[];
+    documents: DocumentItem[];
   };
-  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  return headers;
+  version: number;
+};
+
+const BUILT_IN_TEMPLATES: RequirementTemplate[] = [
+  {
+    id: "tech-expo-exhibitions",
+    name: "Tech / Startup Expo — Exhibitions",
+    description: "Demo-heavy, power-friendly exhibitor setup.",
+    compliance: [
+      { id: "business_license", text: "Business license or registration", required: true },
+      { id: "insurance", text: "Certificate of insurance", required: true },
+      { id: "electrical_safety", text: "Electrical equipment safety compliance", required: true },
+    ],
+    documents: [
+      { id: "insurance_doc", name: "Insurance certificate", required: true },
+      { id: "setup_plan", name: "Booth setup plan", required: false },
+    ],
+  },
+  {
+    id: "food-market",
+    name: "Food Market / Festival",
+    description: "Food service compliance and health coverage.",
+    compliance: [
+      { id: "business_license", text: "Business license", required: true },
+      { id: "food_permit", text: "Temporary food permit", required: true },
+      { id: "liability", text: "General liability insurance", required: true },
+    ],
+    documents: [
+      { id: "menu", name: "Menu / product list", required: false },
+      { id: "permit_doc", name: "Food permit upload", required: true },
+    ],
+  },
+  {
+    id: "art-market",
+    name: "Art / Maker Market",
+    description: "Simple handmade goods / maker event default.",
+    compliance: [
+      { id: "business_license", text: "Business registration (if applicable)", required: false },
+      { id: "original_work", text: "All work must be original or properly licensed", required: true },
+    ],
+    documents: [{ id: "product_photos", name: "Sample product photos", required: false }],
+  },
+];
+
+function normalizeId(v: unknown) {
+  return String(v ?? "").trim();
 }
 
-async function fetchJson(path: string, opts: { accessToken?: string } = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: fetchHeaders(opts.accessToken),
-  });
-  const ct = res.headers.get("content-type") || "";
-  const isJson = ct.includes("application/json");
-  const data = isJson
-    ? await res.json().catch(() => null)
-    : await res.text().catch(() => null);
-
-  return { ok: res.ok, status: res.status, data };
-}
-
-async function saveJson(
-  method: "POST" | "PUT" | "DELETE",
-  path: string,
-  body: any,
-  opts: { accessToken?: string } = {}
-) {
-  const init: RequestInit = {
-    method,
-    headers: saveHeaders(opts.accessToken),
-  };
-
-  if (method !== "DELETE") {
-    init.body = JSON.stringify(body);
+function safeJsonParse<T = any>(value: string | null): T | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
   }
-
-  const res = await fetch(`${API_BASE}${path}`, init);
-  const ct = res.headers.get("content-type") || "";
-  const isJson = ct.includes("application/json");
-  const data = isJson
-    ? await res.json().catch(() => null)
-    : await res.text().catch(() => null);
-
-  return { ok: res.ok, status: res.status, data };
 }
 
-function normalizeIncomingRequirements(src: any) {
-  const root =
-    src?.requirements && typeof src.requirements === "object"
-      ? src.requirements
-      : src?.payload && typeof src.payload === "object"
-      ? src.payload
-      : src;
-
-  if (!root || typeof root !== "object") return {};
-
+function cloneTemplate(template: RequirementTemplate) {
   return {
-    boothCategories: Array.isArray(root.boothCategories)
-      ? root.boothCategories
-      : Array.isArray(root.booth_categories)
-      ? root.booth_categories
-      : [],
-    customRestrictions: Array.isArray(root.customRestrictions)
-      ? root.customRestrictions
-      : Array.isArray(root.custom_restrictions)
-      ? root.custom_restrictions
-      : [],
-    complianceItems: Array.isArray(root.complianceItems)
-      ? root.complianceItems
-      : Array.isArray(root.compliance_items)
-      ? root.compliance_items
-      : [],
-    documentRequirements: Array.isArray(root.documentRequirements)
-      ? root.documentRequirements
-      : Array.isArray(root.document_requirements)
-      ? root.document_requirements
-      : [],
-    paymentSettings:
-      root.paymentSettings ||
-      root.payment_settings ||
-      {},
-    updatedAt:
-      root.updatedAt ||
-      root.updated_at ||
-      src?.updatedAt ||
-      src?.updated_at ||
-      undefined,
+    compliance: template.compliance.map((c) => ({ ...c })),
+    documents: template.documents.map((d) => ({ ...d })),
   };
 }
 
-function toRequirementsModel(
-  eventId: number,
-  src: Partial<RequirementsModel> | null | undefined
-): RequirementsModel {
-  const incoming = normalizeIncomingRequirements(src);
-
-  const payment = incoming.paymentSettings as any;
-
-  return {
-    version: "event_requirements_v2",
-    eventId,
-    boothCategories: Array.isArray(incoming.boothCategories)
-      ? incoming.boothCategories.map((b: any) => ({
-          id: String(b?.id || uid("cat")),
-          name: String(b?.name || ""),
-          baseSize: String(b?.baseSize ?? b?.base_size ?? "10x10"),
-          basePrice: Number(b?.basePrice ?? b?.base_price ?? 0) || 0,
-          additionalPerFt: Number(b?.additionalPerFt ?? b?.additional_per_ft ?? 0) || 0,
-          cornerPremium: Number(b?.cornerPremium ?? b?.corner_premium ?? 0) || 0,
-          fireMarshalFee: Number(b?.fireMarshalFee ?? b?.fire_marshal_fee ?? 0) || 0,
-          electricalNote: String(b?.electricalNote ?? b?.electrical_note ?? ""),
-        }))
-      : [],
-    customRestrictions: Array.isArray(incoming.customRestrictions)
-      ? incoming.customRestrictions.map((r: any) => ({
-          id: String(r?.id || uid("r")),
-          text: String(r?.text || ""),
-        }))
-      : [],
-    complianceItems: Array.isArray(incoming.complianceItems)
-      ? incoming.complianceItems.map((c: any) => ({
-          id: String(c?.id || uid("c")),
-          text: String(c?.text || ""),
-          required: !!c?.required,
-        }))
-      : [],
-    documentRequirements: Array.isArray(incoming.documentRequirements)
-      ? incoming.documentRequirements.map((d: any) => ({
-          id: String(d?.id || uid("d")),
-          name: String(d?.name || ""),
-          required: !!d?.required,
-          dueBy: String(d?.dueBy ?? d?.due_by ?? ""),
-        }))
-      : [],
-    paymentSettings: {
-      enabled: !!payment?.enabled,
-      payment_url: String(payment?.payment_url || ""),
-      billing_contact_email: String(payment?.billing_contact_email || ""),
-      billing_contact_phone: String(payment?.billing_contact_phone || ""),
-      memo_instructions: String(payment?.memo_instructions || ""),
-      refund_policy: String(payment?.refund_policy || "No Refunds"),
-      payment_notes: String(payment?.payment_notes || ""),
-      due_by: String(payment?.due_by || ""),
-      deposit_type: String(payment?.deposit_type || "none"),
-      deposit_value:
-        payment?.deposit_value === null || payment?.deposit_value === undefined
-          ? null
-          : Number(payment.deposit_value) || 0,
-      methods:
-        payment?.methods && typeof payment.methods === "object"
-          ? payment.methods
-          : {},
-    } as any,
-    updatedAt: String(incoming.updatedAt || ""),
-  };
+function normalizeRequirementItems(list: any): RequirementItem[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => {
+      const text = String(item?.text || item?.label || "").trim();
+      const id = normalizeId(item?.id || text);
+      if (!text || !id) return null;
+      return { id, text, required: !!item?.required } as RequirementItem;
+    })
+    .filter(Boolean) as RequirementItem[];
 }
 
-function normalizeForApi(model: RequirementsModel) {
+function normalizeDocumentItems(list: any): DocumentItem[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => {
+      const name = String(item?.name || "").trim();
+      const id = normalizeId(item?.id || name);
+      if (!name || !id) return null;
+      return {
+        id,
+        name,
+        required: !!item?.required,
+        dueBy: item?.dueBy ? String(item.dueBy) : item?.due_by ? String(item.due_by) : undefined,
+      } as DocumentItem;
+    })
+    .filter(Boolean) as DocumentItem[];
+}
+
+function normalizeRequirementsPayload(raw: any): RequirementsPayload {
+  const req =
+    raw?.requirements && typeof raw.requirements === "object" ? raw.requirements : raw || {};
+
   return {
-    version: 2,
     requirements: {
-      booth_categories: model.boothCategories.map((b) => ({
-        id: b.id,
-        name: b.name,
-        base_size: b.baseSize,
-        base_price: b.basePrice,
-        additional_per_ft: b.additionalPerFt || 0,
-        corner_premium: b.cornerPremium || 0,
-        fire_marshal_fee: b.fireMarshalFee || 0,
-        electrical_note: b.electricalNote || "",
-      })),
-      custom_restrictions: model.customRestrictions.map((r) => ({
-        id: r.id,
-        text: r.text,
-      })),
-      compliance_items: model.complianceItems.map((c) => ({
-        id: c.id,
-        text: c.text,
-        required: !!c.required,
-      })),
-      document_requirements: model.documentRequirements.map((d) => ({
-        id: d.id,
-        name: d.name,
-        required: !!d.required,
-        due_by: d.dueBy || "",
-      })),
-      payment_settings: {
-        ...(model.paymentSettings as any),
-      },
-      updated_at: new Date().toISOString(),
+      compliance: normalizeRequirementItems(req?.compliance || []),
+      documents: normalizeDocumentItems(req?.documents || []),
     },
+    version: Number(raw?.version || req?.version || 1) || 1,
   };
 }
 
-function makeTemplatePayload(model: RequirementsModel) {
-  return {
-    boothCategories: model.boothCategories.map((b) => ({ ...b, id: uid("cat") })),
-    customRestrictions: model.customRestrictions.map((r) => ({ ...r, id: uid("r") })),
-    complianceItems: model.complianceItems.map((c) => ({ ...c, id: uid("c") })),
-    documentRequirements: model.documentRequirements.map((d) => ({ ...d, id: uid("d") })),
-    paymentSettings: { ...(model.paymentSettings as any) },
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function builtInTemplates(): EventTemplate[] {
-  const defaultPayment = {
-    enabled: true,
-    payment_url: "",
-    billing_contact_email: "",
-    billing_contact_phone: "",
-    memo_instructions: "",
-    refund_policy: "No Refunds",
-    payment_notes: "",
-    due_by: "",
-    deposit_type: "none",
-    deposit_value: null,
-    methods: {},
-  } as any;
-
-  return [
-    {
-      id: "retail_market",
-      name: "Retail Vendor Market",
-      subtitle: "General retail vendors and maker booths.",
-      category: "Marketplace / Retail",
-      boothDefaults: [
-        { id: uid("cat"), name: "Standard Booth", baseSize: "10x10", basePrice: 175, additionalPerFt: 10, cornerPremium: 35, fireMarshalFee: 0, electricalNote: "" },
-        { id: uid("cat"), name: "Premium Corner Booth", baseSize: "10x10", basePrice: 225, additionalPerFt: 10, cornerPremium: 50, fireMarshalFee: 0, electricalNote: "" },
-      ],
-      restrictionQuickAdds: ["No counterfeit goods", "No weapons or replicas", "No open flames", "No amplified music without approval"],
-      complianceQuickAdds: ["Setup must be complete before doors open", "Booth must remain staffed during event hours", "No early breakdown", "All pricing must be clearly posted"],
-      documentQuickAdds: ["Business License", "Sales Tax Certificate", "General Liability Insurance"],
-      restrictionsDefaults: ["No counterfeit goods", "No weapons or replicas"],
-      complianceDefaults: [{ text: "Booth must remain staffed during event hours", required: true }],
-      documentsDefaults: [{ name: "Business License", required: true, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "arts_crafts_fair",
-      name: "Arts & Crafts Fair",
-      subtitle: "Artist-friendly defaults for handmade vendors.",
-      category: "Marketplace / Retail",
-      boothDefaults: [{ id: uid("cat"), name: "Artist Booth", baseSize: "10x10", basePrice: 150, additionalPerFt: 8, cornerPremium: 25, fireMarshalFee: 0, electricalNote: "" }],
-      restrictionQuickAdds: ["No mass-produced imported goods", "No AI-generated prints without disclosure", "No counterfeit artwork"],
-      complianceQuickAdds: ["Display materials must be stable and weighted", "No blocking neighboring booths", "Keep aisle clear at all times"],
-      documentQuickAdds: ["Business License", "Artist Statement / Product List"],
-      restrictionsDefaults: ["No mass-produced imported goods"],
-      complianceDefaults: [{ text: "Keep aisle clear at all times", required: true }],
-      documentsDefaults: [{ name: "Business License", required: false, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "fashion_popup",
-      name: "Fashion / Apparel Pop-Up",
-      subtitle: "Boutiques, apparel, and accessories.",
-      category: "Marketplace / Retail",
-      boothDefaults: [{ id: uid("cat"), name: "Apparel Booth", baseSize: "10x10", basePrice: 225, additionalPerFt: 12, cornerPremium: 40, fireMarshalFee: 0, electricalNote: "Mirror and lighting add-ons may need approval" }],
-      restrictionQuickAdds: ["No counterfeit designer items", "No adult merchandise", "No loud music without approval"],
-      complianceQuickAdds: ["Fitting areas must be contained within booth", "Racks cannot block egress routes"],
-      documentQuickAdds: ["Business License", "Sales Tax Certificate"],
-      restrictionsDefaults: ["No counterfeit designer items"],
-      complianceDefaults: [{ text: "Racks cannot block egress routes", required: true }],
-      documentsDefaults: [{ name: "Sales Tax Certificate", required: true, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "food_vendor_market",
-      name: "Food Vendor Market",
-      subtitle: "Prepared food and packaged food booths.",
-      category: "Food",
-      boothDefaults: [{ id: uid("cat"), name: "Food Booth", baseSize: "10x10", basePrice: 300, additionalPerFt: 15, cornerPremium: 45, fireMarshalFee: 0, electricalNote: "Power requests must be approved in advance" }],
-      restrictionQuickAdds: ["No alcohol sales without permit", "No open flame without approval", "No outside food vendors inside restricted zones"],
-      complianceQuickAdds: ["Fire extinguisher must be present", "Grease disposal required", "Ground cover required"],
-      documentQuickAdds: ["Health Permit", "General Liability Insurance", "Menu / Product List", "Food Handler Certifications"],
-      restrictionsDefaults: ["No alcohol sales without permit"],
-      complianceDefaults: [{ text: "Fire extinguisher must be present", required: true }, { text: "Ground cover required", required: true }],
-      documentsDefaults: [{ name: "Health Permit", required: true, dueBy: "14 days before event" }, { name: "General Liability Insurance", required: true, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "food_truck_rally",
-      name: "Food Truck Rally",
-      subtitle: "Truck-specific spacing, fire, and health docs.",
-      category: "Food",
-      boothDefaults: [{ id: uid("cat"), name: "Food Truck", baseSize: "20x20", basePrice: 450, additionalPerFt: 20, cornerPremium: 60, fireMarshalFee: 50, electricalNote: "Generator required unless power add-on approved" }],
-      restrictionQuickAdds: ["No propane storage outside approved area", "No alcohol sales without permit", "No overnight vehicle parking without approval"],
-      complianceQuickAdds: ["Fire extinguisher must be present", "Ground cover required", "Truck must arrive during assigned load-in window"],
-      documentQuickAdds: ["Health Permit", "Fire Safety Documentation", "Business Auto Insurance", "Food Handler Certifications"],
-      restrictionsDefaults: ["No propane storage outside approved area"],
-      complianceDefaults: [{ text: "Truck must arrive during assigned load-in window", required: true }, { text: "Ground cover required", required: true }],
-      documentsDefaults: [{ name: "Health Permit", required: true, dueBy: "14 days before event" }, { name: "Fire Safety Documentation", required: true, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "farmers_market",
-      name: "Farmers Market",
-      subtitle: "Produce, packaged goods, and local vendors.",
-      category: "Food",
-      boothDefaults: [{ id: uid("cat"), name: "Farm Booth", baseSize: "10x10", basePrice: 95, additionalPerFt: 5, cornerPremium: 20, fireMarshalFee: 0, electricalNote: "" }],
-      restrictionQuickAdds: ["No resale produce without disclosure", "No live animals without approval"],
-      complianceQuickAdds: ["Scales must be legal-for-trade where applicable", "Products must be clearly labeled", "Booth must be weighted for wind"],
-      documentQuickAdds: ["Business License", "Vendor Permit", "Organic Certification"],
-      restrictionsDefaults: ["No resale produce without disclosure"],
-      complianceDefaults: [{ text: "Products must be clearly labeled", required: true }],
-      documentsDefaults: [{ name: "Vendor Permit", required: false, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "tech_startup_expo",
-      name: "Tech / Startup Expo",
-      subtitle: "Demo-heavy, power-friendly exhibitor setup.",
-      category: "Exhibitions",
-      boothDefaults: [{ id: uid("cat"), name: "Startup Booth", baseSize: "10x10", basePrice: 350, additionalPerFt: 20, cornerPremium: 60, fireMarshalFee: 0, electricalNote: "List total wattage needs in advance" }],
-      restrictionQuickAdds: ["No crypto/financial claims signage without approval", "No unauthorized data collection", "No drones indoors"],
-      complianceQuickAdds: ["All extension cords must be taped down", "Audio demos must use headphones unless approved", "Lead collection disclosures must be visible"],
-      documentQuickAdds: ["Business License", "Certificate of Insurance", "Power Requirements Form"],
-      restrictionsDefaults: ["No unauthorized data collection"],
-      complianceDefaults: [{ text: "All extension cords must be taped down", required: true }],
-      documentsDefaults: [{ name: "Power Requirements Form", required: false, dueBy: "7 days before event" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "trade_show_b2b",
-      name: "Trade Show (B2B)",
-      subtitle: "Professional exhibitor layout and documents.",
-      category: "Exhibitions",
-      boothDefaults: [
-        { id: uid("cat"), name: "Standard Booth", baseSize: "10x10", basePrice: 325, additionalPerFt: 18, cornerPremium: 50, fireMarshalFee: 0, electricalNote: "" },
-        { id: uid("cat"), name: "Island Booth", baseSize: "20x20", basePrice: 950, additionalPerFt: 22, cornerPremium: 0, fireMarshalFee: 0, electricalNote: "Custom builds must be approved in advance" },
-      ],
-      restrictionQuickAdds: ["No subletting booths", "No hazardous materials", "No rigging without approval"],
-      complianceQuickAdds: ["All displays over height limit require approval", "Move-in and move-out windows must be followed", "All exhibitors must wear badges"],
-      documentQuickAdds: ["Certificate of Insurance", "Exhibitor Agreement", "Electrical Order Form"],
-      restrictionsDefaults: ["No subletting booths"],
-      complianceDefaults: [{ text: "Move-in and move-out windows must be followed", required: true }],
-      documentsDefaults: [{ name: "Exhibitor Agreement", required: true, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "sponsor_booths",
-      name: "Sponsor Booths",
-      subtitle: "Premium sponsor and activation setups.",
-      category: "Exhibitions",
-      boothDefaults: [{ id: uid("cat"), name: "Sponsor Activation", baseSize: "20x20", basePrice: 1500, additionalPerFt: 30, cornerPremium: 0, fireMarshalFee: 0, electricalNote: "Custom activations require production review" }],
-      restrictionQuickAdds: ["No giveaways requiring purchase", "No amplified sound without approval", "No alcohol sampling without permit"],
-      complianceQuickAdds: ["Brand assets must match sponsor package", "Activation footprint must stay within assigned zone"],
-      documentQuickAdds: ["Sponsor Agreement", "Certificate of Insurance", "Activation Plan"],
-      restrictionsDefaults: ["No amplified sound without approval"],
-      complianceDefaults: [{ text: "Activation footprint must stay within assigned zone", required: true }],
-      documentsDefaults: [{ name: "Activation Plan", required: true, dueBy: "14 days before event" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "community_festival",
-      name: "Community Festival",
-      subtitle: "Mixed vendors and community organizations.",
-      category: "Community",
-      boothDefaults: [{ id: uid("cat"), name: "Community Booth", baseSize: "10x10", basePrice: 125, additionalPerFt: 8, cornerPremium: 20, fireMarshalFee: 0, electricalNote: "" }],
-      restrictionQuickAdds: ["No political campaigning without approval", "No hate speech or offensive displays", "No unauthorized fundraising"],
-      complianceQuickAdds: ["Booth must remain family-friendly", "Staff must follow event conduct rules"],
-      documentQuickAdds: ["Business License", "Certificate of Insurance", "Nonprofit Letter"],
-      restrictionsDefaults: ["No hate speech or offensive displays"],
-      complianceDefaults: [{ text: "Booth must remain family-friendly", required: true }],
-      documentsDefaults: [{ name: "Certificate of Insurance", required: false, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "nonprofit_fair",
-      name: "Non-Profit Fair",
-      subtitle: "Outreach booths and low-friction compliance.",
-      category: "Community",
-      boothDefaults: [{ id: uid("cat"), name: "Outreach Booth", baseSize: "10x10", basePrice: 50, additionalPerFt: 5, cornerPremium: 10, fireMarshalFee: 0, electricalNote: "" }],
-      restrictionQuickAdds: ["No sales not approved by organizer", "No aggressive solicitation"],
-      complianceQuickAdds: ["Printed materials must stay inside booth footprint", "Representatives must identify organization clearly"],
-      documentQuickAdds: ["501(c)(3) Letter", "Organization Overview"],
-      restrictionsDefaults: ["No aggressive solicitation"],
-      complianceDefaults: [{ text: "Representatives must identify organization clearly", required: true }],
-      documentsDefaults: [{ name: "501(c)(3) Letter", required: false, dueBy: "" }],
-      paymentDefaults: defaultPayment,
-    },
-    {
-      id: "kids_family_event",
-      name: "Kids / Family Event",
-      subtitle: "Family-safe activities and tighter safety defaults.",
-      category: "Community",
-      boothDefaults: [{ id: uid("cat"), name: "Family Booth", baseSize: "10x10", basePrice: 165, additionalPerFt: 8, cornerPremium: 25, fireMarshalFee: 0, electricalNote: "" }],
-      restrictionQuickAdds: ["No mature/adult content", "No unsafe inflatables or moving props", "No sharp demo materials within reach of children"],
-      complianceQuickAdds: ["Booth must remain family-friendly", "All staff interacting with children must be supervised", "Trip hazards must be eliminated"],
-      documentQuickAdds: ["Certificate of Insurance", "Activity Safety Plan", "Background Check Confirmation"],
-      restrictionsDefaults: ["No mature/adult content"],
-      complianceDefaults: [{ text: "Trip hazards must be eliminated", required: true }],
-      documentsDefaults: [{ name: "Activity Safety Plan", required: true, dueBy: "10 days before event" }],
-      paymentDefaults: defaultPayment,
-    },
-  ];
-}
-
-function iconBadge(emoji: string) {
-  return (
-    <div className="mr-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-2xl">
-      {emoji}
-    </div>
-  );
-}
-
-function SectionHeader({
-  emoji,
-  title,
-  subtitle,
-  right,
-}: {
-  emoji: string;
-  title: string;
-  subtitle: string;
-  right?: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="flex items-start">
-        {iconBadge(emoji)}
-        <div>
-          <div className="text-xl font-black text-slate-900">{title}</div>
-          <div className="mt-1 text-sm font-semibold text-slate-600">{subtitle}</div>
-        </div>
-      </div>
-      {right ? <div className="shrink-0">{right}</div> : null}
-    </div>
-  );
+function makeLocalStorageKey(eventId: string) {
+  return `organizer:event:${eventId}:requirements`;
 }
 
 export default function OrganizerEventRequirementsPage() {
   const navigate = useNavigate();
-  const location = useLocation();
-  const { eventId } = useParams();
-  const { accessToken } = useAuth();
+  const params = useParams();
+  const eventId = normalizeId(params.eventId);
 
-  const eid = useMemo(() => {
-    const n = Number(eventId);
-    return Number.isFinite(n) ? n : null;
-  }, [eventId]);
+  const [compliance, setCompliance] = useState<RequirementItem[]>([]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [version, setVersion] = useState<number>(1);
 
-  const sp = useMemo(() => new URLSearchParams(location.search), [location.search]);
-  const requestedTemplateId = sp.get("templateId") || "";
-  const requestedTemplateSource = sp.get("templateSource") || "";
-
-  const storageKey = useMemo(() => `${LS_EVENT_REQ_PREFIX}:${eventId}:requirements`, [eventId]);
-  const templates = useMemo(() => builtInTemplates(), []);
-  const templateAppliedRef = useRef(false);
-
-  const saveBtnBlue =
-    "rounded-full bg-blue-600 px-5 py-2 text-sm font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60";
-  const subtleBtn =
-    "rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-800 hover:bg-slate-50";
-  const addBtnGreen =
-    "rounded-full bg-emerald-600 px-4 py-2 text-sm font-black text-white hover:bg-emerald-700";
-  const chipCls =
-    "rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-black text-slate-800 hover:bg-slate-100";
-  const inputCls =
-    "w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:ring-2 focus:ring-blue-200";
-  const sectionCard = "rounded-3xl border border-slate-200 bg-white p-6 shadow-sm";
+  const [builtInTemplateId, setBuiltInTemplateId] = useState<string>(BUILT_IN_TEMPLATES[0]?.id || "");
+  const [savedTemplates, setSavedTemplates] = useState<RequirementTemplate[]>([]);
+  const [savedTemplateId, setSavedTemplateId] = useState<string>("");
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [templateSaving, setTemplateSaving] = useState(false);
-  const [model, setModel] = useState<RequirementsModel | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+  const [backendMode, setBackendMode] = useState(true);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [redirecting, setRedirecting] = useState(false);
 
-  const [savedTemplates, setSavedTemplates] = useState<SavedRequirementTemplate[]>([]);
-  const [selectedBuiltInTemplateId, setSelectedBuiltInTemplateId] = useState<string>(
-    templates[0]?.id || "retail_market"
-  );
-  const [selectedSavedTemplateId, setSelectedSavedTemplateId] = useState<string>("");
+  const authHeaders = useMemo(() => buildAuthHeaders(), []);
+  const hasAuth =
+    !!(authHeaders as any)?.Authorization ||
+    !!(authHeaders as any)?.["x-user-email"] ||
+    !!(authHeaders as any)?.["x-user-id"];
 
-  const [customRestrictionText, setCustomRestrictionText] = useState("");
-  const [customComplianceText, setCustomComplianceText] = useState("");
-  const [customDocName, setCustomDocName] = useState("");
+  const templatePreview = useMemo(() => {
+    return BUILT_IN_TEMPLATES.find((t) => t.id === builtInTemplateId) || BUILT_IN_TEMPLATES[0] || null;
+  }, [builtInTemplateId]);
 
-  function bump(m: RequirementsModel): RequirementsModel {
-    return { ...m, updatedAt: new Date().toISOString() };
-  }
-
-  function emptyModel(eventIdNum: number): RequirementsModel {
-    return {
-      version: "event_requirements_v2",
-      eventId: eventIdNum,
-      boothCategories: [],
-      customRestrictions: [],
-      complianceItems: [],
-      documentRequirements: [],
-      paymentSettings: {
-        enabled: true,
-        payment_url: "",
-        billing_contact_email: "",
-        billing_contact_phone: "",
-        memo_instructions: "",
-        refund_policy: "No Refunds",
-        payment_notes: "",
-        due_by: "",
-        deposit_type: "none",
-        deposit_value: null,
-        methods: {},
-      } as any,
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  function applyBuiltInTemplate(templateId: string) {
-    if (!eid) return;
-    const tpl = templates.find((t) => t.id === templateId);
-    if (!tpl) return;
-
-    const next = bump({
-      version: "event_requirements_v2",
-      eventId: eid,
-      boothCategories: tpl.boothDefaults.map((b) => ({ ...b, id: uid("cat") })),
-      customRestrictions: tpl.restrictionsDefaults.map((text) => ({ id: uid("r"), text })),
-      complianceItems: tpl.complianceDefaults.map((c) => ({
-        id: uid("c"),
-        text: c.text,
-        required: !!c.required,
-      })),
-      documentRequirements: tpl.documentsDefaults.map((d) => ({
-        id: uid("d"),
-        name: d.name,
-        required: !!d.required,
-        dueBy: d.dueBy || "",
-      })),
-      paymentSettings: { ...(tpl.paymentDefaults as any) },
-      updatedAt: new Date().toISOString(),
-    });
-
-    setModel(next);
-    setToast(`Built-in template loaded: ${tpl.name}`);
-    setError(null);
-
+  const recoverToValidEvent = useCallback(async () => {
+    if (redirecting) return false;
+    setRedirecting(true);
     try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
+      const res = await fetch(`${API_BASE}/organizer/events`, {
+        method: "GET",
+        headers: {
+          ...buildAuthHeaders(),
+          Accept: "application/json",
+        },
+      });
+
+      if (!res.ok) return false;
+
+      const data = await res.json().catch(() => null);
+      const events = Array.isArray(data?.events) ? data.events : [];
+      const firstValid = events.find((ev: any) => Number(ev?.id || ev?.event_id) > 0);
+      if (!firstValid) return false;
+
+      const nextId = String(firstValid.id || firstValid.event_id || "");
+      if (!nextId || nextId === eventId) return false;
+
+      setMessage("This page was pointing at an old event. Redirecting to your current event…");
+      navigate(`/organizer/events/${nextId}/requirements`, { replace: true });
+      return true;
     } catch {
-      // ignore
+      return false;
+    } finally {
+      setRedirecting(false);
     }
-  }
+  }, [eventId, navigate, redirecting]);
 
-  function applySavedTemplate(template: SavedRequirementTemplate) {
-    if (!eid) return;
-
-    const next = bump({
-      ...toRequirementsModel(eid, template.payload),
-      eventId: eid,
-    });
-
-    setModel(next);
-    setToast(`Saved template loaded: ${template.name}`);
-    setError(null);
-
+  const loadTemplates = useCallback(async () => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
-  }
+      const res = await fetch(`${API_BASE}/organizer/requirement-templates`, {
+        method: "GET",
+        headers: {
+          ...buildAuthHeaders(),
+          Accept: "application/json",
+        },
+      });
 
-  async function loadSavedTemplates() {
-    const res = await fetchJson(API.templateList, { accessToken });
-    if (!res.ok) return;
+      if (!res.ok) return;
 
-    const raw = Array.isArray((res.data as any)?.items)
-      ? (res.data as any).items
-      : Array.isArray(res.data)
-      ? (res.data as any[])
-      : [];
+      const data = await res.json().catch(() => null);
+      const rawItems = Array.isArray(data?.templates) ? data.templates : Array.isArray(data) ? data : [];
 
-    const list: SavedRequirementTemplate[] = raw
-      .map((item: any) => ({
-        id: String(item?.id ?? ""),
-        name: String(item?.name ?? "Saved template"),
-        category: item?.category ? String(item.category) : "",
-        payload: toRequirementsModel(eid || 0, item?.payload || item?.requirements || item),
-        updatedAt: String(item?.updated_at || item?.updatedAt || ""),
-      }))
-      .filter((item) => item.id);
+      const normalized = rawItems
+        .map((item: any) => {
+          const id = normalizeId(item?.id || item?.template_id || item?.name);
+          const name = String(item?.name || "Untitled template").trim();
+          if (!id) return null;
+          return {
+            id,
+            name,
+            description: String(item?.description || "").trim(),
+            compliance: normalizeRequirementItems(item?.requirements?.compliance || item?.compliance || []),
+            documents: normalizeDocumentItems(item?.requirements?.documents || item?.documents || []),
+          } as RequirementTemplate;
+        })
+        .filter(Boolean) as RequirementTemplate[];
 
-    setSavedTemplates(list);
-    if (!selectedSavedTemplateId && list[0]?.id) {
-      setSelectedSavedTemplateId(list[0].id);
-    }
-  }
-
-  async function maybeApplyRequestedTemplate(currentModel: RequirementsModel | null) {
-    if (!eid || templateAppliedRef.current) return;
-
-    const looksEmpty =
-      !currentModel ||
-      ((currentModel.boothCategories?.length || 0) === 0 &&
-        (currentModel.customRestrictions?.length || 0) === 0 &&
-        (currentModel.complianceItems?.length || 0) === 0 &&
-        (currentModel.documentRequirements?.length || 0) === 0);
-
-    if (!looksEmpty) return;
-
-    if (requestedTemplateSource === "saved" && requestedTemplateId) {
-      const res = await fetchJson(API.templateRead(requestedTemplateId), { accessToken });
-      if (res.ok && res.data) {
-        const template: SavedRequirementTemplate = {
-          id: String((res.data as any)?.id || requestedTemplateId),
-          name: String((res.data as any)?.name || "Saved template"),
-          category: String((res.data as any)?.category || ""),
-          payload: toRequirementsModel(eid, (res.data as any)?.payload || (res.data as any)?.requirements || res.data),
-          updatedAt: String((res.data as any)?.updated_at || ""),
-        };
-        applySavedTemplate(template);
-        templateAppliedRef.current = true;
-        return;
+      setSavedTemplates(normalized);
+      if (normalized.length && !savedTemplateId) {
+        setSavedTemplateId(normalized[0].id);
       }
+    } catch {
+      // ignore template load failures
     }
+  }, [savedTemplateId]);
 
-    if (requestedTemplateSource === "builtin" && requestedTemplateId) {
-      setSelectedBuiltInTemplateId(requestedTemplateId);
-      applyBuiltInTemplate(requestedTemplateId);
-      templateAppliedRef.current = true;
+  const loadRequirements = useCallback(async () => {
+    if (!eventId) {
+      setLoading(false);
+      setError("Missing event ID.");
       return;
     }
-  }
+
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+    setSavedOk(false);
+
+    const localKey = makeLocalStorageKey(eventId);
+
+    try {
+      if (backendMode) {
+        const res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+          method: "GET",
+          headers: {
+            ...buildAuthHeaders(),
+            Accept: "application/json",
+          },
+        });
+
+        if (res.status === 404) {
+          const redirected = await recoverToValidEvent();
+          if (!redirected) {
+            throw new Error(`Event ${eventId} was not found on the backend.`);
+          }
+          return;
+        }
+
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok) {
+          const detail =
+            (typeof data?.detail === "string" && data.detail) ||
+            `Failed to load requirements (${res.status})`;
+          throw new Error(detail);
+        }
+
+        const normalized = normalizeRequirementsPayload(data);
+        setCompliance(normalized.requirements.compliance);
+        setDocuments(normalized.requirements.documents);
+        setVersion(Number(normalized.version || 1));
+        localStorage.setItem(localKey, JSON.stringify(normalized));
+      } else {
+        const local = safeJsonParse<RequirementsPayload>(localStorage.getItem(localKey));
+        if (local) {
+          const normalized = normalizeRequirementsPayload(local);
+          setCompliance(normalized.requirements.compliance);
+          setDocuments(normalized.requirements.documents);
+          setVersion(Number(normalized.version || 1));
+        } else {
+          setCompliance([]);
+          setDocuments([]);
+          setVersion(1);
+        }
+      }
+    } catch (err: any) {
+      setError(err?.message || "Could not load requirements.");
+    } finally {
+      setLoading(false);
+    }
+  }, [backendMode, eventId, recoverToValidEvent]);
 
   useEffect(() => {
-    let cancelled = false;
+    void loadTemplates();
+  }, [loadTemplates]);
 
-    async function run() {
-      setLoading(true);
+  useEffect(() => {
+    void loadRequirements();
+  }, [loadRequirements]);
+
+  function applyBuiltInTemplate() {
+    const template = BUILT_IN_TEMPLATES.find((t) => t.id === builtInTemplateId);
+    if (!template) return;
+    const cloned = cloneTemplate(template);
+    setCompliance(cloned.compliance);
+    setDocuments(cloned.documents);
+    setMessage(`Loaded built-in template: ${template.name}`);
+    setError(null);
+    setSavedOk(false);
+  }
+
+  function applySavedTemplate() {
+    const template = savedTemplates.find((t) => t.id === savedTemplateId);
+    if (!template) return;
+    const cloned = cloneTemplate(template);
+    setCompliance(cloned.compliance);
+    setDocuments(cloned.documents);
+    setMessage(`Loaded saved template: ${template.name}`);
+    setError(null);
+    setSavedOk(false);
+  }
+
+  async function saveTemplate(mode: "create" | "update") {
+    const name =
+      mode === "create"
+        ? window.prompt("Template name")
+        : savedTemplates.find((t) => t.id === savedTemplateId)?.name || "";
+
+    if (!name) return;
+
+    try {
+      const url =
+        mode === "create"
+          ? `${API_BASE}/organizer/requirement-templates`
+          : `${API_BASE}/organizer/requirement-templates/${encodeURIComponent(savedTemplateId)}`;
+
+      const method = mode === "create" ? "POST" : "PUT";
+
+      const res = await fetch(url, {
+        method,
+        headers: {
+          ...buildAuthHeaders(),
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          name,
+          requirements: {
+            compliance,
+            documents,
+          },
+        }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail =
+          (typeof data?.detail === "string" && data.detail) ||
+          `Template save failed (${res.status})`;
+        throw new Error(detail);
+      }
+
+      setMessage(mode === "create" ? "Template saved." : "Template updated.");
       setError(null);
-
-      if (!eid || !eventId) {
-        setLoading(false);
-        setModel(null);
-        return;
-      }
-
-      let nextModel: RequirementsModel | null = null;
-
-      try {
-        const local = localStorage.getItem(storageKey);
-        if (local) {
-          nextModel = toRequirementsModel(eid, JSON.parse(local));
-        }
-      } catch {
-        // ignore
-      }
-
-      const tries = [API.organizerGet(eid), API.publicGet(eid)];
-      for (const path of tries) {
-        const res = await fetchJson(path, { accessToken });
-        if (res.ok && res.data) {
-          nextModel = toRequirementsModel(eid, res.data);
-          break;
-        }
-      }
-
-      if (!nextModel) {
-        nextModel = emptyModel(eid);
-      }
-
-      if (!cancelled) {
-        setModel(nextModel);
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(nextModel));
-        } catch {
-          // ignore
-        }
-        await loadSavedTemplates().catch(() => {});
-        await maybeApplyRequestedTemplate(nextModel);
-        setLoading(false);
-      }
+      await loadTemplates();
+    } catch (err: any) {
+      setError(err?.message || "Could not save template.");
     }
+  }
 
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [eid, eventId]);
+  async function deleteTemplate() {
+    if (!savedTemplateId) return;
+    if (!window.confirm("Delete selected template?")) return;
 
-  async function onSave(): Promise<boolean> {
-    if (!model || !eid) {
-      setError("Cannot save: missing eventId/model.");
-      setToast(null);
-      return false;
+    try {
+      const res = await fetch(
+        `${API_BASE}/organizer/requirement-templates/${encodeURIComponent(savedTemplateId)}`,
+        {
+          method: "DELETE",
+          headers: {
+            ...buildAuthHeaders(),
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        const detail =
+          (typeof data?.detail === "string" && data.detail) ||
+          `Template delete failed (${res.status})`;
+        throw new Error(detail);
+      }
+
+      setMessage("Template deleted.");
+      setError(null);
+      setSavedTemplateId("");
+      await loadTemplates();
+    } catch (err: any) {
+      setError(err?.message || "Could not delete template.");
+    }
+  }
+
+  function addCompliance() {
+    const text = window.prompt("Compliance requirement text");
+    if (!text) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    setCompliance((prev) => [
+      ...prev,
+      {
+        id: normalizeId(`${trimmed}-${Date.now()}`),
+        text: trimmed,
+        required: true,
+      },
+    ]);
+    setSavedOk(false);
+  }
+
+  function addDocument() {
+    const name = window.prompt("Document requirement name");
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    setDocuments((prev) => [
+      ...prev,
+      {
+        id: normalizeId(`${trimmed}-${Date.now()}`),
+        name: trimmed,
+        required: true,
+      },
+    ]);
+    setSavedOk(false);
+  }
+
+  function updateCompliance(idx: number, patch: Partial<RequirementItem>) {
+    setCompliance((prev) => prev.map((item, i) => (i === idx ? { ...item, ...patch } : item)));
+    setSavedOk(false);
+  }
+
+  function updateDocument(idx: number, patch: Partial<DocumentItem>) {
+    setDocuments((prev) => prev.map((item, i) => (i === idx ? { ...item, ...patch } : item)));
+    setSavedOk(false);
+  }
+
+  function removeCompliance(idx: number) {
+    setCompliance((prev) => prev.filter((_, i) => i !== idx));
+    setSavedOk(false);
+  }
+
+  function removeDocument(idx: number) {
+    setDocuments((prev) => prev.filter((_, i) => i !== idx));
+    setSavedOk(false);
+  }
+
+  async function onSave() {
+    if (!eventId) {
+      setError("Missing event ID.");
+      return;
     }
 
     setSaving(true);
     setError(null);
-    setToast(null);
+    setMessage(null);
     setSavedOk(false);
 
+    const payload: RequirementsPayload = {
+      requirements: {
+        compliance,
+        documents,
+      },
+      version: Number(version || 1),
+    };
+
     try {
-      localStorage.setItem(storageKey, JSON.stringify(model));
-    } catch {
-      // ignore
-    }
+      localStorage.setItem(makeLocalStorageKey(eventId), JSON.stringify(payload));
 
-    const payload = normalizeForApi(model);
-    const attempts: Array<{ method: "PUT" | "POST"; path: string }> = [
-      { method: "PUT", path: API.organizerPut(eid) },
-      { method: "PUT", path: API.organizerPut(eid) },
-    ];
-
-    for (const attempt of attempts) {
-      try {
-        const res = await saveJson(attempt.method, attempt.path, payload, { accessToken });
-        if (res.ok) {
-          setSaving(false);
-          setToast("Configuration saved ✅");
-          setSavedOk(true);
-          return true;
-        }
-      } catch {
-        // ignore and try next
+      if (!backendMode) {
+        setMessage("Saved locally. Redirecting to layout…");
+        setSavedOk(true);
+        navigate(`/organizer/events/${eventId}/layout`);
+        return;
       }
+
+      const headers = {
+        ...buildAuthHeaders(),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+
+      let res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      let data = await res.json().catch(() => null);
+
+      if (res.status === 404) {
+        const redirected = await recoverToValidEvent();
+        if (redirected) return;
+      }
+
+      if (!res.ok) {
+        res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+        data = await res.json().catch(() => null);
+      }
+
+      if (!res.ok) {
+        const detail =
+          (typeof data?.detail === "string" && data.detail) ||
+          (typeof data?.message === "string" && data.message) ||
+          `Could not save requirements (${res.status})`;
+        throw new Error(detail);
+      }
+
+      setVersion((v) => Number(v || 1) + 1);
+      setSavedOk(true);
+      setMessage("Requirements saved. Redirecting to booth layout…");
+      navigate(`/organizer/events/${eventId}/layout`);
+    } catch (err: any) {
+      setError(err?.message || "Could not save requirements.");
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
-    setError("Could not save requirements to the backend. Check the organizer requirements endpoint.");
-    return false;
   }
-
-  async function saveAsTemplate() {
-    if (!model || !eid) return;
-
-    const name = window.prompt("Template name");
-    if (!name || !name.trim()) return;
-
-    const category = window.prompt("Template category (optional)", "") || "";
-
-    setTemplateSaving(true);
-    setError(null);
-    setToast(null);
-
-    const body = {
-      name: name.trim(),
-      category: category.trim(),
-      payload: makeTemplatePayload(model),
-    };
-
-    const res = await saveJson("POST", API.templateCreate, body, { accessToken });
-    setTemplateSaving(false);
-
-    if (!res.ok) {
-      setError("Could not save template to backend. Make sure /organizer/requirement-templates exists.");
-      return;
-    }
-
-    setToast(`Template saved: ${name.trim()}`);
-    await loadSavedTemplates().catch(() => {});
-  }
-
-  async function updateCurrentTemplate() {
-    const active = savedTemplates.find((t) => t.id === selectedSavedTemplateId);
-    if (!active || !model) return;
-
-    setTemplateSaving(true);
-    setError(null);
-    setToast(null);
-
-    const body = {
-      name: active.name,
-      category: active.category || "",
-      payload: makeTemplatePayload(model),
-    };
-
-    const res = await saveJson("PUT", API.templateUpdate(active.id), body, { accessToken });
-    setTemplateSaving(false);
-
-    if (!res.ok) {
-      setError("Could not update the saved template on the backend.");
-      return;
-    }
-
-    setToast(`Template updated: ${active.name}`);
-    await loadSavedTemplates().catch(() => {});
-  }
-
-  async function deleteSelectedTemplate() {
-    const active = savedTemplates.find((t) => t.id === selectedSavedTemplateId);
-    if (!active) return;
-    const ok = window.confirm(`Delete template "${active.name}"?`);
-    if (!ok) return;
-
-    setTemplateSaving(true);
-    setError(null);
-    setToast(null);
-
-    const res = await saveJson("DELETE", API.templateDelete(active.id), null, { accessToken });
-    setTemplateSaving(false);
-
-    if (!res.ok) {
-      setError("Could not delete template from the backend.");
-      return;
-    }
-
-    setToast(`Template deleted: ${active.name}`);
-    setSelectedSavedTemplateId("");
-    await loadSavedTemplates().catch(() => {});
-  }
-
-  function setBoothCategory(id: string, patch: Partial<BoothCategory>) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        boothCategories: model.boothCategories.map((b) => (b.id === id ? { ...b, ...patch } : b)),
-      })
-    );
-  }
-
-  function addBoothCategory() {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        boothCategories: [
-          ...model.boothCategories,
-          {
-            id: uid("cat"),
-            name: "",
-            baseSize: "10x10",
-            basePrice: 0,
-            additionalPerFt: 0,
-            cornerPremium: 0,
-            fireMarshalFee: 0,
-            electricalNote: "",
-          },
-        ],
-      })
-    );
-  }
-
-  function removeBoothCategory(id: string) {
-    if (!model) return;
-    setModel(bump({ ...model, boothCategories: model.boothCategories.filter((b) => b.id !== id) }));
-  }
-
-  function addRestriction(text: string) {
-    if (!model) return;
-    const value = text.trim();
-    if (!value) return;
-    setModel(
-      bump({
-        ...model,
-        customRestrictions: [...model.customRestrictions, { id: uid("r"), text: value }],
-      })
-    );
-  }
-
-  function removeRestriction(id: string) {
-    if (!model) return;
-    setModel(bump({ ...model, customRestrictions: model.customRestrictions.filter((r) => r.id !== id) }));
-  }
-
-  function addCompliance(text: string, required: boolean) {
-    if (!model) return;
-    const value = text.trim();
-    if (!value) return;
-    setModel(
-      bump({
-        ...model,
-        complianceItems: [
-          ...model.complianceItems,
-          { id: uid("c"), text: value, required: !!required },
-        ],
-      })
-    );
-  }
-
-  function toggleComplianceRequired(id: string, required: boolean) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        complianceItems: model.complianceItems.map((c) =>
-          c.id === id ? { ...c, required } : c
-        ),
-      })
-    );
-  }
-
-  function removeCompliance(id: string) {
-    if (!model) return;
-    setModel(bump({ ...model, complianceItems: model.complianceItems.filter((c) => c.id !== id) }));
-  }
-
-  function addDocument(name: string, required: boolean) {
-    if (!model) return;
-    const value = name.trim();
-    if (!value) return;
-    setModel(
-      bump({
-        ...model,
-        documentRequirements: [
-          ...model.documentRequirements,
-          { id: uid("d"), name: value, required: !!required, dueBy: "" },
-        ],
-      })
-    );
-  }
-
-  function toggleDocRequired(id: string, required: boolean) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        documentRequirements: model.documentRequirements.map((d) =>
-          d.id === id ? { ...d, required } : d
-        ),
-      })
-    );
-  }
-
-  function setDocDueBy(id: string, dueBy: string) {
-    if (!model) return;
-    setModel(
-      bump({
-        ...model,
-        documentRequirements: model.documentRequirements.map((d) =>
-          d.id === id ? { ...d, dueBy } : d
-        ),
-      })
-    );
-  }
-
-  function removeDoc(id: string) {
-    if (!model) return;
-    setModel(bump({ ...model, documentRequirements: model.documentRequirements.filter((d) => d.id !== id) }));
-  }
-
-  const selectedBuiltInTemplate =
-    templates.find((t) => t.id === selectedBuiltInTemplateId) || templates[0];
-  const selectedSavedTemplate = savedTemplates.find((t) => t.id === selectedSavedTemplateId) || null;
 
   if (loading) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="text-xl font-black text-slate-900">Loading configuration…</div>
-      </div>
-    );
-  }
-
-  if (!model || !eid) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="text-xl font-black text-slate-900">Event Setup & Vendor Requirements</div>
-        <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
-          {error || "Unable to load requirements."}
-        </div>
-      </div>
-    );
+    return <div className="p-6 text-gray-600">Loading requirements…</div>;
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <button
-            type="button"
-            className="text-sm font-black text-slate-700 hover:text-slate-900"
-            onClick={() => navigate(-1)}
-          >
-            ← Back
-          </button>
+  <div className="p-6">
+    <div style={{ color: "red", fontWeight: 700 }}>
+      NEW REQUIREMENTS FILE LOADED
+    </div>
 
-          <div className="flex items-center gap-3">
-            <span className="text-lg font-black text-slate-900">
-              Event Setup & Vendor Requirements
-            </span>
-          </div>
+      <div className="mb-6 flex items-center justify-between border-b pb-5">
+        <button
+          className="text-sm font-medium text-gray-700"
+          onClick={() => navigate("/organizer/events")}
+        >
+          ← Back
+        </button>
 
-          <div className="flex items-center gap-3">
-            <button type="button" className={saveBtnBlue} onClick={onSave} disabled={saving}>
-              {saving ? "Saving…" : "Save Configuration"}
-            </button>
-
-            {savedOk ? (
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
-                onClick={() => navigate(`/organizer/events/${eid}/layout`)}
-              >
-                Go to Booth Layout →
-              </button>
-            ) : null}
-          </div>
+        <div className="text-center">
+          <div className="text-3xl font-semibold">Event Setup & Vendor Requirements</div>
+          <div className="mt-1 text-sm text-gray-500">Event ID: {eventId || "—"}</div>
         </div>
+
+        <button
+          className="rounded-full bg-blue-600 px-6 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={() => void onSave()}
+          disabled={saving || redirecting}
+        >
+          {saving ? "Saving..." : "Save Configuration"}
+        </button>
       </div>
 
-      <div className="mx-auto max-w-6xl px-6 py-8">
-        <div className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-            <div className="xl:max-w-xl">
-              <div className="text-sm font-black text-slate-900">Requirement Templates</div>
-              <div className="mt-1 text-xs font-bold text-slate-600">
-                Save this event’s requirements to your backend, reuse them in future events, and choose from expanded built-in presets.
-              </div>
-            </div>
+      {!hasAuth ? (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-800">
+          Organizer auth token is missing on this page. Save may fail until you sign in again.
+        </div>
+      ) : null}
 
-            <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-600">
-              Backend mode
-            </div>
-          </div>
+      {message ? (
+        <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
+          {message}
+        </div>
+      ) : null}
 
-          <div className="mt-5 grid gap-4 xl:grid-cols-2">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-black text-slate-900">Built-in Templates</div>
-              <div className="mt-1 text-xs font-semibold text-slate-600">
-                Expanded defaults beyond Tech / Food / Art.
-              </div>
+      {error ? (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
+          {error}
+        </div>
+      ) : null}
 
-              <div className="mt-3 flex flex-col gap-3 md:flex-row">
-                <select
-                  className={inputCls}
-                  value={selectedBuiltInTemplateId}
-                  onChange={(e) => setSelectedBuiltInTemplateId(e.target.value)}
-                >
-                  {templates.map((tpl) => (
-                    <option key={tpl.id} value={tpl.id}>
-                      {tpl.name} — {tpl.category}
-                    </option>
-                  ))}
-                </select>
-
-                <button
-                  type="button"
-                  className={subtleBtn}
-                  onClick={() => applyBuiltInTemplate(selectedBuiltInTemplateId)}
-                >
-                  Load built-in
-                </button>
-              </div>
-
-              <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs font-semibold text-slate-700">
-                <span className="font-black">{selectedBuiltInTemplate?.name}:</span>{" "}
-                {selectedBuiltInTemplate?.subtitle}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-black text-slate-900">Saved Organizer Templates</div>
-              <div className="mt-1 text-xs font-semibold text-slate-600">
-                Persist these in your backend so they work across devices.
-              </div>
-
-              <div className="mt-3 flex flex-col gap-3 md:flex-row">
-                <select
-                  className={inputCls}
-                  value={selectedSavedTemplateId}
-                  onChange={(e) => setSelectedSavedTemplateId(e.target.value)}
-                >
-                  {savedTemplates.length === 0 ? (
-                    <option value="">No saved templates yet</option>
-                  ) : null}
-                  {savedTemplates.map((tpl) => (
-                    <option key={tpl.id} value={tpl.id}>
-                      {tpl.name}{tpl.category ? ` — ${tpl.category}` : ""}
-                    </option>
-                  ))}
-                </select>
-
-                <button
-                  type="button"
-                  className={subtleBtn}
-                  disabled={!selectedSavedTemplate}
-                  onClick={() => selectedSavedTemplate && applySavedTemplate(selectedSavedTemplate)}
-                >
-                  Load saved
-                </button>
-              </div>
-
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className={addBtnGreen}
-                  onClick={saveAsTemplate}
-                  disabled={templateSaving}
-                >
-                  {templateSaving ? "Saving…" : "Save As Template"}
-                </button>
-
-                <button
-                  type="button"
-                  className={subtleBtn}
-                  onClick={updateCurrentTemplate}
-                  disabled={!selectedSavedTemplate || templateSaving}
-                >
-                  Update Selected
-                </button>
-
-                <button
-                  type="button"
-                  className={subtleBtn}
-                  onClick={deleteSelectedTemplate}
-                  disabled={!selectedSavedTemplate || templateSaving}
-                >
-                  Delete Selected
-                </button>
-              </div>
-
-              <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs font-semibold text-slate-700">
-                {selectedSavedTemplate ? (
-                  <>
-                    <span className="font-black">{selectedSavedTemplate.name}</span>
-                    {selectedSavedTemplate.category ? ` — ${selectedSavedTemplate.category}` : ""}
-                  </>
-                ) : (
-                  "Saved templates load from GET /organizer/requirement-templates"
-                )}
-              </div>
+      <div className="rounded-[28px] border bg-white p-6 shadow-sm">
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xl font-semibold">Requirement Templates</div>
+            <div className="mt-1 max-w-3xl text-sm text-gray-600">
+              Save this event’s requirements to your backend, reuse them in future events, and
+              choose from expanded built-in presets.
             </div>
           </div>
 
-          {toast ? (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800">
-              {toast}
-            </div>
-          ) : null}
-
-          {error ? (
-            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-black text-red-800">
-              {error}
-            </div>
-          ) : null}
+          <button
+            className="rounded-full border px-4 py-2 text-sm text-gray-700"
+            onClick={() => setBackendMode((v) => !v)}
+          >
+            {backendMode ? "Backend mode" : "Local mode"}
+          </button>
         </div>
 
-        <div className={sectionCard}>
-          <SectionHeader
-            emoji="🎪"
-            title="Booth Categories"
-            subtitle="Define available booth types and pricing for your event."
-            right={
-              <button type="button" className={addBtnGreen} onClick={addBoothCategory}>
-                + Add Category
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-3xl border p-4">
+            <div className="text-xl font-semibold">Built-in Templates</div>
+            <div className="mt-1 text-sm text-gray-600">Expanded defaults beyond Tech / Food / Art.</div>
+
+            <div className="mt-4 flex gap-3">
+              <select
+                className="flex-1 rounded-2xl border px-4 py-3"
+                value={builtInTemplateId}
+                onChange={(e) => setBuiltInTemplateId(e.target.value)}
+              >
+                {BUILT_IN_TEMPLATES.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                className="rounded-2xl border px-5 py-3 font-semibold"
+                onClick={applyBuiltInTemplate}
+              >
+                Load built-in
               </button>
-            }
-          />
+            </div>
 
-          <div className="mt-6 grid gap-4">
-            {model.boothCategories.map((c) => (
-              <div key={c.id} className="rounded-3xl border border-slate-200 bg-white p-5">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Category Name *</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      value={c.name}
-                      onChange={(e) => setBoothCategory(c.id, { name: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Base Size *</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      value={c.baseSize}
-                      onChange={(e) => setBoothCategory(c.id, { baseSize: e.target.value })}
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Base Price *</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      inputMode="decimal"
-                      value={String(c.basePrice ?? 0)}
-                      onChange={(e) =>
-                        setBoothCategory(c.id, {
-                          basePrice: clamp(toNumber(e.target.value, 0), 0, 999999),
-                        })
-                      }
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Additional $/ft</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      inputMode="decimal"
-                      value={String(c.additionalPerFt ?? 0)}
-                      onChange={(e) =>
-                        setBoothCategory(c.id, {
-                          additionalPerFt: clamp(toNumber(e.target.value, 0), 0, 999999),
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Corner Premium</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      inputMode="decimal"
-                      value={String(c.cornerPremium ?? 0)}
-                      onChange={(e) =>
-                        setBoothCategory(c.id, {
-                          cornerPremium: clamp(toNumber(e.target.value, 0), 0, 999999),
-                        })
-                      }
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Fire Marshal Fee</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      inputMode="decimal"
-                      value={String(c.fireMarshalFee ?? 0)}
-                      onChange={(e) =>
-                        setBoothCategory(c.id, {
-                          fireMarshalFee: clamp(toNumber(e.target.value, 0), 0, 999999),
-                        })
-                      }
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-xs font-black text-slate-700">Electrical Note</div>
-                    <input
-                      className={`mt-2 ${inputCls}`}
-                      value={c.electricalNote || ""}
-                      onChange={(e) => setBoothCategory(c.id, { electricalNote: e.target.value })}
-                      placeholder="e.g., Generator required"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-4 flex justify-end">
-                  <button type="button" className={subtleBtn} onClick={() => removeBoothCategory(c.id)}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            {model.boothCategories.length === 0 ? (
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-                No booth categories yet.
-              </div>
-            ) : null}
+            <div className="mt-4 rounded-2xl border bg-slate-50 p-4 text-sm text-slate-700">
+              {templatePreview?.name ? (
+                <>
+                  <div className="font-semibold">{templatePreview.name}</div>
+                  <div className="mt-1">{templatePreview.description}</div>
+                </>
+              ) : (
+                "No preview available."
+              )}
+            </div>
           </div>
-        </div>
 
-        <div className={`${sectionCard} mt-8`}>
-          <SectionHeader
-            emoji="🚫"
-            title="Vendor Restrictions"
-            subtitle="Define prohibited items and activities for your event."
-          />
-
-          <div className="mt-6">
-            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {selectedBuiltInTemplate?.restrictionQuickAdds.map((t) => (
-                <button key={t} type="button" className={chipCls} onClick={() => addRestriction(t)}>
-                  + {t}
-                </button>
-              ))}
+          <div className="rounded-3xl border p-4">
+            <div className="text-xl font-semibold">Saved Organizer Templates</div>
+            <div className="mt-1 text-sm text-gray-600">
+              Persist these in your backend so they work across devices.
             </div>
 
-            <div className="mt-6">
-              <div className="text-sm font-black text-slate-900">Custom Restrictions</div>
-              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
-                <input
-                  className={inputCls}
-                  value={customRestrictionText}
-                  onChange={(e) => setCustomRestrictionText(e.target.value)}
-                  placeholder="Enter custom restriction…"
-                />
-                <button
-                  type="button"
-                  className={addBtnGreen}
-                  onClick={() => {
-                    addRestriction(customRestrictionText);
-                    setCustomRestrictionText("");
-                  }}
-                >
-                  + Add
-                </button>
-              </div>
+            <div className="mt-4 flex gap-3">
+              <select
+                className="flex-1 rounded-2xl border px-4 py-3"
+                value={savedTemplateId}
+                onChange={(e) => setSavedTemplateId(e.target.value)}
+              >
+                {!savedTemplates.length ? (
+                  <option value="">No saved templates yet</option>
+                ) : null}
+                {savedTemplates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                className="rounded-2xl border px-5 py-3 font-semibold"
+                onClick={applySavedTemplate}
+                disabled={!savedTemplateId}
+              >
+                Load saved
+              </button>
             </div>
 
-            <div className="mt-6 text-sm font-black text-slate-900">
-              Active Restrictions ({model.customRestrictions.length})
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-2xl bg-emerald-600 px-5 py-3 font-semibold text-white"
+                onClick={() => void saveTemplate("create")}
+              >
+                Save As Template
+              </button>
+
+              <button
+                className="rounded-2xl border px-5 py-3 font-semibold"
+                onClick={() => void saveTemplate("update")}
+                disabled={!savedTemplateId}
+              >
+                Update Selected
+              </button>
+
+              <button
+                className="rounded-2xl border px-5 py-3 font-semibold"
+                onClick={() => void deleteTemplate()}
+                disabled={!savedTemplateId}
+              >
+                Delete Selected
+              </button>
             </div>
 
-            <div className="mt-3 grid gap-3">
-              {model.customRestrictions.map((r) => (
-                <div
-                  key={r.id}
-                  className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3"
-                >
-                  <div className="text-sm font-semibold text-slate-900">{r.text}</div>
-                  <button
-                    type="button"
-                    className="text-xl font-black text-red-500 hover:text-red-600"
-                    onClick={() => removeRestriction(r.id)}
-                    aria-label="Remove"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
+            <div className="mt-4 rounded-2xl border bg-slate-50 p-4 text-sm text-slate-700">
+              Saved templates load from GET /organizer/requirement-templates
             </div>
           </div>
         </div>
 
-        <div className={`${sectionCard} mt-8`}>
-          <SectionHeader
-            emoji="📋"
-            title="Compliance Requirements"
-            subtitle="Set operational rules vendors must acknowledge."
-          />
-
-          <div className="mt-6">
-            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {selectedBuiltInTemplate?.complianceQuickAdds.map((t) => (
-                <button key={t} type="button" className={chipCls} onClick={() => addCompliance(t, true)}>
-                  + {t}
-                </button>
-              ))}
+        <div className="mt-8 grid gap-6 lg:grid-cols-2">
+          <div className="rounded-3xl border p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-xl font-semibold">Compliance Items</div>
+              <button
+                className="rounded-xl border px-4 py-2 text-sm font-medium"
+                onClick={addCompliance}
+              >
+                + Add
+              </button>
             </div>
 
-            <div className="mt-6">
-              <div className="text-sm font-black text-slate-900">Custom Compliance Item</div>
-              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
-                <input
-                  className={inputCls}
-                  value={customComplianceText}
-                  onChange={(e) => setCustomComplianceText(e.target.value)}
-                  placeholder="Enter custom compliance requirement…"
-                />
-                <button
-                  type="button"
-                  className={addBtnGreen}
-                  onClick={() => {
-                    addCompliance(customComplianceText, true);
-                    setCustomComplianceText("");
-                  }}
-                >
-                  + Add
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-6 text-sm font-black text-slate-900">
-              Active Requirements ({model.complianceItems.length})
-            </div>
-
-            <div className="mt-3 grid gap-3">
-              {model.complianceItems.map((c) => (
-                <div
-                  key={c.id}
-                  className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3"
-                >
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      checked={!!c.required}
-                      onChange={(e) => toggleComplianceRequired(c.id, e.target.checked)}
-                    />
-                    <div className="text-sm font-semibold text-slate-900">
-                      <span className="mr-2 text-xs font-black text-slate-600">Required</span>
-                      {c.text}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="text-xl font-black text-red-500 hover:text-red-600"
-                    onClick={() => removeCompliance(c.id)}
-                    aria-label="Remove"
-                  >
-                    ×
-                  </button>
+            <div className="space-y-3">
+              {compliance.length === 0 ? (
+                <div className="rounded-2xl border border-dashed p-4 text-sm text-gray-500">
+                  No compliance items yet.
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
+              ) : null}
 
-        <div className={`${sectionCard} mt-8`}>
-          <SectionHeader
-            emoji="📄"
-            title="Document Requirements"
-            subtitle="Specify which documents vendors must upload."
-          />
-
-          <div className="mt-6">
-            <div className="text-sm font-black text-slate-900">Quick Add Templates</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {selectedBuiltInTemplate?.documentQuickAdds.map((t) => (
-                <button key={t} type="button" className={chipCls} onClick={() => addDocument(t, true)}>
-                  + {t}
-                </button>
-              ))}
-            </div>
-
-            <div className="mt-6">
-              <div className="text-sm font-black text-slate-900">Custom Document</div>
-              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
-                <input
-                  className={inputCls}
-                  value={customDocName}
-                  onChange={(e) => setCustomDocName(e.target.value)}
-                  placeholder="Enter custom document requirement…"
-                />
-                <button
-                  type="button"
-                  className={addBtnGreen}
-                  onClick={() => {
-                    addDocument(customDocName, true);
-                    setCustomDocName("");
-                  }}
-                >
-                  + Add
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-6 text-sm font-black text-slate-900">
-              Active Documents ({model.documentRequirements.length})
-            </div>
-
-            <div className="mt-3 grid gap-3">
-              {model.documentRequirements.map((d) => (
-                <div key={d.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
+              {compliance.map((item, idx) => (
+                <div key={item.id || idx} className="rounded-2xl border p-4">
+                  <div className="flex gap-3">
+                    <input
+                      className="flex-1 rounded-xl border px-3 py-2"
+                      value={item.text}
+                      onChange={(e) => updateCompliance(idx, { text: e.target.value })}
+                      placeholder="Requirement text"
+                    />
+                    <label className="flex items-center gap-2 text-sm">
                       <input
                         type="checkbox"
-                        checked={!!d.required}
-                        onChange={(e) => toggleDocRequired(d.id, e.target.checked)}
+                        checked={!!item.required}
+                        onChange={(e) => updateCompliance(idx, { required: e.target.checked })}
                       />
-                      <div className="text-sm font-semibold text-slate-900">
-                        <span className="mr-2 text-xs font-black text-slate-600">Required</span>
-                        {d.name}
-                      </div>
-                    </div>
-
+                      Required
+                    </label>
                     <button
-                      type="button"
-                      className="text-xl font-black text-red-500 hover:text-red-600"
-                      onClick={() => removeDoc(d.id)}
-                      aria-label="Remove"
+                      className="rounded-xl border px-3 py-2 text-sm"
+                      onClick={() => removeCompliance(idx)}
                     >
-                      ×
+                      Remove
                     </button>
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
 
-                  <div className="mt-3">
+          <div className="rounded-3xl border p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-xl font-semibold">Document Requirements</div>
+              <button
+                className="rounded-xl border px-4 py-2 text-sm font-medium"
+                onClick={addDocument}
+              >
+                + Add
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {documents.length === 0 ? (
+                <div className="rounded-2xl border border-dashed p-4 text-sm text-gray-500">
+                  No document requirements yet.
+                </div>
+              ) : null}
+
+              {documents.map((item, idx) => (
+                <div key={item.id || idx} className="rounded-2xl border p-4">
+                  <div className="grid gap-3 md:grid-cols-[1fr_auto_auto_auto]">
                     <input
-                      className={inputCls}
-                      value={d.dueBy || ""}
-                      onChange={(e) => setDocDueBy(d.id, e.target.value)}
-                      placeholder="Optional deadline (e.g., '14 days before event')"
+                      className="rounded-xl border px-3 py-2"
+                      value={item.name}
+                      onChange={(e) => updateDocument(idx, { name: e.target.value })}
+                      placeholder="Document name"
                     />
+                    <input
+                      className="rounded-xl border px-3 py-2"
+                      value={item.dueBy || ""}
+                      onChange={(e) => updateDocument(idx, { dueBy: e.target.value })}
+                      placeholder="Due by (optional)"
+                    />
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={!!item.required}
+                        onChange={(e) => updateDocument(idx, { required: e.target.checked })}
+                      />
+                      Required
+                    </label>
+                    <button
+                      className="rounded-xl border px-3 py-2 text-sm"
+                      onClick={() => removeDocument(idx)}
+                    >
+                      Remove
+                    </button>
                   </div>
                 </div>
               ))}
@@ -1582,31 +822,36 @@ export default function OrganizerEventRequirementsPage() {
           </div>
         </div>
 
-        <div className={`${sectionCard} mt-8`}>
-          <SectionHeader
-            emoji="💳"
-            title="Payment Instructions"
-            subtitle="Off-platform for now: tell vendors how to pay you after approval."
-          />
+        <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t pt-6">
+          <div className="text-sm text-gray-500">
+            After saving, this page will take you directly to booth layout.
+          </div>
 
-          <PaymentSettingsSection
-            value={model.paymentSettings as any}
-            onChange={(next) => setModel(bump({ ...model, paymentSettings: next as any }))}
-          />
+          <div className="flex gap-3">
+            <button
+              className="rounded-2xl border px-5 py-3 font-semibold"
+              onClick={() => navigate(`/organizer/events/${eventId}/layout`)}
+              disabled={!eventId}
+            >
+              Go to Booth Layout
+            </button>
 
-          <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs font-bold text-slate-600">
-            Vendors will see these instructions after you approve their application.
+            <button
+              className="rounded-2xl bg-blue-600 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void onSave()}
+              disabled={saving || redirecting}
+            >
+              {saving ? "Saving..." : "Save Configuration"}
+            </button>
           </div>
         </div>
 
-        <div className="h-10" />
+        {savedOk ? (
+          <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
+            Requirements saved successfully.
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
-
-
-
-
-
-

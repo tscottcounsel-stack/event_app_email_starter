@@ -1,5 +1,5 @@
 // src/pages/OrganizerEventsPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
 
@@ -90,70 +90,118 @@ function payoutBadge(earnings?: EarningsEvent) {
   };
 }
 
+function normalizeEventId(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function normalizeEventRow(raw: any): EventRow | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const id = normalizeEventId(
+    raw.id ?? raw.event_id ?? raw.eventId ?? raw.pk ?? raw.uuid
+  );
+  if (!id) return null;
+
+  return {
+    id,
+    title: typeof raw.title === "string" ? raw.title : "",
+    venue_name:
+      typeof raw.venue_name === "string"
+        ? raw.venue_name
+        : typeof raw.venueName === "string"
+        ? raw.venueName
+        : "",
+    city: typeof raw.city === "string" ? raw.city : "",
+    state: typeof raw.state === "string" ? raw.state : "",
+    start_date:
+      typeof raw.start_date === "string"
+        ? raw.start_date
+        : typeof raw.startDate === "string"
+        ? raw.startDate
+        : "",
+    published: Boolean(raw.published),
+  };
+}
+
+function dedupeEvents(rows: EventRow[]): EventRow[] {
+  const byId = new Map<number, EventRow>();
+  for (const row of rows) {
+    if (!row?.id) continue;
+    byId.set(row.id, row);
+  }
+  return Array.from(byId.values());
+}
+
 export default function OrganizerEventsPage() {
   const navigate = useNavigate();
   const [events, setEvents] = useState<EventRow[]>([]);
-  const [earningsMap, setEarningsMap] = useState<Record<number, EarningsEvent>>(
-    {}
-  );
+  const [earningsMap, setEarningsMap] = useState<Record<number, EarningsEvent>>({});
   const [summary, setSummary] = useState({
     payouts_paid: 0,
     payouts_owed: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [refreshTick, setRefreshTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
+      const headers = buildAuthHeaders();
 
-const headers = buildAuthHeaders();
+      const [eventsRes, earningsRes] = await Promise.all([
+        fetch(`${API_BASE}/organizer/events`, {
+          method: "GET",
+          headers,
+        }),
+        fetch(`${API_BASE}/organizer/earnings`, {
+          method: "GET",
+          headers,
+        }),
+      ]);
 
-const [eventsRes, earningsRes] = await Promise.all([
-  fetch(`${API_BASE}/organizer/events`, { headers }),
-  fetch(`${API_BASE}/organizer/earnings`, { headers })
-]);
+      if (!eventsRes.ok) {
+        const text = await eventsRes.text().catch(() => "");
+        throw new Error(text || `Failed to load events (${eventsRes.status})`);
+      }
 
-if (!eventsRes.ok) {
-  const text = await eventsRes.text().catch(() => "");
-  throw new Error(text || `Failed to load events (${eventsRes.status})`);
-}
+      if (!earningsRes.ok) {
+        const text = await earningsRes.text().catch(() => "");
+        throw new Error(text || `Failed to load earnings (${earningsRes.status})`);
+      }
 
-if (!earningsRes.ok) {
-  const text = await earningsRes.text().catch(() => "");
-  throw new Error(text || `Failed to load earnings (${earningsRes.status})`);
-}
+      const eventsData = await eventsRes.json().catch(() => null);
+      const earningsData = (await earningsRes.json().catch(() => null)) as EarningsResponse | null;
 
-const eventsData = await eventsRes.json();
-const earningsData = await earningsRes.json();
+      const rawEvents = Array.isArray(eventsData?.events) ? eventsData.events : [];
+      const normalizedEvents = dedupeEvents(
+        rawEvents.map(normalizeEventRow).filter(Boolean) as EventRow[]
+      );
 
-const eventsList = Array.isArray(eventsData?.events)
-  ? eventsData.events
-  : [];
+      const rawEarnings = Array.isArray(earningsData?.events) ? earningsData.events : [];
+      const nextMap: Record<number, EarningsEvent> = {};
 
-const earningsList = Array.isArray(earningsData?.events)
-  ? earningsData.events
-  : [];
+      rawEarnings.forEach((row) => {
+        const id = normalizeEventId((row as any)?.event_id);
+        if (!id) return;
+        nextMap[id] = {
+          event_id: id,
+          gross_sales: Number((row as any)?.gross_sales || 0),
+          platform_fees: Number((row as any)?.platform_fees || 0),
+          net_earnings: Number((row as any)?.net_earnings || 0),
+          payouts_paid: Number((row as any)?.payouts_paid || 0),
+          payouts_owed: Number((row as any)?.payouts_owed || 0),
+          payout_status_counts: {
+            paid: Number((row as any)?.payout_status_counts?.paid || 0),
+            unpaid: Number((row as any)?.payout_status_counts?.unpaid || 0),
+          },
+        };
+      });
 
-const nextMap: Record<number, EarningsEvent> = {};
-earningsList.forEach((row) => {
-  const id = Number(row?.event_id || 0);
-  nextMap[id] = {
-    event_id: id,
-    gross_sales: Number(row?.gross_sales || 0),
-    platform_fees: Number(row?.platform_fees || 0),
-    net_earnings: Number(row?.net_earnings || 0),
-    payouts_paid: Number(row?.payouts_paid || 0),
-    payouts_owed: Number(row?.payouts_owed || 0),
-    payout_status_counts: {
-      paid: Number(row?.payout_status_counts?.paid || 0),
-      unpaid: Number(row?.payout_status_counts?.unpaid || 0),
-    },
-  };
-});
-      setEvents(eventsList);
+      setEvents(normalizedEvents);
       setEarningsMap(nextMap);
       setSummary({
         payouts_paid: Number(earningsData?.summary?.payouts_paid || 0),
@@ -161,14 +209,16 @@ earningsList.forEach((row) => {
       });
     } catch (err: any) {
       setError(err?.message || "Failed to load events");
+      setEvents([]);
+      setEarningsMap({});
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [loadData, refreshTick]);
 
   const sortedEvents = useMemo(() => {
     return [...events].sort((a, b) => {
@@ -216,6 +266,15 @@ earningsList.forEach((row) => {
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
           {error}
         </div>
+
+        <div className="mt-4">
+          <button
+            className="rounded-lg border px-4 py-2 text-sm font-medium"
+            onClick={() => setRefreshTick((n) => n + 1)}
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -230,12 +289,21 @@ earningsList.forEach((row) => {
           </p>
         </div>
 
-        <button
-          className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white"
-          onClick={() => navigate("/organizer/events/create")}
-        >
-          + Create Event
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            className="rounded-lg border px-4 py-2 font-medium"
+            onClick={() => setRefreshTick((n) => n + 1)}
+          >
+            Refresh
+          </button>
+
+          <button
+            className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white"
+            onClick={() => navigate("/organizer/events/create")}
+          >
+            + Create Event
+          </button>
+        </div>
       </div>
 
       <div className="mb-6 flex flex-wrap gap-6 text-sm font-medium">
@@ -304,6 +372,10 @@ earningsList.forEach((row) => {
                       </div>
                     ) : null}
 
+                    <div className="mt-1 text-xs text-gray-400">
+                      Event ID: {ev.id}
+                    </div>
+
                     <div className="mt-3 flex flex-wrap gap-6 text-sm font-medium">
                       <div className="text-green-600">
                         💰 {formatCurrency(earnings?.gross_sales || 0)}
@@ -370,8 +442,3 @@ earningsList.forEach((row) => {
     </div>
   );
 }
-
-
-
-
-

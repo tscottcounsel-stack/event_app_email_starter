@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import logging
 import os
 from pathlib import Path
@@ -38,6 +38,7 @@ def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> N
 def _load_store_if_available() -> None:
     try:
         from app.store import load_store
+
         _safe_call(load_store, "store")
     except Exception as exc:
         logger.warning("Store loader unavailable: %s", exc)
@@ -46,17 +47,13 @@ def _load_store_if_available() -> None:
 def _init_db_if_available() -> None:
     try:
         from app.db import init_db
+
         _safe_call(init_db, "db")
     except Exception as exc:
         logger.warning("DB init unavailable: %s", exc)
 
 
 app = FastAPI(title="Vendor Connect API")
-
-# FORCE auth router (critical)
-from app.routers.auth import router as auth_router
-app.include_router(auth_router)
-
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
 
@@ -103,7 +100,8 @@ for module_name in [
     "app.routers.admin",
     "app.routers.applications",
     "app.routers.auth",
-    "app.routers.booths",    "app.routers.diagrams",
+    "app.routers.booths",
+    "app.routers.diagrams",
     "app.routers.events",
     "app.routers.layout",
     "app.routers.organizer_applications",
@@ -118,11 +116,7 @@ for module_name in [
     "app.routers.templates",
     "app.routers.users",
     "app.routers.vendors",
-    "app.routers.vendors_v2",    "app.routers._init_"
+    "app.routers.vendors_v2",
+    "app.routers._init_",
 ]:
     _try_include(app, module_name, "router")
-
-
-
-
-
