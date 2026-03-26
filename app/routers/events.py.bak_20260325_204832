@@ -1,4 +1,4 @@
-﻿# app/routers/events.py
+# app/routers/events.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -190,7 +190,7 @@ def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
     Persisted storage is a wrapper:
       event["diagram"] = { "diagram": <doc>, "version": <int> }
 
-    âœ… MIGRATION:
+    ✅ MIGRATION:
     If event["diagram"] is a raw doc (dict with levels/booths) we wrap it
     instead of wiping it.
     """
@@ -206,7 +206,7 @@ def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
         ev["diagram"] = slot
         return slot
 
-    # Case 2: raw doc stored directly in event["diagram"]  âœ… migrate
+    # Case 2: raw doc stored directly in event["diagram"]  ✅ migrate
     if isinstance(slot, dict) and _looks_like_diagram_doc(slot):
         migrated = {"diagram": slot, "version": 1}
         ev["diagram"] = migrated
@@ -214,7 +214,7 @@ def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
         save_store()
         return migrated
 
-    # Case 3: missing/unknown â†’ initialize empty
+    # Case 3: missing/unknown → initialize empty
     new_slot = {"diagram": {}, "version": 1}
     ev["diagram"] = new_slot
     ev["updated_at"] = utc_now_iso()
@@ -605,40 +605,24 @@ def organizer_get_event(event_id: int, user: dict = Depends(get_current_user)):
 
 
 @router.put("/organizer/events/{event_id}/requirements")
-def update_requirements(
-    event_id: str,
-    payload: dict,
-    user: dict = Depends(get_current_user),
+def organizer_put_requirements(
+    event_id: int, payload: Dict[str, Any], user: dict = Depends(get_current_user)
 ):
-    event = _EVENTS.get(event_id)
+    _get_owned_event_or_404(event_id, user)
 
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
+    normalized = _normalize_public_requirements_payload(payload or {})
+    _REQUIREMENTS[int(event_id)] = normalized
 
-    organizer_id = str(
-        event.get("organizer_id")
-        or event.get("created_by")
-        or event.get("owner_id")
-        or ""
-    )
-    user_id = str(user.get("sub") or user.get("id") or "")
-
-    if organizer_id and organizer_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    requirements = payload.get("requirements", [])
-    event["requirements"] = requirements
-
-    if "_REQUIREMENTS" in globals():
-        _REQUIREMENTS[event_id] = requirements
+    ev = _EVENTS.get(int(event_id))
+    if isinstance(ev, dict):
+        ev["requirements"] = normalized
+        ev["requirements_updated_at"] = normalized.get("updated_at") or utc_now_iso()
+        ev["updated_at"] = utc_now_iso()
 
     save_store()
+    return {"ok": True, "requirements": normalized}
 
-    return {
-        "success": True,
-        "event_id": event_id,
-        "requirements": requirements,
-    }
+
 @router.patch("/organizer/events/{event_id}")
 def organizer_patch_event(
     event_id: int,
@@ -677,7 +661,7 @@ def organizer_publish_event(event_id: int, user: dict = Depends(get_current_user
     return _as_event_dict(ev)
 
 
-# âœ… Organizer diagram endpoints â€” RETURN RAW DOC
+# ✅ Organizer diagram endpoints — RETURN RAW DOC
 @router.get("/organizer/events/{event_id}/diagram")
 def organizer_get_event_diagram(event_id: int, user: dict = Depends(get_current_user)):
     _get_owned_event_or_404(event_id, user)
@@ -696,7 +680,7 @@ def organizer_put_event_diagram(
     incoming_doc, incoming_version = _coerce_incoming_diagram_payload(payload)
     existing_doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
 
-    # âœ… Overwrite guard: don't wipe a non-empty diagram with empty payload
+    # ✅ Overwrite guard: don't wipe a non-empty diagram with empty payload
     if _is_effectively_empty_diagram(
         incoming_doc
     ) and not _is_effectively_empty_diagram(existing_doc):
@@ -1117,4 +1101,3 @@ def dev_reset():
     save_store()
 
     return {"ok": True, "message": "Store reset"}
-
