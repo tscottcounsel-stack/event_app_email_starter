@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import logging
 import os
 from pathlib import Path
@@ -54,29 +54,19 @@ def _init_db_if_available() -> None:
 app = FastAPI(title="Vendor Connect API")
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
-
 allowed_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-    "https://eventappemailstarter-production.up.railway.app",
 ]
 
 if frontend_origin:
     allowed_origins.append(frontend_origin)
 
-# Remove duplicates while preserving order
-allowed_origins = list(dict.fromkeys([o for o in allowed_origins if o]))
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.up\.railway\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)),
+    allow_origins=list(dict.fromkeys(allowed_origins)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -109,4 +99,3 @@ for module_name in [
     "app.routers.vendors",
 ]:
     _try_include(app, module_name, "router")
-
