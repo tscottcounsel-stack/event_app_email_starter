@@ -1,4 +1,4 @@
-﻿import importlib
+import importlib
 import logging
 import os
 from pathlib import Path
@@ -100,8 +100,7 @@ for module_name in [
     "app.routers.applications",
     "app.routers.requirement_templates",
     "app.routers.reviews",
-    "auth",
+    "app.routers.auth",
     "app.routers.vendors",
 ]:
     _try_include(app, module_name, "router")
-
