@@ -387,9 +387,12 @@ export default function VendorApplicationsPage() {
       !!(headers as any)["x-user-id"];
 
     if (!hasIdentity) {
-      throw new Error(
-        "Missing login identity headers (Authorization / x-user-email / x-user-id). Log in again so applications can load."
-      );
+      console.warn("Auth not ready, retrying applications load...");
+      setTimeout(() => {
+        loadApplications().catch(() => {});
+      }, 500);
+      setLoading(false);
+      return;
     }
 
     const res = await fetch(`${API_BASE}/vendor/applications`, {
@@ -590,7 +593,7 @@ if (!res.ok) {
               const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
               const local = localByKey[localKey] ?? null;
 
-              const effectiveChecked = local?.checked ?? it.checked ?? {};
+              const effectiveChecked = it.checked ?? local?.checked ?? {};
 
               const serverDocs =
                 it.documents && typeof it.documents === "object"
@@ -599,7 +602,7 @@ if (!res.ok) {
                   ? it.docs
                   : {};
 
-              const effectiveDocs = local?.docs ?? serverDocs ?? {};
+              const effectiveDocs = serverDocs ?? local?.docs ?? {};
               const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
 
               const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
@@ -616,7 +619,12 @@ if (!res.ok) {
                 req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
 
               const progressSource = local ? "progress: local" : "progress: server";
-              const showPayButton = status === "approved" && it.paymentStatus !== "paid";
+              const isPaidNow =
+                it.paymentStatus === "paid" ||
+                (paymentMessage === "Payment confirmed." &&
+                  resolvedApplicationId === resolveNumericApplicationId(it.applicationId ?? it.appId));
+
+              const showPayButton = status === "approved" && !isPaidNow;
 
               return (
                 <div key={`${it.eventId}:${it.appId}`} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -667,7 +675,7 @@ if (!res.ok) {
                             : "bg-amber-50 text-amber-700")
                         }
                       >
-                        {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
+                        {isPaidNow ? "Paid" : "Unpaid"}
                       </span>
 
                       <div className="text-sm font-extrabold text-slate-700">
@@ -723,6 +731,7 @@ if (!res.ok) {
     </div>
   );
 }
+
 
 
 
