@@ -1,72 +1,101 @@
-﻿from app.store import load_store
-from __future__ import annotations
-
+import importlib
+import logging
+import os
 from pathlib import Path
 
-from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-load_dotenv(override=True)
+logger = logging.getLogger(__name__)
 
-RUNTIME_DIR = Path("/tmp/vendorconnect")
-DATA_DIR = RUNTIME_DIR / "data"
-UPLOADS_DIR = RUNTIME_DIR / "uploads"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+UPLOADS_DIR = BASE_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
+def _safe_call(func, label: str) -> None:
     try:
-        mod = __import__(module_path, fromlist=[attr])
-        r = getattr(mod, attr, None)
-        if r is not None:
-            app.include_router(r)
-    except Exception as e:
-        print(f"FAILED TO LOAD {module_path}: {e}")
+        func()
+        logger.info("%s initialized", label)
+    except Exception as exc:
+        logger.warning("%s init skipped: %s", label, exc)
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="VendorConnect API")
+def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> None:
+    try:
+        module = importlib.import_module(module_name)
+        router = getattr(module, attr_name, None)
+        if router is None:
+            logger.warning("Module %s has no %s", module_name, attr_name)
+            return
+        app.include_router(router)
+        logger.info("Included router from %s", module_name)
+    except Exception as exc:
+        logger.warning("Skipping router %s: %s", module_name, exc)
 
-load_store()
+
+def _load_store_if_available() -> None:
+    try:
+        from app.store import load_store
+        _safe_call(load_store, "store")
+    except Exception as exc:
+        logger.warning("Store loader unavailable: %s", exc)
+
+
+def _init_db_if_available() -> None:
+    try:
+        from app.db import init_db
+        _safe_call(init_db, "db")
+    except Exception as exc:
+        logger.warning("DB init unavailable: %s", exc)
+
+
+app = FastAPI(title="Vendor Connect API")
+
+frontend_origin = os.getenv("FRONTEND_URL", "").strip()
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+if frontend_origin:
+    allowed_origins.append(frontend_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://eventappemailstarter-production.up.railway.app",
-    ],
+    allow_origins=list(dict.fromkeys(allowed_origins)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+_load_store_if_available()
+
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
-from app.db import init_db
-init_db()
+_init_db_if_available()
+
 
 @app.get("/")
 def root():
-        return {"status": "ok"}
+    return {"status": "ok"}
+
 
 @app.get("/health")
 def health():
-        return {"ok": True}
-
-_try_include(app, "app.routers.admin", "router")
-_try_include(app, "app.routers.events", "router")
-_try_include(app, "app.routers.applications", "router")
-_try_include(app, "app.routers.requirement_templates", "router")
-_try_include(app, "app.routers.reviews", "router")
-_try_include(app, "app.routers.auth", "router")
-_try_include(app, "app.routers.vendors", "router")
-
-    return app
+    return {"ok": True}
 
 
-app = create_app()
-
+for module_name in [
+    "app.routers.admin",
+    "app.routers.events",
+    "app.routers.applications",
+    "app.routers.requirement_templates",
+    "app.routers.reviews",
+    "app.routers.auth",
+    "app.routers.vendors",
+]:
+    _try_include(app, module_name, "router")
