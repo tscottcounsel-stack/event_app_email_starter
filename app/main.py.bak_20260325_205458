@@ -31,6 +31,7 @@ def _try_include(app: FastAPI, module_path: str, attr: str = "router") -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title="VendorConnect API")
 
+    
 load_store()
 app.add_middleware(
     CORSMiddleware,
@@ -69,4 +70,3 @@ app.add_middleware(
 
 
 app = create_app()
-
