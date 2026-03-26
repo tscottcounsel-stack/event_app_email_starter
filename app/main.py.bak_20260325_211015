@@ -46,8 +46,8 @@ app.add_middleware(
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
-from app.db import init_db
-init_db()
+    from app.db import init_db
+    init_db()
 
     @app.get("/")
     def root():
