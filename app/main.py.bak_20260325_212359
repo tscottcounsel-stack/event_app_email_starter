@@ -57,13 +57,13 @@ def root():
 def health():
         return {"ok": True}
 
-_try_include(app, "app.routers.admin", "router")
-_try_include(app, "app.routers.events", "router")
-_try_include(app, "app.routers.applications", "router")
-_try_include(app, "app.routers.requirement_templates", "router")
-_try_include(app, "app.routers.reviews", "router")
-_try_include(app, "app.routers.auth", "router")
-_try_include(app, "app.routers.vendors", "router")
+    _try_include(app, "app.routers.admin", "router")
+    _try_include(app, "app.routers.events", "router")
+    _try_include(app, "app.routers.applications", "router")
+    _try_include(app, "app.routers.requirement_templates", "router")
+    _try_include(app, "app.routers.reviews", "router")
+    _try_include(app, "app.routers.auth", "router")
+    _try_include(app, "app.routers.vendors", "router")
 
     return app
 
