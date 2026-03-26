@@ -1,8 +1,8 @@
 ﻿# app/store.py
 from __future__ import annotations
-import os
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -13,13 +13,6 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/vendorconnect/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DATA_PATH = DATA_DIR / "_data_store.json"
-# ðŸ”¥ FORCE RESET STORE ON STARTUP (TEMPORARY)
-if _DATA_PATH.exists():
-    try:
-        _DATA_PATH.unlink()
-        print("ðŸ”¥ Store reset on startup")
-    except Exception as e:
-        print(f"Failed to reset store: {e}")
 _LOCK = threading.RLock()
 
 
@@ -105,7 +98,7 @@ def load_store() -> None:
             raw = json.loads(_DATA_PATH.read_text(encoding="utf-8"))
         except Exception as e:
             print(
-                "âš ï¸ ERROR: _data_store.json is corrupted. Refusing to overwrite.",
+                "ERROR: _data_store.json is corrupted. Refusing to overwrite.",
                 file=sys.stderr,
             )
             print(f"Details: {e}", file=sys.stderr)
@@ -227,7 +220,6 @@ def save_store() -> None:
             "payments": _str_keyed(_PAYMENTS),
             "payouts": _str_keyed(_PAYOUTS),
             "audit_logs": _str_keyed(_AUDIT_LOGS),
-            "verifications": _str_keyed(_VERIFICATIONS),
             "verifications": _str_keyed(_VERIFICATIONS),
             "layout_meta": _str_keyed(_LAYOUT_META),
             "booths": _str_keyed(_BOOTHS),
@@ -398,5 +390,3 @@ def get_or_create_application(
         _APPLICATIONS[app_id] = application
         save_store()
         return application
-
-
