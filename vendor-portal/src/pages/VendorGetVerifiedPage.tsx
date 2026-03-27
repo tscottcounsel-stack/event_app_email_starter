@@ -49,6 +49,7 @@ export default function VendorGetVerifiedPage() {
   const [notes, setNotes] = useState("");
   const [licenseFile, setLicenseFile] = useState<File | null>(null);
   const [idFile, setIdFile] = useState<File | null>(null);
+  const [replaceTaxId, setReplaceTaxId] = useState(false);
 
   const token =
     localStorage.getItem("accessToken") ||
@@ -72,6 +73,7 @@ export default function VendorGetVerifiedPage() {
   function restoreSavedFormState() {
     const savedRaw = localStorage.getItem(VERIFICATION_FORM_STORAGE_KEY);
     if (!savedRaw) return;
+
     try {
       const saved = JSON.parse(savedRaw) as StoredVerificationDraft;
       setBusinessName(saved.businessName || "");
@@ -93,6 +95,13 @@ export default function VendorGetVerifiedPage() {
     }
     if (verification.notes) {
       setNotes(verification.notes);
+    }
+
+    // Never repopulate the real tax ID value. If the backend has a masked value,
+    // treat that as persisted and keep the input empty unless the user chooses to replace it.
+    if (verification.tax_id_masked) {
+      setTaxId("");
+      setReplaceTaxId(false);
     }
   }
 
@@ -173,7 +182,6 @@ export default function VendorGetVerifiedPage() {
 
         setRecord(data?.verification || null);
         await refreshStatus();
-        restoreSavedFormState();
 
         setMessage(
           "Verification payment confirmed. Now upload your documents and submit for review."
@@ -194,9 +202,15 @@ export default function VendorGetVerifiedPage() {
   }, [search, token]);
 
   useEffect(() => {
+    // Do not overwrite local draft tax ID once the backend has a masked stored value
+    // unless the user explicitly chooses to replace it.
+    if (record?.tax_id_masked && !replaceTaxId && !taxId) {
+      saveFormState({ businessName, taxId: "", notes });
+      return;
+    }
     saveFormState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [businessName, taxId, notes]);
+  }, [businessName, taxId, notes, replaceTaxId, record?.tax_id_masked]);
 
   async function handlePay() {
     if (!token) {
@@ -307,6 +321,7 @@ export default function VendorGetVerifiedPage() {
       setMessage("Verification submitted. Our team will review your documents.");
       setLicenseFile(null);
       setIdFile(null);
+      setReplaceTaxId(false);
       clearSavedFormState();
       applyVerificationToForm(data?.verification || data || null);
     } catch (err: any) {
@@ -330,6 +345,8 @@ export default function VendorGetVerifiedPage() {
         : record?.status === "rejected"
           ? "Rejected"
           : "Not submitted";
+
+  const hasStoredTaxId = !!record?.tax_id_masked;
 
   return (
     <div className="mx-auto max-w-4xl p-6">
@@ -423,12 +440,42 @@ export default function VendorGetVerifiedPage() {
             <label className="mb-1 block text-sm font-bold text-slate-700">
               Tax ID / EIN
             </label>
-            <input
-              value={taxId}
-              onChange={(e) => setTaxId(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-              placeholder="Enter tax ID"
-            />
+
+            {hasStoredTaxId && !replaceTaxId ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-sm font-bold text-slate-700">
+                  Stored tax ID: {record?.tax_id_masked}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReplaceTaxId(true)}
+                  className="mt-2 text-sm font-bold text-violet-700 hover:text-violet-800"
+                >
+                  Replace tax ID
+                </button>
+              </div>
+            ) : (
+              <>
+                <input
+                  value={taxId}
+                  onChange={(e) => setTaxId(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 px-4 py-3"
+                  placeholder={hasStoredTaxId ? "Enter a new tax ID" : "Enter tax ID"}
+                />
+                {hasStoredTaxId && replaceTaxId ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReplaceTaxId(false);
+                      setTaxId("");
+                    }}
+                    className="mt-2 text-sm font-bold text-slate-600 hover:text-slate-800"
+                  >
+                    Keep stored tax ID instead
+                  </button>
+                ) : null}
+              </>
+            )}
           </div>
         </div>
 
