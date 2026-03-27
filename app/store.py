@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data/vendorconnect"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DATA_PATH = DATA_DIR / "_data_store.json"
@@ -50,18 +50,6 @@ def _next_id_from_keys(records: Dict[int, Any], fallback: int = 1) -> int:
     return max(ids, default=fallback - 1) + 1
 
 
-def _next_id_from_field(records: Dict[int, Any], field: str, fallback: int = 1) -> int:
-    ids = []
-    for value in (records or {}).values():
-        if not isinstance(value, dict):
-            continue
-        try:
-            ids.append(int(value.get(field)))
-        except Exception:
-            continue
-    return max(ids, default=fallback - 1) + 1
-
-
 def _recompute_next_counters() -> None:
     global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
 
@@ -74,12 +62,6 @@ def _recompute_next_counters() -> None:
     )
 
 
-# -------------------------------------------------------------------
-# In-memory store
-# -------------------------------------------------------------------
-
-# Keep event IDs numeric internally. Show event titles in the UI.
-# We intentionally start empty so users do not inherit sample events.
 _EVENTS: Dict[int, Dict[str, Any]] = {}
 _REQUIREMENTS: Dict[int, Dict[str, Any]] = {}
 _REQUIREMENT_TEMPLATES: Dict[str, Dict[str, Any]] = {}

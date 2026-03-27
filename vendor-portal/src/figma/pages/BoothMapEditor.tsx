@@ -414,6 +414,13 @@ export default function BoothMapEditor() {
   const [hideGrid, setHideGrid] = useState(false);
   const [zoom, setZoom] = useState(1);
 
+  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [bulkCols, setBulkCols] = useState(4);
+  const [bulkRows, setBulkRows] = useState(2);
+  const [bulkSpacingX, setBulkSpacingX] = useState(18);
+  const [bulkSpacingY, setBulkSpacingY] = useState(18);
+  const [bulkPreset, setBulkPreset] = useState<"standard" | "wide" | "deep">("standard");
+
   const [levels, setLevels] = useState<Level[]>([
     { id: "level-1", name: "Level 1", booths: [], elements: [] },
   ]);
@@ -469,6 +476,34 @@ export default function BoothMapEditor() {
   function markDirty() {
     setStatusMsg("Not saved yet");
     setSaveError(null);
+  }
+
+  function snapValue(value: number) {
+    if (!snapToGrid) return value;
+    return Math.round(value / Math.max(1, gridSize)) * Math.max(1, gridSize);
+  }
+
+  function makeBoothPreset() {
+    if (bulkPreset === "wide") return { width: 180, height: 90 };
+    if (bulkPreset === "deep") return { width: 110, height: 150 };
+    return { width: 140, height: 110 };
+  }
+
+  function updateSelectedBooth(patch: Record<string, any>) {
+    if (!selectedBooth) return;
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId
+          ? lvl
+          : {
+              ...lvl,
+              booths: lvl.booths.map((b: any) =>
+                String(b.id) !== String((selectedBooth as any).id) ? b : { ...b, ...patch }
+              ),
+            }
+      )
+    );
+    markDirty();
   }
 
   function clearSelection() {
@@ -888,7 +923,11 @@ useEffect(() => {
                 booths: lvl.booths.map((b: any) =>
                   String(b.id) !== String(id)
                     ? b
-                    : { ...b, x: (b.x || 0) + dx, y: (b.y || 0) + dy }
+                    : {
+                        ...b,
+                        x: snapValue((b.x || 0) + dx),
+                        y: snapValue((b.y || 0) + dy),
+                      }
                 ),
               };
             }
@@ -896,7 +935,9 @@ useEffect(() => {
             return {
               ...lvl,
               elements: lvl.elements.map((el) =>
-                el.id !== id ? el : { ...el, x: el.x + dx, y: el.y + dy }
+                el.id !== id
+                  ? el
+                  : { ...el, x: snapValue(el.x + dx), y: snapValue(el.y + dy) }
               ),
             };
           })
@@ -908,8 +949,8 @@ useEffect(() => {
 
       if (resize) {
         const { kind, id, sw, sh } = resize;
-        const nw = Math.max(40, sw + dx);
-        const nh = Math.max(28, sh + dy);
+        const nw = snapValue(Math.max(40, sw + dx));
+        const nh = snapValue(Math.max(28, sh + dy));
 
         setLevels((prev) =>
           prev.map((lvl) => {
@@ -949,7 +990,7 @@ useEffect(() => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [drag, resize, zoom, activeLevelId]);
+  }, [drag, resize, zoom, activeLevelId, gridSize, snapToGrid]);
 
   function beginDrag(kind: "booth" | "element", id: string, e: React.MouseEvent) {
     if (layoutLocked) {
@@ -964,7 +1005,9 @@ useEffect(() => {
       window.alert("Published (Locked) — unlock layout to resize items.");
       return;
     }
+    e.preventDefault();
     e.stopPropagation();
+    setDrag(null);
 
     if (kind === "booth") {
       const b = activeLevel.booths.find((x: any) => String(x.id) === String(id)) as any;
@@ -1088,6 +1131,117 @@ useEffect(() => {
     setDrawerOpen(true);
     setTab("booths");
     markDirty();
+  }
+
+
+  function addBoothCluster() {
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to add booths.");
+      return;
+    }
+
+    const { width, height } = makeBoothPreset();
+    const startX = 80;
+    const startY = 120;
+    const nextBooths: any[] = [];
+    const baseCount = activeLevel.booths.length;
+
+    for (let row = 0; row < Math.max(1, bulkRows); row += 1) {
+      for (let col = 0; col < Math.max(1, bulkCols); col += 1) {
+        const boothNumber = baseCount + nextBooths.length + 1;
+        nextBooths.push({
+          id: uid("booth"),
+          label: `Booth ${boothNumber}`,
+          x: snapValue(startX + col * (width + bulkSpacingX)),
+          y: snapValue(startY + row * (height + bulkSpacingY)),
+          width,
+          height,
+          category: "",
+          price: 0,
+          status: "available",
+        });
+      }
+    }
+
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId ? lvl : { ...lvl, booths: [...lvl.booths, ...nextBooths] }
+      )
+    );
+
+    if (nextBooths[0]) {
+      setSelectedKind("booth");
+      setSelectedId(nextBooths[0].id);
+    }
+    setDrawerOpen(true);
+    setTab("booths");
+    markDirty();
+  }
+
+  function duplicateSelectedBooth() {
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to duplicate booths.");
+      return;
+    }
+    if (!selectedBooth) return;
+
+    const copy: any = {
+      ...(selectedBooth as any),
+      id: uid("booth"),
+      label: `${String((selectedBooth as any).label || "Booth")} Copy`,
+      x: snapValue(Number((selectedBooth as any).x || 0) + Number((selectedBooth as any).width || 140) + 16),
+      y: snapValue(Number((selectedBooth as any).y || 0)),
+    };
+
+    setLevels((prev) =>
+      prev.map((lvl) =>
+        lvl.id !== activeLevelId ? lvl : { ...lvl, booths: [...lvl.booths, copy] }
+      )
+    );
+    setSelectedKind("booth");
+    setSelectedId(copy.id);
+    markDirty();
+  }
+
+  function duplicateActiveLevel() {
+    if (layoutLocked) {
+      window.alert("Published (Locked) — unlock layout to duplicate floors.");
+      return;
+    }
+    const source = activeLevel;
+    if (!source) return;
+
+    const copyId = uid("level");
+    const copiedLevel: Level = {
+      id: copyId,
+      name: `${source.name} Copy`,
+      booths: source.booths.map((b: any, idx: number) => ({
+        ...b,
+        id: uid("booth"),
+        label: String(b.label || `Booth ${idx + 1}`),
+        x: snapValue(Number(b.x || 0) + 30),
+        y: snapValue(Number(b.y || 0) + 30),
+      })),
+      elements: source.elements.map((el) => ({
+        ...el,
+        id: uid("el"),
+        x: snapValue(Number(el.x || 0) + 30),
+        y: snapValue(Number(el.y || 0) + 30),
+      })),
+    };
+
+    setLevels((prev) => [...prev, copiedLevel]);
+    setActiveLevelId(copyId);
+    setTab("floors");
+    markDirty();
+  }
+
+  function nudgeSelectedBooth(dx: number, dy: number) {
+    if (!selectedBooth || layoutLocked) return;
+    updateSelectedBooth({
+      x: snapValue(Number((selectedBooth as any).x || 0) + dx),
+      y: snapValue(Number((selectedBooth as any).y || 0) + dy),
+    });
   }
 
   function deleteSelected() {
@@ -1362,6 +1516,38 @@ const overlayDetail = overlayName
     : `linear-gradient(to right, rgba(148,163,184,0.25) 1px, transparent 1px),
        linear-gradient(to bottom, rgba(148,163,184,0.25) 1px, transparent 1px)`;
 
+  useEffect(() => {
+    if (!selectedBooth || pickerMode || vendorMode || layoutLocked) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement | null)?.tagName || "")) {
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteSelected();
+        return;
+      }
+      const step = e.shiftKey ? gridSize * 2 : gridSize;
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        nudgeSelectedBooth(0, -step);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        nudgeSelectedBooth(0, step);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        nudgeSelectedBooth(-step, 0);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        nudgeSelectedBooth(step, 0);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedBooth, pickerMode, vendorMode, layoutLocked, gridSize]);
+
   if (!eventId) {
     return <div style={{ padding: 20, fontWeight: 900 }}>Missing eventId.</div>;
   }
@@ -1479,6 +1665,22 @@ const overlayDetail = overlayName
             <button onClick={fitToScreen} style={pill(false)}>
               Fit
             </button>
+
+            {!pickerMode && !vendorMode ? (
+              <>
+                <button onClick={addBoothCluster} style={pill(false)} title="Create multiple booths at once">
+                  + Booth Grid
+                </button>
+                <button
+                  onClick={duplicateSelectedBooth}
+                  style={pill(false)}
+                  title="Duplicate selected booth"
+                  disabled={!selectedBooth}
+                >
+                  Duplicate Booth
+                </button>
+              </>
+            ) : null}
 
             <button
               onClick={handlePrint}
@@ -1659,6 +1861,9 @@ const overlayDetail = overlayName
                 <button onClick={() => setHideGrid((x) => !x)} style={pill(hideGrid)}>
                   Grid
                 </button>
+                <button onClick={() => setSnapToGrid((x) => !x)} style={pill(snapToGrid)}>
+                  Snap
+                </button>
                 <button onClick={() => setDrawerOpen((x) => !x)} style={pill(drawerOpen)}>
                   Panel
                 </button>
@@ -1738,11 +1943,14 @@ const overlayDetail = overlayName
                         position: "absolute",
                         right: 8,
                         bottom: 8,
-                        width: 14,
-                        height: 14,
+                        width: 18,
+                        height: 18,
                         borderRadius: 6,
                         background: "#0f172a",
+                        border: "2px solid #fff",
+                        boxShadow: "0 2px 8px rgba(15,23,42,0.22)",
                         cursor: "nwse-resize",
+                        zIndex: 4,
                       }}
                     />
                   ) : null}
@@ -1937,11 +2145,14 @@ const overlayDetail = overlayName
                         position: "absolute",
                         right: 8,
                         bottom: 8,
-                        width: 14,
-                        height: 14,
+                        width: 18,
+                        height: 18,
                         borderRadius: 6,
                         background: "#0f172a",
+                        border: "2px solid #fff",
+                        boxShadow: "0 2px 8px rgba(15,23,42,0.22)",
                         cursor: "nwse-resize",
+                        zIndex: 4,
                       }}
                     />
                   ) : null}
@@ -1996,10 +2207,15 @@ const overlayDetail = overlayName
                   >
                     <div style={{ fontSize: 14, fontWeight: 1000 }}>Floors</div>
                     {!pickerMode && !vendorMode ? (
-  <button style={pill(true)} onClick={addBooth}>
-    + Add Booth
-  </button>
-) : null}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button style={pill(false)} onClick={addLevel}>
+                          + Floor
+                        </button>
+                        <button style={pill(false)} onClick={duplicateActiveLevel}>
+                          Duplicate Floor
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
@@ -2028,11 +2244,59 @@ const overlayDetail = overlayName
                   >
                     <div style={{ fontSize: 14, fontWeight: 1000 }}>Booths</div>
                     {!pickerMode && !vendorMode ? (
-                      <button style={pill(true)} onClick={addBooth}>
-                        + Add Booth
-                      </button>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button style={pill(true)} onClick={addBooth}>
+                          + Add Booth
+                        </button>
+                        <button style={pill(false)} onClick={addBoothCluster}>
+                          + Booth Grid
+                        </button>
+                      </div>
                     ) : null}
                   </div>
+
+                  {!pickerMode && !vendorMode ? (
+                    <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 1000, color: "#64748b" }}>
+                        Bulk Create / Section Builder
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Columns
+                          <input type="number" min={1} max={20} value={bulkCols}
+                            onChange={(e) => setBulkCols(Math.max(1, Number(e.target.value || 1)))}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }} />
+                        </label>
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Rows
+                          <input type="number" min={1} max={20} value={bulkRows}
+                            onChange={(e) => setBulkRows(Math.max(1, Number(e.target.value || 1)))}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }} />
+                        </label>
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Spacing X
+                          <input type="number" min={0} max={100} value={bulkSpacingX}
+                            onChange={(e) => setBulkSpacingX(Math.max(0, Number(e.target.value || 0)))}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }} />
+                        </label>
+                        <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                          Spacing Y
+                          <input type="number" min={0} max={100} value={bulkSpacingY}
+                            onChange={(e) => setBulkSpacingY(Math.max(0, Number(e.target.value || 0)))}
+                            style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }} />
+                        </label>
+                      </div>
+                      <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                        Booth Preset
+                        <select value={bulkPreset} onChange={(e) => setBulkPreset(e.target.value as any)}
+                          style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 900 }}>
+                          <option value="standard">Standard</option>
+                          <option value="wide">Wide</option>
+                          <option value="deep">Deep</option>
+                        </select>
+                      </label>
+                    </div>
+                  ) : null}
 
                   {selectedBooth ? (
                     <div style={{ marginTop: 12 }}>
@@ -2198,9 +2462,49 @@ const overlayDetail = overlayName
                                 ))}
                               </select>
                             </label>
+
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                              <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                                Width
+                                <input
+                                  type="number"
+                                  min={40}
+                                  value={String((selectedBooth as any).width || 140)}
+                                  onChange={(e) => updateSelectedBooth({ width: snapValue(Number(e.target.value || 140)) })}
+                                  style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                                />
+                              </label>
+                              <label style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+                                Height
+                                <input
+                                  type="number"
+                                  min={28}
+                                  value={String((selectedBooth as any).height || 110)}
+                                  onChange={(e) => updateSelectedBooth({ height: snapValue(Number(e.target.value || 110)) })}
+                                  style={{ width: "100%", marginTop: 6, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 800 }}
+                                />
+                              </label>
+                            </div>
+
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 900, color: "#334155", marginBottom: 6 }}>
+                                Nudge
+                              </div>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 40px)", gap: 6, justifyContent: "start" }}>
+                                <span />
+                                <button style={pill(false)} onClick={() => nudgeSelectedBooth(0, -gridSize)}>↑</button>
+                                <span />
+                                <button style={pill(false)} onClick={() => nudgeSelectedBooth(-gridSize, 0)}>←</button>
+                                <button style={pill(false)} onClick={() => nudgeSelectedBooth(gridSize, 0)}>→</button>
+                                <button style={pill(false)} onClick={() => nudgeSelectedBooth(0, gridSize)}>↓</button>
+                              </div>
+                            </div>
                           </div>
 
-                          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+                          <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                            <button style={pill(false)} onClick={duplicateSelectedBooth}>
+                              Duplicate
+                            </button>
                             <button
                               style={{
                                 ...pill(false),
