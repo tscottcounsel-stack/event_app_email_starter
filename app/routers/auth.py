@@ -577,7 +577,12 @@ def verification_create_checkout(
         record["last_session_id"] = session.id
         record["payment_status"] = "pending"
         _save_verification_record(record)
-        return {"ok": True, "url": session.url, "session_id": session.id, "verification": record}
+        return {
+            "ok": True,
+            "url": session.url,
+            "session_id": session.id,
+            "verification": record,
+        }
     except Exception as e:
         return {"ok": False, "detail": f"Stripe checkout unavailable: {e}"}
 
@@ -665,6 +670,8 @@ def verification_confirm_payment(
             status_code=400,
             detail=f"Payment confirmation failed: {str(e)}",
         )
+
+
 @router.post("/verification/submit")
 def verification_submit(
     business_name: str = Form(...),

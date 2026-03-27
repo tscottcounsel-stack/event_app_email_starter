@@ -5,6 +5,8 @@ const API_BASE =
   import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
+const ORGANIZER_VERIFICATION_FORM_STORAGE_KEY = "organizer_verification_form";
+
 type VerificationDocument = {
   label?: string;
   name: string;
@@ -28,11 +30,21 @@ type VerificationRecord = {
   government_id_url?: string | null;
 };
 
+type StoredOrganizerVerificationDraft = {
+  businessName: string;
+  notes: string;
+  paypal: string;
+  venmo: string;
+  cashApp: string;
+};
+
 export default function OrganizerGetVerifiedPage() {
   const [record, setRecord] = useState<VerificationRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [paying, setPaying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [businessName, setBusinessName] = useState("");
   const [notes, setNotes] = useState("");
@@ -49,131 +61,44 @@ export default function OrganizerGetVerifiedPage() {
 
   const search = useMemo(() => new URLSearchParams(window.location.search), []);
 
-  async function loadStatus() {
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+  function saveFormState(overrides?: Partial<StoredOrganizerVerificationDraft>) {
+    const payload: StoredOrganizerVerificationDraft = {
+      businessName: overrides?.businessName ?? businessName,
+      notes: overrides?.notes ?? notes,
+      paypal: overrides?.paypal ?? paypal,
+      venmo: overrides?.venmo ?? venmo,
+      cashApp: overrides?.cashApp ?? cashApp,
+    };
 
-    try {
-      const res = await fetch(`${API_BASE}/verification/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const data = await res.json().catch(() => null);
-      const verification = data?.verification || null;
-
-      setRecord(verification);
-
-      if (verification?.business_name) {
-        setBusinessName(verification.business_name);
-      }
-
-      if (verification?.notes) {
-        setNotes(verification.notes);
-      }
-    } finally {
-      setLoading(false);
-    }
+    localStorage.setItem(
+      ORGANIZER_VERIFICATION_FORM_STORAGE_KEY,
+      JSON.stringify(payload)
+    );
   }
 
-  useEffect(() => {
-    loadStatus().catch(() => setLoading(false));
-  }, []);
+  function restoreSavedFormState() {
+    const savedRaw = localStorage.getItem(
+      ORGANIZER_VERIFICATION_FORM_STORAGE_KEY
+    );
+    if (!savedRaw) return;
 
-  useEffect(() => {
-    const payment = (search.get("payment") || "").toLowerCase();
-    const sessionId = search.get("session_id") || "";
-
-    if (payment !== "success" || !sessionId || !token) return;
-
-    (async () => {
-      try {
-        setMessage("Confirming verification payment…");
-
-        const res = await fetch(`${API_BASE}/verification/confirm-payment`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ session_id: sessionId }),
-        });
-
-        const data = await res.json().catch(() => null);
-        if (!res.ok) {
-          throw new Error(data?.detail || "Unable to confirm payment.");
-        }
-
-        setRecord(data?.verification || null);
-        setMessage("Verification payment confirmed.");
-
-        const clean = new URL(window.location.href);
-        clean.searchParams.delete("payment");
-        clean.searchParams.delete("session_id");
-        window.history.replaceState(
-          {},
-          "",
-          `${clean.pathname}${clean.search}${clean.hash}`
-        );
-      } catch (err: any) {
-        setMessage(err?.message || "Unable to confirm payment.");
-      }
-    })();
-  }, [token, search]);
-
- async function handlePay() {
-  try {
-    console.log("STEP 1: handlePay triggered");
-
-    setMessage("Redirecting to secure payment…");
-
-    const res = await fetch(`${API_BASE}/verification/create-checkout`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        success_url: `${window.location.origin}/organizer/verify?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${window.location.origin}/organizer/verify?payment=cancel`,
-      }),
-    });
-
-    console.log("STEP 2: response received", res);
-
-    const text = await res.text();
-    console.log("STEP 3: raw response text:", text);
-
-    let data = null;
     try {
-      data = JSON.parse(text);
+      const saved = JSON.parse(
+        savedRaw
+      ) as StoredOrganizerVerificationDraft;
+      setBusinessName(saved.businessName || "");
+      setNotes(saved.notes || "");
+      setPaypal(saved.paypal || "");
+      setVenmo(saved.venmo || "");
+      setCashApp(saved.cashApp || "");
     } catch {
-      console.log("STEP 4: response is NOT JSON");
+      localStorage.removeItem(ORGANIZER_VERIFICATION_FORM_STORAGE_KEY);
     }
-
-    console.log("STEP 5: parsed data:", data);
-
-    if (!res.ok) {
-      throw new Error(data?.detail || "Request failed");
-    }
-
-    if (!data?.ok) {
-      throw new Error(data?.detail || "Stripe not working");
-    }
-
-    if (!data?.url) {
-      throw new Error("No checkout URL returned");
-    }
-
-    console.log("STEP 6: redirecting to:", data.url);
-
-    window.location.href = data.url;
-  } catch (err: any) {
-    console.error("ERROR:", err);
-    setMessage(err?.message || "Payment failed");
   }
-}
+
+  function clearSavedFormState() {
+    localStorage.removeItem(ORGANIZER_VERIFICATION_FORM_STORAGE_KEY);
+  }
 
   function buildReviewNotes() {
     const sections: string[] = [];
@@ -201,81 +126,250 @@ export default function OrganizerGetVerifiedPage() {
     return sections.join("\n\n");
   }
 
-  async function submitNow() {
-  try {
-    console.log("SUBMIT 1: submitNow triggered");
-    setSubmitting(true);
-    setMessage(null);
+  function applyVerificationToForm(verification: VerificationRecord | null) {
+    if (!verification) return;
 
-    if (!token) {
-      throw new Error("You must be signed in.");
+    if (verification.business_name) {
+      setBusinessName(verification.business_name);
     }
 
-    if (!record?.fee_paid) {
-      throw new Error("Please pay the verification fee before submitting.");
+    if (verification.notes) {
+      const incomingNotes = String(verification.notes || "");
+      setNotes((prev) => prev || incomingNotes);
+
+      const paypalMatch = incomingNotes.match(/PayPal:\s*(.+)/i);
+      const venmoMatch = incomingNotes.match(/Venmo:\s*(.+)/i);
+      const cashAppMatch = incomingNotes.match(/Cash App:\s*(.+)/i);
+
+      if (paypalMatch?.[1]) setPaypal((prev) => prev || paypalMatch[1].trim());
+      if (venmoMatch?.[1]) setVenmo((prev) => prev || venmoMatch[1].trim());
+      if (cashAppMatch?.[1]) setCashApp((prev) => prev || cashAppMatch[1].trim());
+    }
+  }
+
+  async function loadStatus() {
+    if (!token) {
+      setError("You must be logged in to complete organizer verification.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setError(null);
+      restoreSavedFormState();
+
+      const res = await fetch(`${API_BASE}/verification/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.detail || "Unable to load verification status.");
+      }
+
+      const verification = data?.verification || null;
+      setRecord(verification);
+      applyVerificationToForm(verification);
+    } catch (err: any) {
+      setError(err?.message || "Unable to load verification status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function refreshStatus() {
+    if (!token) return;
+
+    const res = await fetch(`${API_BASE}/verification/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.detail || "Unable to refresh verification status.");
+    }
+
+    const verification = data?.verification || null;
+    setRecord(verification);
+    applyVerificationToForm(verification);
+    return verification;
+  }
+
+  useEffect(() => {
+    loadStatus().catch(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const payment = (search.get("payment") || "").toLowerCase();
+    const sessionId = search.get("session_id") || "";
+
+    if (payment !== "success" || !sessionId || !token) return;
+
+    (async () => {
+      try {
+        setError(null);
+        setMessage("Confirming verification payment…");
+
+        const res = await fetch(`${API_BASE}/verification/confirm-payment`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
+
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(data?.detail || "Unable to confirm payment.");
+        }
+
+        setRecord(data?.verification || null);
+        await refreshStatus();
+
+        setMessage(
+          "Verification payment confirmed. Now upload your documents and submit for review."
+        );
+
+        const clean = new URL(window.location.href);
+        clean.searchParams.delete("payment");
+        clean.searchParams.delete("session_id");
+        window.history.replaceState(
+          {},
+          "",
+          `${clean.pathname}${clean.search}${clean.hash}`
+        );
+      } catch (err: any) {
+        setError(err?.message || "Unable to confirm payment.");
+      }
+    })();
+  }, [token, search]);
+
+  useEffect(() => {
+    saveFormState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [businessName, notes, paypal, venmo, cashApp]);
+
+  async function handlePay() {
+    if (!token) {
+      setError("You must be signed in to pay the verification fee.");
+      return;
     }
 
     if (!businessName.trim()) {
-      throw new Error("Organization name is required.");
+      setError("Please enter your organization name before payment.");
+      return;
     }
 
-    if (!businessLicenseFile) {
-      throw new Error("Business registration / license file is required.");
-    }
-
-    if (!governmentIdFile) {
-      throw new Error("Government ID or legitimacy document is required.");
-    }
-
-    const formData = new FormData();
-    formData.append("business_name", businessName.trim());
-    formData.append("tax_id", "");
-    formData.append("notes", buildReviewNotes());
-    formData.append("business_license", businessLicenseFile);
-    formData.append("government_id", governmentIdFile);
-
-    console.log("SUBMIT 2: sending request");
-
-    const res = await fetch(`${API_BASE}/verification/submit`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      body: formData,
-    });
-
-    console.log("SUBMIT 3: response received", res.status);
-
-    const text = await res.text();
-    console.log("SUBMIT 4: raw response text:", text);
-
-    let data: any = null;
     try {
-      data = JSON.parse(text);
-    } catch {
-      console.log("SUBMIT 5: response was not JSON");
+      saveFormState();
+      setPaying(true);
+      setError(null);
+      setMessage("Redirecting to secure payment…");
+
+      const reviewNotes = buildReviewNotes();
+
+      const res = await fetch(`${API_BASE}/verification/create-checkout`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          success_url: `${window.location.origin}/organizer/verify?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${window.location.origin}/organizer/verify?payment=cancel`,
+          business_name: businessName.trim(),
+          notes: reviewNotes,
+        }),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        throw new Error(data?.detail || "Unable to start payment.");
+      }
+
+      if (!data?.url) {
+        throw new Error("No checkout URL returned.");
+      }
+
+      window.location.href = data.url;
+    } catch (err: any) {
+      setError(err?.message || "Payment failed.");
+      setMessage(null);
+    } finally {
+      setPaying(false);
     }
-
-    console.log("SUBMIT 6: parsed data:", data);
-
-    if (!res.ok) {
-      throw new Error(data?.detail || "Unable to submit verification.");
-    }
-
-    setRecord(data?.verification || null);
-    setMessage("Verification submitted. Our team will review your organization details.");
-  } catch (err: any) {
-    console.error("SUBMIT ERROR:", err);
-    setMessage(err?.message || "Unable to submit verification.");
-  } finally {
-    setSubmitting(false);
   }
-}
+
+  async function submitNow() {
+    try {
+      setSubmitting(true);
+      setError(null);
+      setMessage(null);
+
+      if (!token) {
+        throw new Error("You must be signed in.");
+      }
+
+      if (!record?.fee_paid) {
+        throw new Error("Please pay the verification fee before submitting.");
+      }
+
+      if (!businessName.trim()) {
+        throw new Error("Organization name is required.");
+      }
+
+      if (!businessLicenseFile) {
+        throw new Error("Business registration / license file is required.");
+      }
+
+      if (!governmentIdFile) {
+        throw new Error("Government ID or legitimacy document is required.");
+      }
+
+      const formData = new FormData();
+      formData.append("business_name", businessName.trim());
+      formData.append("tax_id", "");
+      formData.append("notes", buildReviewNotes());
+      formData.append("business_license", businessLicenseFile);
+      formData.append("government_id", governmentIdFile);
+
+      const res = await fetch(`${API_BASE}/verification/submit`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        throw new Error(data?.detail || "Unable to submit verification.");
+      }
+
+      setRecord(data?.verification || null);
+      setMessage(
+        "Verification submitted. Our team will review your organization details."
+      );
+      setBusinessLicenseFile(null);
+      setGovernmentIdFile(null);
+      clearSavedFormState();
+      applyVerificationToForm(data?.verification || null);
+    } catch (err: any) {
+      setError(err?.message || "Unable to submit verification.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   if (loading) {
     return <div className="p-6">Loading verification…</div>;
   }
 
+  const feePaid = !!record?.fee_paid;
   const statusLabel =
     record?.status === "pending"
       ? "Pending review"
@@ -311,12 +405,12 @@ export default function OrganizerGetVerifiedPage() {
 
           <div
             className={`rounded-full px-4 py-2 text-sm font-extrabold ${
-              record?.fee_paid
+              feePaid
                 ? "bg-emerald-50 text-emerald-700"
                 : "bg-amber-50 text-amber-700"
             }`}
           >
-            {record?.fee_paid
+            {feePaid
               ? "Fee paid"
               : `Fee due: $${record?.fee_amount ?? 49}`}
           </div>
@@ -326,6 +420,12 @@ export default function OrganizerGetVerifiedPage() {
       {message ? (
         <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm font-semibold text-indigo-900">
           {message}
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-800">
+          {error}
         </div>
       ) : null}
 
@@ -356,8 +456,11 @@ export default function OrganizerGetVerifiedPage() {
 
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-black text-slate-900">
-          Organization details
+          Step 1: Organization details
         </h2>
+        <p className="mt-2 text-sm font-semibold text-slate-600">
+          Enter your organization details first. Documents are only requested after your payment is confirmed.
+        </p>
 
         <div className="mt-4 grid gap-4 md:grid-cols-2">
           <div className="md:col-span-2">
@@ -407,28 +510,6 @@ export default function OrganizerGetVerifiedPage() {
               placeholder="Cash App tag (optional)"
             />
           </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-bold text-slate-700">
-              Business registration / license
-            </label>
-            <input
-              type="file"
-              onChange={(e) => setBusinessLicenseFile(e.target.files?.[0] || null)}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-bold text-slate-700">
-              Government ID or legitimacy document
-            </label>
-            <input
-              type="file"
-              onChange={(e) => setGovernmentIdFile(e.target.files?.[0] || null)}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-            />
-          </div>
         </div>
 
         <div className="mt-4">
@@ -442,77 +523,124 @@ export default function OrganizerGetVerifiedPage() {
             placeholder="Tell us about your organization or upcoming events."
           />
         </div>
-
-        {uploadedDocuments.length > 0 ? (
-          <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-black text-slate-900">
-              Previously submitted documents
-            </div>
-            <div className="mt-3 space-y-2">
-              {uploadedDocuments.map((doc, index) => (
-                <div
-                  key={`${doc.name}-${index}`}
-                  className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
-                >
-                  <div className="font-bold text-slate-900">
-                    {doc.label || "Document"}
-                  </div>
-                  <div>{doc.name}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
       </div>
 
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <div className="text-sm font-bold uppercase tracking-wide text-slate-500">
-              Verification fee
+              Step 2: Verification fee
             </div>
             <div className="mt-1 text-2xl font-black text-slate-900">
               ${record?.fee_amount ?? 49}
             </div>
             <p className="mt-2 text-sm font-semibold text-slate-600">
-              One-time secure payment for organization review.
+              One-time secure payment. After payment, you will upload your documents once and submit.
             </p>
           </div>
 
-         <button
-  type="button"
-  disabled={!!record?.fee_paid}
-  onClick={() => {
-    alert("Pay button clicked");
-    handlePay();
-  }}
-  className={`rounded-full px-5 py-3 text-sm font-extrabold ${
-    record?.fee_paid
-      ? "bg-slate-100 text-slate-400"
-      : "bg-violet-600 text-white hover:bg-violet-700"
-  }`}
->
-                {record?.fee_paid ? "Fee paid" : `Pay $${record?.fee_amount ?? 49}`}
+          <button
+            type="button"
+            disabled={feePaid || paying}
+            onClick={handlePay}
+            className={`rounded-full px-5 py-3 text-sm font-extrabold ${
+              feePaid || paying
+                ? "bg-slate-100 text-slate-400"
+                : "bg-violet-600 text-white hover:bg-violet-700"
+            }`}
+          >
+            {feePaid
+              ? "Fee paid"
+              : paying
+              ? "Starting payment…"
+              : `Pay $${record?.fee_amount ?? 49}`}
           </button>
         </div>
       </div>
 
-      <button
-        disabled={!record?.fee_paid || submitting}
-        onClick={submitNow}
-        className={`mt-6 w-full rounded-2xl px-6 py-4 text-base font-black ${
-          !record?.fee_paid || submitting
-            ? "bg-slate-200 text-slate-500"
-            : "bg-slate-900 text-white hover:bg-slate-800"
-        }`}
-      >
-        {submitting ? "Submitting…" : "Submit for verification"}
-      </button>
+      {feePaid ? (
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-black text-slate-900">
+            Step 3: Upload documents
+          </h2>
+          <p className="mt-2 text-sm font-semibold text-slate-600">
+            Your payment is confirmed. Upload your documents now, then submit for review.
+          </p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-bold text-slate-700">
+                Business registration / license
+              </label>
+              <input
+                type="file"
+                onChange={(e) => {
+                  setBusinessLicenseFile(e.target.files?.[0] || null);
+                  setError(null);
+                }}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3"
+              />
+              {businessLicenseFile ? (
+                <div className="mt-2 text-xs font-semibold text-slate-500">
+                  Selected: {businessLicenseFile.name}
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-bold text-slate-700">
+                Government ID or legitimacy document
+              </label>
+              <input
+                type="file"
+                onChange={(e) => {
+                  setGovernmentIdFile(e.target.files?.[0] || null);
+                  setError(null);
+                }}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3"
+              />
+              {governmentIdFile ? (
+                <div className="mt-2 text-xs font-semibold text-slate-500">
+                  Selected: {governmentIdFile.name}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {uploadedDocuments.length > 0 ? (
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-black text-slate-900">
+                Previously submitted documents
+              </div>
+              <div className="mt-3 space-y-2">
+                {uploadedDocuments.map((doc, index) => (
+                  <div
+                    key={`${doc.name}-${index}`}
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
+                  >
+                    <div className="font-bold text-slate-900">
+                      {doc.label || "Document"}
+                    </div>
+                    <div>{doc.name}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <button
+            disabled={!businessLicenseFile || !governmentIdFile || submitting}
+            onClick={submitNow}
+            className={`mt-6 w-full rounded-2xl px-6 py-4 text-base font-black ${
+              !businessLicenseFile || !governmentIdFile || submitting
+                ? "bg-slate-200 text-slate-500"
+                : "bg-slate-900 text-white hover:bg-slate-800"
+            }`}
+          >
+            {submitting ? "Submitting…" : "Submit for verification"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
-
-
-
-
-
