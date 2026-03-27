@@ -4,7 +4,12 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 type Role = "vendor" | "organizer";
 
-const API_BASE = import.meta.env.VITE_API_BASE;
+const RAW_API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  "";
+
+const API_BASE = String(RAW_API_BASE).replace(/\/+$/, "");
 
 type AgreementItem = {
   id: string;
@@ -241,13 +246,11 @@ export default function CreateAccountPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  // If you arrive from /get-started → we often route to /create-account?role=vendor|organizer
   const roleFromUrl = useMemo(() => normalizeRole(searchParams.get("role")), [searchParams]);
 
   const [step, setStep] = useState<1 | 2 | 3>(roleFromUrl ? 2 : 1);
   const [role, setRole] = useState<Role>(roleFromUrl ?? "vendor");
 
-  // Keep in sync if user lands on the page with a role query string.
   useEffect(() => {
     if (roleFromUrl && roleFromUrl !== role) {
       setRole(roleFromUrl);
@@ -296,6 +299,11 @@ export default function CreateAccountPage() {
     e.preventDefault();
     setError(null);
 
+    if (!API_BASE) {
+      setError("API base URL is not configured.");
+      return;
+    }
+
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
       return;
@@ -313,8 +321,17 @@ export default function CreateAccountPage() {
       });
 
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Account creation failed");
+        let message = "Account creation failed";
+
+        try {
+          const data = await res.json();
+          message = data?.detail || data?.message || data?.error || message;
+        } catch {
+          const text = await res.text().catch(() => "");
+          if (text) message = text;
+        }
+
+        throw new Error(message);
       }
 
       const data = await res.json().catch(() => ({} as any));
@@ -350,7 +367,6 @@ export default function CreateAccountPage() {
     <div className="min-h-screen bg-white">
       <TopBar />
 
-      {/* Figma-style soft backdrop */}
       <section className="min-h-[calc(100vh-73px)] bg-gradient-to-br from-indigo-50 via-white to-purple-50">
         <div className="mx-auto max-w-6xl px-6 py-12">
           <div className="flex justify-center">
@@ -383,9 +399,7 @@ export default function CreateAccountPage() {
               </div>
             </div>
 
-            {/* Main card shell */}
             <div className="mt-8 rounded-[34px] border border-slate-200 bg-white p-8 shadow-sm">
-              {/* STEP 1: ROLE CARDS */}
               {step === 1 ? (
                 <>
                   <div className="grid gap-6 md:grid-cols-2">
@@ -442,7 +456,6 @@ export default function CreateAccountPage() {
                 </>
               ) : null}
 
-              {/* STEP 2: AGREEMENT (Figma-style header card + agreement cards) */}
               {step === 2 ? (
                 <>
                   <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -517,7 +530,6 @@ export default function CreateAccountPage() {
                 </>
               ) : null}
 
-              {/* STEP 3: DETAILS */}
               {step === 3 ? (
                 <>
                   <div className="text-sm font-bold text-slate-500">Step 3 of 3 — Account Details</div>
@@ -629,9 +641,3 @@ export default function CreateAccountPage() {
     </div>
   );
 }
-
-
-
-
-
-
