@@ -40,28 +40,47 @@ def _lower_str_keyed(d: dict) -> Dict[str, Any]:
     return out
 
 
+def _next_id_from_keys(records: Dict[int, Any], fallback: int = 1) -> int:
+    ids = []
+    for k in (records or {}).keys():
+        try:
+            ids.append(int(k))
+        except Exception:
+            continue
+    return max(ids, default=fallback - 1) + 1
+
+
+def _next_id_from_field(records: Dict[int, Any], field: str, fallback: int = 1) -> int:
+    ids = []
+    for value in (records or {}).values():
+        if not isinstance(value, dict):
+            continue
+        try:
+            ids.append(int(value.get(field)))
+        except Exception:
+            continue
+    return max(ids, default=fallback - 1) + 1
+
+
+def _recompute_next_counters() -> None:
+    global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
+
+    _NEXT_EVENT_ID = max(int(_NEXT_EVENT_ID or 1), _next_id_from_keys(_EVENTS, 1))
+    _NEXT_BOOTH_ID = max(int(_NEXT_BOOTH_ID or 1), _next_id_from_keys(_BOOTHS, 1))
+    _NEXT_TEMPLATE_ID = max(int(_NEXT_TEMPLATE_ID or 1), _next_id_from_keys(_TEMPLATES, 1))
+    _NEXT_APPLICATION_ID = max(
+        int(_NEXT_APPLICATION_ID or 1),
+        _next_id_from_keys(_APPLICATIONS, 1),
+    )
+
+
 # -------------------------------------------------------------------
 # In-memory store
 # -------------------------------------------------------------------
 
-_EVENTS: Dict[int, Dict[str, Any]] = {
-    1: {
-        "id": 1,
-        "title": "Atlanta Pop-Up Market",
-        "location": "Atlanta, GA",
-        "date": "2026-04-15",
-        "price": 150,
-        "spots": 25,
-    },
-    2: {
-        "id": 2,
-        "title": "Food Truck Festival",
-        "location": "Atlanta, GA",
-        "date": "2026-05-10",
-        "price": 200,
-        "spots": 40,
-    },
-}
+# Keep event IDs numeric internally. Show event titles in the UI.
+# We intentionally start empty so users do not inherit sample events.
+_EVENTS: Dict[int, Dict[str, Any]] = {}
 _REQUIREMENTS: Dict[int, Dict[str, Any]] = {}
 _REQUIREMENT_TEMPLATES: Dict[str, Dict[str, Any]] = {}
 _DIAGRAMS: Dict[int, Dict[str, Any]] = {}
@@ -92,6 +111,7 @@ def load_store() -> None:
 
     with _LOCK:
         if not _DATA_PATH.exists():
+            _recompute_next_counters()
             return
 
         try:
@@ -102,6 +122,7 @@ def load_store() -> None:
                 file=sys.stderr,
             )
             print(f"Details: {e}", file=sys.stderr)
+            _recompute_next_counters()
             return
 
         _EVENTS = _int_keyed(raw.get("events", {}))
@@ -181,6 +202,8 @@ def load_store() -> None:
         _NEXT_TEMPLATE_ID = int(nxt.get("template_id", 1) or 1)
         _NEXT_APPLICATION_ID = int(nxt.get("application_id", 1) or 1)
 
+        _recompute_next_counters()
+
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +234,8 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 
 def save_store() -> None:
     with _LOCK:
+        _recompute_next_counters()
+
         payload = {
             "events": _str_keyed(_EVENTS),
             "requirements": _str_keyed(_REQUIREMENTS),
@@ -242,6 +267,7 @@ load_store()
 def next_event_id() -> int:
     global _NEXT_EVENT_ID
     with _LOCK:
+        _NEXT_EVENT_ID = max(int(_NEXT_EVENT_ID or 1), _next_id_from_keys(_EVENTS, 1))
         val = _NEXT_EVENT_ID
         _NEXT_EVENT_ID += 1
         save_store()
@@ -251,6 +277,7 @@ def next_event_id() -> int:
 def next_booth_id() -> int:
     global _NEXT_BOOTH_ID
     with _LOCK:
+        _NEXT_BOOTH_ID = max(int(_NEXT_BOOTH_ID or 1), _next_id_from_keys(_BOOTHS, 1))
         val = _NEXT_BOOTH_ID
         _NEXT_BOOTH_ID += 1
         save_store()
@@ -260,6 +287,10 @@ def next_booth_id() -> int:
 def next_template_id() -> int:
     global _NEXT_TEMPLATE_ID
     with _LOCK:
+        _NEXT_TEMPLATE_ID = max(
+            int(_NEXT_TEMPLATE_ID or 1),
+            _next_id_from_keys(_TEMPLATES, 1),
+        )
         val = _NEXT_TEMPLATE_ID
         _NEXT_TEMPLATE_ID += 1
         save_store()
@@ -269,6 +300,10 @@ def next_template_id() -> int:
 def next_application_id() -> int:
     global _NEXT_APPLICATION_ID
     with _LOCK:
+        _NEXT_APPLICATION_ID = max(
+            int(_NEXT_APPLICATION_ID or 1),
+            _next_id_from_keys(_APPLICATIONS, 1),
+        )
         val = _NEXT_APPLICATION_ID
         _NEXT_APPLICATION_ID += 1
         save_store()
