@@ -55,6 +55,13 @@ def _init_db_if_available() -> None:
         logger.warning("DB init unavailable: %s", exc)
 
 
+def _env_csv(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 app = FastAPI(title="Vendor Connect API")
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip()
@@ -65,7 +72,10 @@ allowed_origins = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
     "https://eventappemailstarter-production.up.railway.app",
+    "https://event-app-frontend-xi.vercel.app",
 ]
+
+allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
 
 if frontend_origin:
     allowed_origins.append(frontend_origin)
@@ -75,11 +85,13 @@ allowed_origins = list(dict.fromkeys([origin for origin in allowed_origins if or
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.up\.railway\.app",
+    allow_origin_regex=r"https://.*\.up\.railway\.app|https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger.info("CORS allowed origins: %s", allowed_origins)
 
 _load_store_if_available()
 
