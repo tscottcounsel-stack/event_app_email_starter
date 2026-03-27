@@ -348,6 +348,9 @@ class VerificationCheckoutRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     success_url: Optional[str] = None
     cancel_url: Optional[str] = None
+    business_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class VerificationConfirmRequest(BaseModel):
@@ -519,7 +522,24 @@ def verification_create_checkout(
     record = _get_verification(email, role, user.get("id"))
     amount_cents = int(record.get("fee_amount", VENDOR_VERIFICATION_FEE)) * 100
     if record.get("fee_paid"):
-        return {"ok": True, "already_paid": True}
+        return {"ok": True, "already_paid": True, "verification": record}
+
+    business_name = str(payload.business_name or "").strip()
+    tax_id = str(payload.tax_id or "").strip()
+    notes = str(payload.notes or "").strip()
+
+    if business_name:
+        record["business_name"] = business_name
+    if notes:
+        record["notes"] = notes
+    if role == "vendor" and tax_id:
+        masked = _mask_last4(tax_id)
+        if masked:
+            record["tax_id_masked"] = masked
+
+    record["user_id"] = user.get("id")
+    record["email"] = email
+    record["role"] = role
 
     success_default = f"http://localhost:5173/{role}/verify?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
     cancel_default = f"http://localhost:5173/{role}/verify?payment=cancel"
@@ -557,7 +577,7 @@ def verification_create_checkout(
         record["last_session_id"] = session.id
         record["payment_status"] = "pending"
         _save_verification_record(record)
-        return {"ok": True, "url": session.url, "session_id": session.id}
+        return {"ok": True, "url": session.url, "session_id": session.id, "verification": record}
     except Exception as e:
         return {"ok": False, "detail": f"Stripe checkout unavailable: {e}"}
 
@@ -570,10 +590,8 @@ def verification_confirm_payment(
     role = str(user.get("role") or "vendor")
     email = str(user.get("email") or "")
     record = _get_verification(email, role, user.get("id"))
-
     if record.get("fee_paid"):
         return {"ok": True, "already_paid": True, "verification": record}
-
     session_id = str(payload.session_id or "").strip()
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -584,67 +602,29 @@ def verification_confirm_payment(
         secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
         if not secret:
             raise RuntimeError("STRIPE_SECRET_KEY not set")
-
         stripe.api_key = secret
         session = stripe.checkout.Session.retrieve(session_id)
-
         if not session:
             raise HTTPException(status_code=404, detail="Stripe session not found")
-
-        payment_status = str(getattr(session, "payment_status", "") or "").strip().lower()
-        status_value = str(getattr(session, "status", "") or "").strip().lower()
-
-        metadata_obj = getattr(session, "metadata", None)
-        metadata_email = ""
-
-        try:
-            if metadata_obj is None:
-                metadata_email = ""
-            elif isinstance(metadata_obj, dict):
-                metadata_email = _norm(metadata_obj.get("email"))
-            else:
-                metadata_email = _norm(getattr(metadata_obj, "email", ""))
-        except Exception:
-            metadata_email = ""
-
+        payment_status = str(getattr(session, "payment_status", "") or "")
+        status_value = str(getattr(session, "status", "") or "")
         if payment_status != "paid" and status_value != "complete":
+            raise HTTPException(status_code=400, detail="Verification fee not paid")
+        metadata = getattr(session, "metadata", None) or {}
+        if _norm(metadata.get("email")) != _norm(email):
             raise HTTPException(
-                status_code=400,
-                detail=f"Payment not complete yet: payment_status={payment_status or 'unknown'}, status={status_value or 'unknown'}",
+                status_code=400, detail="Session does not belong to this account"
             )
-
-        if metadata_email and metadata_email != _norm(email):
-            print(
-                "WARNING verification_confirm_payment: metadata email mismatch",
-                {
-                    "session_id": session_id,
-                    "metadata_email": metadata_email,
-                    "user_email": _norm(email),
-                },
-            )
-
         record["fee_paid"] = True
         record["payment_status"] = "paid"
         record["paid_at"] = int(time.time())
         record["last_session_id"] = session_id
         _save_verification_record(record)
-
-        return {
-            "ok": True,
-            "verification": record,
-            "stripe_status": {
-                "payment_status": payment_status,
-                "status": status_value,
-            },
-        }
-
+        return {"ok": True, "verification": record}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payment confirmation failed: {str(e)}",
-        )
+        raise HTTPException(status_code=400, detail=f"Payment confirmation failed: {e}")
 
 
 @router.post("/verification/submit")

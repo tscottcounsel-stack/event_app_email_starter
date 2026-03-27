@@ -49,41 +49,51 @@ export default function VendorGetVerifiedPage() {
   const [notes, setNotes] = useState("");
   const [licenseFile, setLicenseFile] = useState<File | null>(null);
   const [idFile, setIdFile] = useState<File | null>(null);
-  const [filesNeedReupload, setFilesNeedReupload] = useState(false);
 
   const token =
     localStorage.getItem("accessToken") ||
     localStorage.getItem("token") ||
     "";
 
-  const search = useMemo(
-    () => new URLSearchParams(window.location.search),
-    []
-  );
+  const search = useMemo(() => new URLSearchParams(window.location.search), []);
 
-  function saveFormState(
-    overrides?: Partial<StoredVerificationDraft>,
-    options?: { clearFilesFlag?: boolean }
-  ) {
+  function saveFormState(overrides?: Partial<StoredVerificationDraft>) {
     const payload: StoredVerificationDraft = {
       businessName: overrides?.businessName ?? businessName,
       taxId: overrides?.taxId ?? taxId,
       notes: overrides?.notes ?? notes,
     };
-
     localStorage.setItem(
       VERIFICATION_FORM_STORAGE_KEY,
       JSON.stringify(payload)
     );
+  }
 
-    if (options?.clearFilesFlag) {
-      localStorage.removeItem("vendor_verification_files_need_reupload");
+  function restoreSavedFormState() {
+    const savedRaw = localStorage.getItem(VERIFICATION_FORM_STORAGE_KEY);
+    if (!savedRaw) return;
+    try {
+      const saved = JSON.parse(savedRaw) as StoredVerificationDraft;
+      setBusinessName(saved.businessName || "");
+      setTaxId(saved.taxId || "");
+      setNotes(saved.notes || "");
+    } catch {
+      localStorage.removeItem(VERIFICATION_FORM_STORAGE_KEY);
     }
   }
 
   function clearSavedFormState() {
     localStorage.removeItem(VERIFICATION_FORM_STORAGE_KEY);
-    localStorage.removeItem("vendor_verification_files_need_reupload");
+  }
+
+  function applyVerificationToForm(verification: VerificationRecord | null) {
+    if (!verification) return;
+    if (verification.business_name) {
+      setBusinessName(verification.business_name);
+    }
+    if (verification.notes) {
+      setNotes(verification.notes);
+    }
   }
 
   async function loadStatus() {
@@ -95,24 +105,7 @@ export default function VendorGetVerifiedPage() {
 
     try {
       setError(null);
-
-      const savedRaw = localStorage.getItem(VERIFICATION_FORM_STORAGE_KEY);
-      if (savedRaw) {
-        try {
-          const saved = JSON.parse(savedRaw) as StoredVerificationDraft;
-          setBusinessName(saved.businessName || "");
-          setTaxId(saved.taxId || "");
-          setNotes(saved.notes || "");
-        } catch {
-          localStorage.removeItem(VERIFICATION_FORM_STORAGE_KEY);
-        }
-      }
-
-      if (
-        localStorage.getItem("vendor_verification_files_need_reupload") === "1"
-      ) {
-        setFilesNeedReupload(true);
-      }
+      restoreSavedFormState();
 
       const res = await fetch(`${API_BASE}/verification/me`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -125,18 +118,27 @@ export default function VendorGetVerifiedPage() {
 
       const verification = data?.verification || null;
       setRecord(verification);
-
-      if (verification?.business_name) {
-        setBusinessName((prev) => prev || verification.business_name || "");
-      }
-      if (verification?.notes) {
-        setNotes((prev) => prev || verification.notes || "");
-      }
+      applyVerificationToForm(verification);
     } catch (err: any) {
       setError(err?.message || "Unable to load verification status.");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function refreshStatus() {
+    if (!token) return;
+    const res = await fetch(`${API_BASE}/verification/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.detail || "Unable to refresh verification status.");
+    }
+    const verification = data?.verification || null;
+    setRecord(verification);
+    applyVerificationToForm(verification);
+    return verification;
   }
 
   useEffect(() => {
@@ -170,10 +172,11 @@ export default function VendorGetVerifiedPage() {
         }
 
         setRecord(data?.verification || null);
-        setFilesNeedReupload(true);
-        localStorage.setItem("vendor_verification_files_need_reupload", "1");
+        await refreshStatus();
+        restoreSavedFormState();
+
         setMessage(
-          "Verification payment confirmed. Please re-upload your documents, then submit for review."
+          "Verification payment confirmed. Now upload your documents and submit for review."
         );
 
         const cleanUrl = new URL(window.location.href);
@@ -201,10 +204,18 @@ export default function VendorGetVerifiedPage() {
       return;
     }
 
+    if (!businessName.trim()) {
+      setError("Please enter your business name before payment.");
+      return;
+    }
+
+    if (!taxId.trim() && !record?.tax_id_masked) {
+      setError("Please enter your tax ID / EIN before payment.");
+      return;
+    }
+
     try {
       saveFormState();
-      localStorage.setItem("vendor_verification_files_need_reupload", "1");
-
       setPaying(true);
       setError(null);
       setMessage("Redirecting to secure payment…");
@@ -215,7 +226,11 @@ export default function VendorGetVerifiedPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          business_name: businessName.trim(),
+          tax_id: taxId.trim(),
+          notes: notes.trim(),
+        }),
       });
 
       const data = await res.json().catch(() => null);
@@ -292,12 +307,8 @@ export default function VendorGetVerifiedPage() {
       setMessage("Verification submitted. Our team will review your documents.");
       setLicenseFile(null);
       setIdFile(null);
-      setFilesNeedReupload(false);
       clearSavedFormState();
-
-      if (data?.verification?.business_name) {
-        setBusinessName(data.verification.business_name);
-      }
+      applyVerificationToForm(data?.verification || data || null);
     } catch (err: any) {
       setError(err?.message || "Unable to submit verification.");
       setMessage(null);
@@ -310,10 +321,11 @@ export default function VendorGetVerifiedPage() {
     return <div className="p-6">Loading verification…</div>;
   }
 
+  const feePaid = !!record?.fee_paid;
   const statusLabel =
     record?.status === "pending"
       ? "Pending review"
-      : record?.status === "approved"
+      : record?.status === "approved" || record?.status === "verified"
         ? "Verified"
         : record?.status === "rejected"
           ? "Rejected"
@@ -339,14 +351,12 @@ export default function VendorGetVerifiedPage() {
           </div>
           <div
             className={`rounded-full px-4 py-2 text-sm font-extrabold ${
-              record?.fee_paid
+              feePaid
                 ? "bg-emerald-50 text-emerald-700"
                 : "bg-amber-50 text-amber-700"
             }`}
           >
-            {record?.fee_paid
-              ? "Fee paid"
-              : `Fee due: $${record?.fee_amount ?? 25}`}
+            {feePaid ? "Fee paid" : `Fee due: $${record?.fee_amount ?? 25}`}
           </div>
         </div>
       </div>
@@ -360,14 +370,6 @@ export default function VendorGetVerifiedPage() {
       {error ? (
         <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-800">
           {error}
-        </div>
-      ) : null}
-
-      {filesNeedReupload && record?.fee_paid ? (
-        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          Payment was completed, but your uploaded files do not stay attached after
-          the redirect. Please re-upload your business license and government ID,
-          then click submit.
         </div>
       ) : null}
 
@@ -399,7 +401,10 @@ export default function VendorGetVerifiedPage() {
       </div>
 
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-black text-slate-900">Verification details</h2>
+        <h2 className="text-lg font-black text-slate-900">Step 1: Basic details</h2>
+        <p className="mt-2 text-sm font-semibold text-slate-600">
+          Enter your business details first. Documents are only requested after your payment is confirmed.
+        </p>
 
         <div className="mt-4 grid gap-4 md:grid-cols-2">
           <div>
@@ -425,50 +430,6 @@ export default function VendorGetVerifiedPage() {
               placeholder="Enter tax ID"
             />
           </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-bold text-slate-700">
-              Business license
-            </label>
-            <input
-              type="file"
-              onChange={(e) => {
-                setLicenseFile(e.target.files?.[0] || null);
-                if (e.target.files?.[0]) {
-                  setFilesNeedReupload(false);
-                  localStorage.removeItem("vendor_verification_files_need_reupload");
-                }
-              }}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-            />
-            {licenseFile ? (
-              <div className="mt-2 text-xs font-semibold text-slate-500">
-                Selected: {licenseFile.name}
-              </div>
-            ) : null}
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-bold text-slate-700">
-              Government ID
-            </label>
-            <input
-              type="file"
-              onChange={(e) => {
-                setIdFile(e.target.files?.[0] || null);
-                if (e.target.files?.[0]) {
-                  setFilesNeedReupload(false);
-                  localStorage.removeItem("vendor_verification_files_need_reupload");
-                }
-              }}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-            />
-            {idFile ? (
-              <div className="mt-2 text-xs font-semibold text-slate-500">
-                Selected: {idFile.name}
-              </div>
-            ) : null}
-          </div>
         </div>
 
         <div className="mt-4">
@@ -488,28 +449,27 @@ export default function VendorGetVerifiedPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <div className="text-sm font-bold uppercase tracking-wide text-slate-500">
-              Verification fee
+              Step 2: Verification fee
             </div>
             <div className="mt-1 text-2xl font-black text-slate-900">
               ${record?.fee_amount ?? 25}
             </div>
             <p className="mt-2 text-sm font-semibold text-slate-600">
-              One-time secure payment. This helps cover document review and account
-              screening.
+              One-time secure payment. After payment, you will upload your documents once and submit.
             </p>
           </div>
 
           <button
             type="button"
-            disabled={!!record?.fee_paid || paying}
+            disabled={feePaid || paying}
             onClick={handlePay}
             className={`rounded-full px-5 py-3 text-sm font-extrabold ${
-              record?.fee_paid || paying
+              feePaid || paying
                 ? "bg-slate-100 text-slate-400"
                 : "bg-violet-600 text-white hover:bg-violet-700"
             }`}
           >
-            {record?.fee_paid
+            {feePaid
               ? "Fee paid"
               : paying
                 ? "Starting payment…"
@@ -518,23 +478,67 @@ export default function VendorGetVerifiedPage() {
         </div>
       </div>
 
-      <button
-        type="button"
-        disabled={!record?.fee_paid || submitting}
-        onClick={submitNow}
-        className={`mt-6 w-full rounded-2xl px-6 py-4 text-base font-black ${
-          !record?.fee_paid || submitting
-            ? "bg-slate-200 text-slate-500"
-            : "bg-slate-900 text-white hover:bg-slate-800"
-        }`}
-      >
-        {submitting ? "Submitting…" : "Submit for verification"}
-      </button>
+      {feePaid ? (
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-black text-slate-900">Step 3: Upload documents</h2>
+          <p className="mt-2 text-sm font-semibold text-slate-600">
+            Your payment is confirmed. Upload your documents now, then submit for review.
+          </p>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-bold text-slate-700">
+                Business license
+              </label>
+              <input
+                type="file"
+                onChange={(e) => {
+                  setLicenseFile(e.target.files?.[0] || null);
+                  setError(null);
+                }}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3"
+              />
+              {licenseFile ? (
+                <div className="mt-2 text-xs font-semibold text-slate-500">
+                  Selected: {licenseFile.name}
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-bold text-slate-700">
+                Government ID
+              </label>
+              <input
+                type="file"
+                onChange={(e) => {
+                  setIdFile(e.target.files?.[0] || null);
+                  setError(null);
+                }}
+                className="w-full rounded-xl border border-slate-200 px-4 py-3"
+              />
+              {idFile ? (
+                <div className="mt-2 text-xs font-semibold text-slate-500">
+                  Selected: {idFile.name}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={!licenseFile || !idFile || submitting}
+            onClick={submitNow}
+            className={`mt-6 w-full rounded-2xl px-6 py-4 text-base font-black ${
+              !licenseFile || !idFile || submitting
+                ? "bg-slate-200 text-slate-500"
+                : "bg-slate-900 text-white hover:bg-slate-800"
+            }`}
+          >
+            {submitting ? "Submitting…" : "Submit for verification"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
-
-
-
-
-
