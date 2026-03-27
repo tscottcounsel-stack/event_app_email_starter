@@ -80,7 +80,7 @@ export default function OrganizerGetVerifiedPage() {
     const savedRaw = localStorage.getItem(
       ORGANIZER_VERIFICATION_FORM_STORAGE_KEY
     );
-    if (!savedRaw) return;
+    if (!savedRaw) return null;
 
     try {
       const saved = JSON.parse(
@@ -91,13 +91,67 @@ export default function OrganizerGetVerifiedPage() {
       setPaypal(saved.paypal || "");
       setVenmo(saved.venmo || "");
       setCashApp(saved.cashApp || "");
+      return saved;
     } catch {
       localStorage.removeItem(ORGANIZER_VERIFICATION_FORM_STORAGE_KEY);
+      return null;
     }
   }
 
   function clearSavedFormState() {
     localStorage.removeItem(ORGANIZER_VERIFICATION_FORM_STORAGE_KEY);
+  }
+
+  function parsePaymentHandlesFromNotes(rawNotes: string) {
+    const source = String(rawNotes || "");
+    const paypalMatch = source.match(/PayPal:\s*(.+)/i);
+    const venmoMatch = source.match(/Venmo:\s*(.+)/i);
+    const cashAppMatch = source.match(/Cash App:\s*(.+)/i);
+
+    return {
+      paypal: paypalMatch?.[1]?.trim() || "",
+      venmo: venmoMatch?.[1]?.trim() || "",
+      cashApp: cashAppMatch?.[1]?.trim() || "",
+    };
+  }
+
+  function applyVerificationToForm(
+    verification: VerificationRecord | null,
+    options?: { preferExistingValues?: boolean }
+  ) {
+    if (!verification) return;
+
+    const preferExistingValues = !!options?.preferExistingValues;
+
+    if (verification.business_name) {
+      setBusinessName((prev) =>
+        preferExistingValues && prev ? prev : verification.business_name || ""
+      );
+    }
+
+    if (verification.notes) {
+      const incomingNotes = String(verification.notes || "");
+      setNotes((prev) =>
+        preferExistingValues && prev ? prev : incomingNotes
+      );
+
+      const handles = parsePaymentHandlesFromNotes(incomingNotes);
+      if (handles.paypal) {
+        setPaypal((prev) =>
+          preferExistingValues && prev ? prev : handles.paypal
+        );
+      }
+      if (handles.venmo) {
+        setVenmo((prev) =>
+          preferExistingValues && prev ? prev : handles.venmo
+        );
+      }
+      if (handles.cashApp) {
+        setCashApp((prev) =>
+          preferExistingValues && prev ? prev : handles.cashApp
+        );
+      }
+    }
   }
 
   function buildReviewNotes() {
@@ -126,27 +180,6 @@ export default function OrganizerGetVerifiedPage() {
     return sections.join("\n\n");
   }
 
-  function applyVerificationToForm(verification: VerificationRecord | null) {
-    if (!verification) return;
-
-    if (verification.business_name) {
-      setBusinessName(verification.business_name);
-    }
-
-    if (verification.notes) {
-      const incomingNotes = String(verification.notes || "");
-      setNotes((prev) => prev || incomingNotes);
-
-      const paypalMatch = incomingNotes.match(/PayPal:\s*(.+)/i);
-      const venmoMatch = incomingNotes.match(/Venmo:\s*(.+)/i);
-      const cashAppMatch = incomingNotes.match(/Cash App:\s*(.+)/i);
-
-      if (paypalMatch?.[1]) setPaypal((prev) => prev || paypalMatch[1].trim());
-      if (venmoMatch?.[1]) setVenmo((prev) => prev || venmoMatch[1].trim());
-      if (cashAppMatch?.[1]) setCashApp((prev) => prev || cashAppMatch[1].trim());
-    }
-  }
-
   async function loadStatus() {
     if (!token) {
       setError("You must be logged in to complete organizer verification.");
@@ -156,7 +189,8 @@ export default function OrganizerGetVerifiedPage() {
 
     try {
       setError(null);
-      restoreSavedFormState();
+
+      const savedDraft = restoreSavedFormState();
 
       const res = await fetch(`${API_BASE}/verification/me`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -169,7 +203,12 @@ export default function OrganizerGetVerifiedPage() {
 
       const verification = data?.verification || null;
       setRecord(verification);
-      applyVerificationToForm(verification);
+
+      if (savedDraft?.businessName) {
+        applyVerificationToForm(verification, { preferExistingValues: true });
+      } else {
+        applyVerificationToForm(verification);
+      }
     } catch (err: any) {
       setError(err?.message || "Unable to load verification status.");
     } finally {
@@ -178,7 +217,7 @@ export default function OrganizerGetVerifiedPage() {
   }
 
   async function refreshStatus() {
-    if (!token) return;
+    if (!token) return null;
 
     const res = await fetch(`${API_BASE}/verification/me`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -191,7 +230,7 @@ export default function OrganizerGetVerifiedPage() {
 
     const verification = data?.verification || null;
     setRecord(verification);
-    applyVerificationToForm(verification);
+    applyVerificationToForm(verification, { preferExistingValues: true });
     return verification;
   }
 
@@ -226,6 +265,13 @@ export default function OrganizerGetVerifiedPage() {
         }
 
         setRecord(data?.verification || null);
+
+        // Re-apply local draft immediately after redirect, then refresh from backend.
+        restoreSavedFormState();
+        applyVerificationToForm(data?.verification || null, {
+          preferExistingValues: true,
+        });
+
         await refreshStatus();
 
         setMessage(
