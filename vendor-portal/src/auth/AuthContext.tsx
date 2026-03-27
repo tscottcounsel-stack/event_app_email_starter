@@ -7,7 +7,13 @@ import {
   type AuthSession,
 } from "./authStorage";
 
-const API_BASE = import.meta.env.VITE_API_BASE;
+// ✅ FIXED API BASE
+const RAW_API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  "";
+
+const API_BASE = String(RAW_API_BASE).replace(/\/+$/, "");
 
 type AuthState = {
   session: AuthSession | null;
@@ -33,58 +39,6 @@ function normalizeRole(value: unknown): AuthRole | null {
   return null;
 }
 
-function decodeJwtPayload(token: string): any | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-
-    const payloadPart = parts[1];
-    const normalized = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(
-      normalized.length + ((4 - (normalized.length % 4)) % 4),
-      "="
-    );
-
-    return JSON.parse(atob(padded));
-  } catch {
-    return null;
-  }
-}
-
-function deriveRoleFromToken(accessToken: string): AuthRole | null {
-  const claims = decodeJwtPayload(accessToken);
-  if (!claims) return null;
-
-  const direct =
-    normalizeRole(claims.role) ||
-    normalizeRole(claims.user_role) ||
-    normalizeRole(claims.app_role);
-
-  if (direct) return direct;
-
-  if (Array.isArray(claims.roles) && claims.roles.length > 0) {
-    const first = normalizeRole(claims.roles[0]);
-    if (first) return first;
-  }
-
-  return null;
-}
-
-function deriveEmailFromToken(accessToken: string): string | null {
-  const claims = decodeJwtPayload(accessToken);
-  if (!claims) return null;
-
-  const raw =
-    claims.email ||
-    claims.user_email ||
-    claims.username ||
-    claims.sub ||
-    null;
-
-  const email = String(raw ?? "").trim().toLowerCase();
-  return email.includes("@") ? email : null;
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [isReady, setIsReady] = useState(false);
@@ -101,7 +55,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const login: AuthState["login"] = async ({ email, password, role }) => {
-    const requestedRole = role;
+    if (!API_BASE) {
+      throw new Error("API base URL is not configured");
+    }
 
     clearSession();
     setSession(null);
@@ -111,11 +67,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        email,
-        password,
-        role: requestedRole,
-      }),
+      body: JSON.stringify({ email, password, role }),
     });
 
     const text = await res.text();
@@ -141,16 +93,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const accessToken = pickToken(data);
     if (!accessToken) throw new Error("Server did not return an access_token");
 
-    const tokenRole = deriveRoleFromToken(accessToken);
-    const finalRole = tokenRole ?? requestedRole;
-
-    const tokenEmail = deriveEmailFromToken(accessToken);
-    const finalEmail = tokenEmail ?? String(email || "").trim().toLowerCase();
-
     const next: AuthSession = {
       accessToken,
-      role: finalRole,
-      email: finalEmail,
+      role,
+      email: String(email || "").trim().toLowerCase(),
     };
 
     writeSession(next);
@@ -173,15 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return false;
     }
 
-    const text = await res.text();
-    let data: any = null;
-
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = text;
-    }
-
+    const data = await res.json().catch(() => null);
     const newToken = pickToken(data);
 
     if (!newToken) {
@@ -189,13 +127,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return false;
     }
 
-    const tokenRole = deriveRoleFromToken(newToken);
-    const tokenEmail = deriveEmailFromToken(newToken);
-
     const next: AuthSession = {
       accessToken: newToken,
-      role: tokenRole ?? current.role,
-      email: tokenEmail ?? current.email,
+      role: current.role,
+      email: current.email,
     };
 
     writeSession(next);
@@ -225,8 +160,3 @@ export function useAuth() {
   if (!v) throw new Error("useAuth must be used within AuthProvider");
   return v;
 }
-
-
-
-
-
