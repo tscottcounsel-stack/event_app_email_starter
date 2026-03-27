@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/vendorconnect/data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _DATA_PATH = DATA_DIR / "_data_store.json"

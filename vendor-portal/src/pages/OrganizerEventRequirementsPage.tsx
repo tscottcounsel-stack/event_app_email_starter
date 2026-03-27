@@ -1,8 +1,7 @@
 // src/pages/OrganizerEventRequirementsPage.tsx
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
-
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
@@ -34,6 +33,18 @@ type RequirementsPayload = {
     documents: DocumentItem[];
   };
   version: number;
+};
+
+type OrganizerEventSummary = {
+  id?: number | string;
+  event_id?: number | string;
+  title?: string;
+  name?: string;
+  event_name?: string;
+  organizer_email?: string;
+  owner_email?: string;
+  organizer_id?: number | string;
+  owner_id?: number | string;
 };
 
 const BUILT_IN_TEMPLATES: RequirementTemplate[] = [
@@ -143,6 +154,14 @@ function makeLocalStorageKey(eventId: string) {
   return `organizer:event:${eventId}:requirements`;
 }
 
+function getEventIdFromSummary(event: OrganizerEventSummary | null | undefined): string {
+  return normalizeId(event?.id || event?.event_id);
+}
+
+function getEventDisplayName(event: OrganizerEventSummary | null | undefined): string {
+  return String(event?.title || event?.name || event?.event_name || "").trim();
+}
+
 export default function OrganizerEventRequirementsPage() {
   const navigate = useNavigate();
   const params = useParams();
@@ -163,6 +182,10 @@ export default function OrganizerEventRequirementsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [redirecting, setRedirecting] = useState(false);
+  const [resolvedEventId, setResolvedEventId] = useState<string>(eventId);
+  const [eventTitle, setEventTitle] = useState<string>("");
+
+  const redirectAttemptedRef = useRef(false);
 
   const authHeaders = useMemo(() => buildAuthHeaders(), []);
   const hasAuth =
@@ -174,29 +197,51 @@ export default function OrganizerEventRequirementsPage() {
     return BUILT_IN_TEMPLATES.find((t) => t.id === builtInTemplateId) || BUILT_IN_TEMPLATES[0] || null;
   }, [builtInTemplateId]);
 
+  useEffect(() => {
+    setResolvedEventId(eventId);
+    setEventTitle("");
+    redirectAttemptedRef.current = false;
+  }, [eventId]);
+
+  const findValidEvent = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/organizer/events`, {
+      method: "GET",
+      headers: {
+        ...buildAuthHeaders(),
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Could not load organizer events (${res.status})`);
+    }
+
+    const data = await res.json().catch(() => null);
+    const events = Array.isArray(data?.events) ? (data.events as OrganizerEventSummary[]) : [];
+
+    return {
+      events,
+      matched: events.find((ev) => getEventIdFromSummary(ev) === eventId) || null,
+      fallback: events.find((ev) => Number(getEventIdFromSummary(ev)) > 0) || null,
+    };
+  }, [eventId]);
+
   const recoverToValidEvent = useCallback(async () => {
-    if (redirecting) return false;
+    if (redirecting || redirectAttemptedRef.current) return false;
+    redirectAttemptedRef.current = true;
     setRedirecting(true);
+
     try {
-      const res = await fetch(`${API_BASE}/organizer/events`, {
-        method: "GET",
-        headers: {
-          ...buildAuthHeaders(),
-          Accept: "application/json",
-        },
-      });
-
-      if (!res.ok) return false;
-
-      const data = await res.json().catch(() => null);
-      const events = Array.isArray(data?.events) ? data.events : [];
-      const firstValid = events.find((ev: any) => Number(ev?.id || ev?.event_id) > 0);
-      if (!firstValid) return false;
-
-      const nextId = String(firstValid.id || firstValid.event_id || "");
+      const { fallback } = await findValidEvent();
+      const nextId = getEventIdFromSummary(fallback);
       if (!nextId || nextId === eventId) return false;
 
-      setMessage("This page was pointing at an old event. Redirecting to your current event…");
+      const nextName = getEventDisplayName(fallback);
+      setMessage(
+        nextName
+          ? `Event ${eventId} no longer exists after redeploy. Redirecting to ${nextName} (Event ${nextId})…`
+          : `Event ${eventId} no longer exists after redeploy. Redirecting to Event ${nextId}…`
+      );
       navigate(`/organizer/events/${nextId}/requirements`, { replace: true });
       return true;
     } catch {
@@ -204,7 +249,7 @@ export default function OrganizerEventRequirementsPage() {
     } finally {
       setRedirecting(false);
     }
-  }, [eventId, navigate, redirecting]);
+  }, [eventId, findValidEvent, navigate, redirecting]);
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -261,7 +306,23 @@ export default function OrganizerEventRequirementsPage() {
 
     try {
       if (backendMode) {
-        const res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+        const { matched } = await findValidEvent();
+        if (!matched) {
+          const redirected = await recoverToValidEvent();
+          if (!redirected) {
+            throw new Error(
+              `Event ${eventId} was not found on the backend. It was likely wiped during redeploy. Open Organizer Events and choose a current event.`
+            );
+          }
+          return;
+        }
+
+        const currentEventId = getEventIdFromSummary(matched) || eventId;
+        const currentEventName = getEventDisplayName(matched);
+        setResolvedEventId(currentEventId);
+        setEventTitle(currentEventName);
+
+        const res = await fetch(`${API_BASE}/organizer/events/${currentEventId}/requirements`, {
           method: "GET",
           headers: {
             ...buildAuthHeaders(),
@@ -270,10 +331,15 @@ export default function OrganizerEventRequirementsPage() {
         });
 
         if (res.status === 404) {
-          const redirected = await recoverToValidEvent();
-          if (!redirected) {
-            throw new Error(`Event ${eventId} was not found on the backend.`);
-          }
+          setCompliance([]);
+          setDocuments([]);
+          setVersion(1);
+          localStorage.removeItem(localKey);
+          setMessage(
+            currentEventName
+              ? `No saved requirements found yet for ${currentEventName}. You can configure them now.`
+              : `No saved requirements found yet for Event ${currentEventId}. You can configure them now.`
+          );
           return;
         }
 
@@ -309,7 +375,7 @@ export default function OrganizerEventRequirementsPage() {
     } finally {
       setLoading(false);
     }
-  }, [backendMode, eventId, recoverToValidEvent]);
+  }, [backendMode, eventId, findValidEvent, recoverToValidEvent]);
 
   useEffect(() => {
     void loadTemplates();
@@ -477,7 +543,9 @@ export default function OrganizerEventRequirementsPage() {
   }
 
   async function onSave() {
-    if (!eventId) {
+    const activeEventId = resolvedEventId || eventId;
+
+    if (!activeEventId) {
       setError("Missing event ID.");
       return;
     }
@@ -496,12 +564,12 @@ export default function OrganizerEventRequirementsPage() {
     };
 
     try {
-      localStorage.setItem(makeLocalStorageKey(eventId), JSON.stringify(payload));
+      localStorage.setItem(makeLocalStorageKey(activeEventId), JSON.stringify(payload));
 
       if (!backendMode) {
         setMessage("Saved locally. Redirecting to layout…");
         setSavedOk(true);
-        navigate(`/organizer/events/${eventId}/layout`);
+        navigate(`/organizer/events/${activeEventId}/layout`);
         return;
       }
 
@@ -511,7 +579,7 @@ export default function OrganizerEventRequirementsPage() {
         Accept: "application/json",
       };
 
-      let res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+      let res = await fetch(`${API_BASE}/organizer/events/${activeEventId}/requirements`, {
         method: "PUT",
         headers,
         body: JSON.stringify(payload),
@@ -525,7 +593,7 @@ export default function OrganizerEventRequirementsPage() {
       }
 
       if (!res.ok) {
-        res = await fetch(`${API_BASE}/organizer/events/${eventId}/requirements`, {
+        res = await fetch(`${API_BASE}/organizer/events/${activeEventId}/requirements`, {
           method: "POST",
           headers,
           body: JSON.stringify(payload),
@@ -544,7 +612,7 @@ export default function OrganizerEventRequirementsPage() {
       setVersion((v) => Number(v || 1) + 1);
       setSavedOk(true);
       setMessage("Requirements saved. Redirecting to booth layout…");
-      navigate(`/organizer/events/${eventId}/layout`);
+      navigate(`/organizer/events/${activeEventId}/layout`);
     } catch (err: any) {
       setError(err?.message || "Could not save requirements.");
     } finally {
@@ -556,12 +624,10 @@ export default function OrganizerEventRequirementsPage() {
     return <div className="p-6 text-gray-600">Loading requirements…</div>;
   }
 
-  return (
-  <div className="p-6">
-    <div style={{ color: "red", fontWeight: 700 }}>
-      NEW REQUIREMENTS FILE LOADED
-    </div>
+  const activeEventId = resolvedEventId || eventId;
 
+  return (
+    <div className="p-6">
       <div className="mb-6 flex items-center justify-between border-b pb-5">
         <button
           className="text-sm font-medium text-gray-700"
@@ -572,7 +638,10 @@ export default function OrganizerEventRequirementsPage() {
 
         <div className="text-center">
           <div className="text-3xl font-semibold">Event Setup & Vendor Requirements</div>
-          <div className="mt-1 text-sm text-gray-500">Event ID: {eventId || "—"}</div>
+          <div className="mt-1 text-sm text-gray-500">
+            Event ID: {activeEventId || "—"}
+            {eventTitle ? ` • ${eventTitle}` : ""}
+          </div>
         </div>
 
         <button
@@ -830,8 +899,8 @@ export default function OrganizerEventRequirementsPage() {
           <div className="flex gap-3">
             <button
               className="rounded-2xl border px-5 py-3 font-semibold"
-              onClick={() => navigate(`/organizer/events/${eventId}/layout`)}
-              disabled={!eventId}
+              onClick={() => navigate(`/organizer/events/${activeEventId}/layout`)}
+              disabled={!activeEventId}
             >
               Go to Booth Layout
             </button>

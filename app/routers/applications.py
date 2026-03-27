@@ -896,6 +896,28 @@ def _require_organizer_or_admin(user: Dict[str, Any]) -> None:
         raise HTTPException(status_code=403, detail="Organizer access required.")
 
 
+def _ensure_event_access_for_current_organizer(
+    event: Dict[str, Any], user: Dict[str, Any]
+) -> None:
+    organizer_email = _norm_email(user.get("email"))
+    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
+
+    if str(user.get("role") or "").strip().lower() == "admin":
+        return
+
+    if _matches_current_organizer(
+        organizer_email=organizer_email,
+        organizer_id=organizer_id,
+        record_email=event.get("organizer_email") or event.get("owner_email"),
+        record_id=event.get("organizer_id")
+        or event.get("owner_id")
+        or event.get("created_by"),
+    ):
+        return
+
+    raise HTTPException(status_code=403, detail="Not allowed to view this event")
+
+
 def _mark_application_paid(
     app: Dict[str, Any],
     amount: float,
@@ -1404,27 +1426,7 @@ def organizer_list_event_applications(
     expire_reservations_if_needed()
 
     event = get_event_or_404(event_id)
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     apps = [
         dict(a)
@@ -1460,26 +1462,7 @@ def organizer_get_application(
     expire_reservations_if_needed()
     event = get_event_or_404(event_id)
 
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     app = dict(get_application_or_404(app_id))
     if int(app.get("event_id") or 0) != int(event_id):
@@ -1500,26 +1483,7 @@ def organizer_event_stats(event_id: int, user: dict = Depends(get_current_user))
     expire_reservations_if_needed()
     event = dict(get_event_or_404(event_id))
 
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     apps = [
         a

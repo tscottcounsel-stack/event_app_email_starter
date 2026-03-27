@@ -38,7 +38,9 @@ def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> N
 def _load_store_if_available() -> None:
     try:
         from app.store import load_store
+        from app.store import _DATA_PATH  # type: ignore
 
+        logger.info("STORE DATA PATH: %s", _DATA_PATH)
         _safe_call(load_store, "store")
     except Exception as exc:
         logger.warning("Store loader unavailable: %s", exc)
@@ -117,6 +119,5 @@ for module_name in [
     "app.routers.users",
     "app.routers.vendors",
     "app.routers.vendors_v2",
-    "app.routers._init_",
 ]:
     _try_include(app, module_name, "router")

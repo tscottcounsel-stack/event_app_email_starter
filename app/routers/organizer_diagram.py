@@ -2,7 +2,10 @@
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.routers.auth import get_current_user
+from app.store import _EVENTS
 
 router = APIRouter(
     prefix="/organizer/events",
@@ -17,15 +20,75 @@ router = APIRouter(
 _DIAGRAM_STORE: Dict[int, Dict[str, Any]] = {}
 
 
+def _norm_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _get_event_or_404(event_id: int) -> Dict[str, Any]:
+    event = _EVENTS.get(int(event_id))
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=404, detail="Event not found")
+    return event
+
+
+def _matches_current_organizer(
+    *,
+    organizer_email: str,
+    organizer_id: Any,
+    record_email: Any,
+    record_id: Any,
+) -> bool:
+    rec_email = _norm_email(record_email)
+    rec_id = None if record_id is None else str(record_id)
+
+    if organizer_email:
+        if rec_email:
+            return rec_email == organizer_email
+        return (
+            rec_id is not None
+            and organizer_id is not None
+            and rec_id == str(organizer_id)
+        )
+
+    if organizer_id is not None:
+        return rec_id is not None and rec_id == str(organizer_id)
+
+    return False
+
+
+def _ensure_event_access(event: Dict[str, Any], user: Dict[str, Any]) -> None:
+    role = str(user.get("role") or "").strip().lower()
+    if role == "admin":
+        return
+
+    organizer_email = _norm_email(user.get("email"))
+    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
+
+    allowed = _matches_current_organizer(
+        organizer_email=organizer_email,
+        organizer_id=organizer_id,
+        record_email=event.get("organizer_email") or event.get("owner_email"),
+        record_id=event.get("organizer_id")
+        or event.get("owner_id")
+        or event.get("created_by"),
+    )
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Not allowed to access this event")
+
+
 # ------------------------------------------------------------------
 # GET: Fetch event diagram
 # ------------------------------------------------------------------
 @router.get("/{event_id}/diagram")
-def get_event_diagram(event_id: int):
+def get_event_diagram(event_id: int, user: dict = Depends(get_current_user)):
     """
     Return the saved diagram for an event.
     If none exists yet, return a default empty diagram.
     """
+
+    event = _get_event_or_404(event_id)
+    _ensure_event_access(event, user)
 
     if event_id not in _DIAGRAM_STORE:
         return {
@@ -49,7 +112,11 @@ def get_event_diagram(event_id: int):
 # PUT: Save / update event diagram
 # ------------------------------------------------------------------
 @router.put("/{event_id}/diagram")
-def save_event_diagram(event_id: int, payload: Dict[str, Any]):
+def save_event_diagram(
+    event_id: int,
+    payload: Dict[str, Any],
+    user: dict = Depends(get_current_user),
+):
     """
     Save or update the diagram for an event.
 
@@ -59,6 +126,9 @@ def save_event_diagram(event_id: int, payload: Dict[str, Any]):
         "expect_version": number | null
     }
     """
+
+    event = _get_event_or_404(event_id)
+    _ensure_event_access(event, user)
 
     diagram = payload.get("diagram")
     expect_version = payload.get("expect_version")

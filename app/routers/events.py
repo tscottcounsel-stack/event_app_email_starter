@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,12 +20,6 @@ from app.store import (
 )
 
 router = APIRouter(tags=["Events"])
-
-# adjust these imports to match your project structure
-
-# -------------------------------------------------------------------
-# Models
-# -------------------------------------------------------------------
 
 
 class EventCreate(BaseModel):
@@ -81,11 +75,6 @@ class EventUpdate(BaseModel):
     layout_published: Optional[bool] = None
 
 
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
-
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -106,12 +95,10 @@ def _event_owner_id(event: Dict[str, Any]) -> Optional[str]:
 
 
 def _is_admin_user(user: Optional[Dict[str, Any]]) -> bool:
-    return _norm_email((user or {}).get("role")) == "admin"
+    return str((user or {}).get("role") or "").strip().lower() == "admin"
 
 
-def _event_belongs_to_user(
-    event: Dict[str, Any], user: Optional[Dict[str, Any]]
-) -> bool:
+def _event_belongs_to_user(event: Dict[str, Any], user: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(event, dict) or not isinstance(user, dict):
         return False
 
@@ -120,13 +107,16 @@ def _event_belongs_to_user(
 
     user_email = _norm_email(user.get("email"))
     user_id = user.get("organizer_id") or user.get("id") or user.get("sub")
+
     owner_email = _event_owner_email(event)
     owner_id = _event_owner_id(event)
 
     if user_email and owner_email and owner_email == user_email:
         return True
+
     if user_id is not None and owner_id is not None and str(user_id) == owner_id:
         return True
+
     return False
 
 
@@ -138,13 +128,6 @@ def _owned_events_for_user(user: Dict[str, Any]) -> list[Dict[str, Any]]:
     ]
 
 
-def _get_owned_event_or_404(event_id: int, user: Dict[str, Any]) -> Dict[str, Any]:
-    event = _get_event_or_404(event_id)
-    if not _event_belongs_to_user(event, user):
-        raise HTTPException(status_code=403, detail="Not allowed to access this event.")
-    return event
-
-
 def _get_event_or_404(event_id: int) -> Dict[str, Any]:
     ev = _EVENTS.get(int(event_id))
     if not ev:
@@ -152,27 +135,24 @@ def _get_event_or_404(event_id: int) -> Dict[str, Any]:
     return ev
 
 
+def _get_owned_event_or_404(event_id: int, user: Dict[str, Any]) -> Dict[str, Any]:
+    event = _get_event_or_404(event_id)
+    if not _event_belongs_to_user(event, user):
+        raise HTTPException(status_code=403, detail="Not allowed to access this event.")
+    return event
+
+
 def _as_event_dict(e: Dict[str, Any]) -> Dict[str, Any]:
     return dict(e)
 
 
 def _looks_like_diagram_doc(d: Dict[str, Any]) -> bool:
-    """
-    Heuristic: if diagram doc is stored raw, it usually has levels/booths/etc.
-    """
     if not isinstance(d, dict):
         return False
-    if "levels" in d:
-        return True
-    if "booths" in d:
-        return True
-    # Some editors store "floors"
-    if "floors" in d:
-        return True
-    return False
+    return "levels" in d or "booths" in d or "floors" in d
 
 
-def _coerce_payment_status(value):
+def _coerce_payment_status(value: Any) -> str:
     s = str(value or "").strip().lower()
     if not s:
         return ""
@@ -186,18 +166,9 @@ def _coerce_payment_status(value):
 
 
 def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
-    """
-    Persisted storage is a wrapper:
-      event["diagram"] = { "diagram": <doc>, "version": <int> }
-
-    âœ… MIGRATION:
-    If event["diagram"] is a raw doc (dict with levels/booths) we wrap it
-    instead of wiping it.
-    """
     ev = _get_event_or_404(event_id)
     slot = ev.get("diagram")
 
-    # Case 1: already wrapped correctly
     if isinstance(slot, dict) and "diagram" in slot:
         if not isinstance(slot.get("version"), int):
             slot["version"] = 1
@@ -206,7 +177,6 @@ def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
         ev["diagram"] = slot
         return slot
 
-    # Case 2: raw doc stored directly in event["diagram"]  âœ… migrate
     if isinstance(slot, dict) and _looks_like_diagram_doc(slot):
         migrated = {"diagram": slot, "version": 1}
         ev["diagram"] = migrated
@@ -214,7 +184,6 @@ def _ensure_diagram_slot(event_id: int) -> Dict[str, Any]:
         save_store()
         return migrated
 
-    # Case 3: missing/unknown â†’ initialize empty
     new_slot = {"diagram": {}, "version": 1}
     ev["diagram"] = new_slot
     ev["updated_at"] = utc_now_iso()
@@ -230,46 +199,24 @@ def _next_diagram_version(current: Optional[int], incoming: Optional[int]) -> in
     return 1
 
 
-def _coerce_incoming_diagram_payload(
-    payload: Any,
-) -> Tuple[Dict[str, Any], Optional[int]]:
-    """
-    Accept BOTH payload shapes:
-      A) { "diagram": <doc>, "version": <int> }
-      B) <doc>   (raw diagram doc)
-    Return: (doc, incoming_version)
-    """
+def _coerce_incoming_diagram_payload(payload: Any) -> Tuple[Dict[str, Any], Optional[int]]:
     if not isinstance(payload, dict):
         return {}, None
 
-    incoming_version = (
-        payload.get("version") if isinstance(payload.get("version"), int) else None
-    )
+    incoming_version = payload.get("version") if isinstance(payload.get("version"), int) else None
 
-    # Wrapped
     if "diagram" in payload and isinstance(payload.get("diagram"), dict):
         return payload.get("diagram") or {}, incoming_version
 
-    # Raw doc
     return payload, incoming_version
 
 
 def _is_effectively_empty_diagram(doc: Dict[str, Any]) -> bool:
-    """
-    Prevent accidental wipes. We treat these as empty:
-      - {}
-      - {"levels": []}
-      - {"levels": [{... empty ...}] }  (optional, keep simple)
-    """
     if not isinstance(doc, dict):
         return True
     if doc == {}:
         return True
-    if (
-        "levels" in doc
-        and isinstance(doc.get("levels"), list)
-        and len(doc.get("levels")) == 0
-    ):
+    if "levels" in doc and isinstance(doc.get("levels"), list) and len(doc.get("levels")) == 0:
         return True
     return False
 
@@ -297,9 +244,7 @@ def _safe_float(value: Any) -> float:
 
 def _normalize_public_requirements_payload(payload: Any) -> Dict[str, Any]:
     root = payload if isinstance(payload, dict) else {}
-    nested = (
-        root.get("requirements") if isinstance(root.get("requirements"), dict) else {}
-    )
+    nested = root.get("requirements") if isinstance(root.get("requirements"), dict) else {}
 
     def pick_list(*keys: str) -> List[Any]:
         for source in (root, nested):
@@ -331,25 +276,9 @@ def _normalize_public_requirements_payload(payload: Any) -> Dict[str, Any]:
                     return value
         return ""
 
-    booth_categories = pick_list(
-        "booth_categories",
-        "boothCategories",
-        "categories",
-    )
-
-    custom_restrictions = pick_list(
-        "custom_restrictions",
-        "customRestrictions",
-        "restrictions",
-    )
-
-    compliance_items = pick_list(
-        "compliance_items",
-        "complianceItems",
-        "compliance",
-        "requirements_list",
-    )
-
+    booth_categories = pick_list("booth_categories", "boothCategories", "categories")
+    custom_restrictions = pick_list("custom_restrictions", "customRestrictions", "restrictions")
+    compliance_items = pick_list("compliance_items", "complianceItems", "compliance", "requirements_list")
     document_requirements = pick_list(
         "document_requirements",
         "documentRequirements",
@@ -357,16 +286,8 @@ def _normalize_public_requirements_payload(payload: Any) -> Dict[str, Any]:
         "requiredDocuments",
         "documents",
     )
-
-    payment_settings = pick_dict(
-        "payment_settings",
-        "paymentSettings",
-    )
-
-    updated_at = pick_value(
-        "updated_at",
-        "updatedAt",
-    )
+    payment_settings = pick_dict("payment_settings", "paymentSettings")
+    updated_at = pick_value("updated_at", "updatedAt")
 
     return {
         "version": root.get("version") or nested.get("version") or 2,
@@ -385,50 +306,6 @@ def _normalize_public_requirements_payload(payload: Any) -> Dict[str, Any]:
         "payment_settings": payment_settings,
         "updated_at": updated_at,
     }
-
-
-def _public_requirements_payload_for_event(event_id: int) -> Dict[str, Any]:
-    ev = _get_event_or_404(event_id)
-
-    candidates = [
-        _REQUIREMENTS.get(int(event_id), {}),
-        ev.get("requirements", {}),
-        {
-            "booth_categories": ev.get("booth_categories"),
-            "custom_restrictions": ev.get("custom_restrictions"),
-            "compliance_items": ev.get("compliance_items"),
-            "document_requirements": ev.get("document_requirements"),
-            "payment_settings": ev.get("payment_settings"),
-            "updated_at": ev.get("requirements_updated_at") or ev.get("updated_at"),
-        },
-    ]
-
-    merged: Dict[str, Any] = {}
-    nested: Dict[str, Any] = {}
-    for candidate in candidates:
-        normalized = _normalize_public_requirements_payload(candidate)
-        merged.update(
-            {
-                "version": normalized.get("version") or merged.get("version") or 2,
-                "booth_categories": normalized.get("booth_categories", []),
-                "custom_restrictions": normalized.get("custom_restrictions", []),
-                "compliance_items": normalized.get("compliance_items", []),
-                "document_requirements": normalized.get("document_requirements", []),
-                "payment_settings": normalized.get("payment_settings", {}),
-                "updated_at": normalized.get("updated_at", ""),
-            }
-        )
-        nested = normalized.get("requirements", nested)
-
-    merged["requirements"] = {
-        "booth_categories": merged.get("booth_categories", []),
-        "custom_restrictions": merged.get("custom_restrictions", []),
-        "compliance_items": merged.get("compliance_items", []),
-        "document_requirements": merged.get("document_requirements", []),
-        "payment_settings": merged.get("payment_settings", {}),
-        "updated_at": merged.get("updated_at", ""),
-    }
-    return merged
 
 
 def _public_diagram_payload_for_event(event_id: int) -> Dict[str, Any]:
@@ -520,16 +397,8 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
     }
 
 
-# -------------------------------------------------------------------
-# Organizer endpoints
-# -------------------------------------------------------------------
-
-
 @router.get("/events")
 async def get_events():
-    from app.routers.applications import _APPLICATIONS
-    from app.store import get_store_snapshot
-
     store = get_store_snapshot()
     events = store.get("events", {})
 
@@ -539,13 +408,10 @@ async def get_events():
         events_list = events or []
 
     result = []
-
     for event in events_list:
         e = dict(event)
-
         stats = _event_marketplace_stats(e, _APPLICATIONS)
         e.update(stats)
-
         result.append(e)
 
     return result
@@ -557,11 +423,12 @@ def organizer_list_events(user: dict = Depends(get_current_user)):
 
 
 @router.post("/organizer/events")
-def organizer_create_event(
-    payload: EventCreate, user: dict = Depends(get_current_user)
-):
-    eid = next_event_id()
+def organizer_create_event(payload: EventCreate, user: dict = Depends(get_current_user)):
     organizer_email = _norm_email(user.get("email"))
+    if not organizer_email:
+        raise HTTPException(status_code=401, detail="Authenticated user email missing")
+
+    eid = next_event_id()
     organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
 
     e = {
@@ -604,41 +471,6 @@ def organizer_get_event(event_id: int, user: dict = Depends(get_current_user)):
     return _as_event_dict(_get_owned_event_or_404(event_id, user))
 
 
-@router.put("/organizer/events/{event_id}/requirements")
-def update_requirements(
-    event_id: str,
-    payload: dict,
-    user: dict = Depends(get_current_user),
-):
-    event = _EVENTS.get(event_id)
-
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    organizer_id = str(
-        event.get("organizer_id")
-        or event.get("created_by")
-        or event.get("owner_id")
-        or ""
-    )
-    user_id = str(user.get("sub") or user.get("id") or "")
-
-    if organizer_id and organizer_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    requirements = payload.get("requirements", [])
-    event["requirements"] = requirements
-
-    if "_REQUIREMENTS" in globals():
-        _REQUIREMENTS[event_id] = requirements
-
-    save_store()
-
-    return {
-        "success": True,
-        "event_id": event_id,
-        "requirements": requirements,
-    }
 @router.patch("/organizer/events/{event_id}")
 def organizer_patch_event(
     event_id: int,
@@ -653,18 +485,10 @@ def organizer_patch_event(
 def organizer_delete_event(event_id: int, user: dict = Depends(get_current_user)):
     _get_owned_event_or_404(event_id, user)
     eid = int(event_id)
-    if eid in _EVENTS:
-        del _EVENTS[eid]
-    if eid in _REQUIREMENTS:
-        del _REQUIREMENTS[eid]
+    _EVENTS.pop(eid, None)
+    _REQUIREMENTS.pop(eid, None)
     save_store()
     return {"ok": True}
-
-
-@router.get("/organizer/events/{event_id}/requirements")
-def organizer_get_requirements(event_id: int, user: dict = Depends(get_current_user)):
-    _get_owned_event_or_404(event_id, user)
-    return _REQUIREMENTS.get(int(event_id), {}) or {}
 
 
 @router.post("/organizer/events/{event_id}/publish")
@@ -677,7 +501,6 @@ def organizer_publish_event(event_id: int, user: dict = Depends(get_current_user
     return _as_event_dict(ev)
 
 
-# âœ… Organizer diagram endpoints â€” RETURN RAW DOC
 @router.get("/organizer/events/{event_id}/diagram")
 def organizer_get_event_diagram(event_id: int, user: dict = Depends(get_current_user)):
     _get_owned_event_or_404(event_id, user)
@@ -696,11 +519,7 @@ def organizer_put_event_diagram(
     incoming_doc, incoming_version = _coerce_incoming_diagram_payload(payload)
     existing_doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
 
-    # âœ… Overwrite guard: don't wipe a non-empty diagram with empty payload
-    if _is_effectively_empty_diagram(
-        incoming_doc
-    ) and not _is_effectively_empty_diagram(existing_doc):
-        # just return existing doc (no-op)
+    if _is_effectively_empty_diagram(incoming_doc) and not _is_effectively_empty_diagram(existing_doc):
         return existing_doc or {}
 
     current_version = slot.get("version") if isinstance(slot, dict) else None
@@ -786,11 +605,7 @@ def organizer_earnings(user: dict = Depends(get_current_user)):
         else:
             payouts_owed += payout
 
-        title = (
-            p.get("event_title")
-            or (event_row or {}).get("title")
-            or f"Event {event_id}"
-        )
+        title = p.get("event_title") or (event_row or {}).get("title") or f"Event {event_id}"
 
         if event_id not in event_totals:
             event_totals[event_id] = {
@@ -801,10 +616,7 @@ def organizer_earnings(user: dict = Depends(get_current_user)):
                 "net_earnings": 0.0,
                 "payouts_paid": 0.0,
                 "payouts_owed": 0.0,
-                "payout_status_counts": {
-                    "paid": 0,
-                    "unpaid": 0,
-                },
+                "payout_status_counts": {"paid": 0, "unpaid": 0},
             }
 
         event_totals[event_id]["gross_sales"] += amount
@@ -847,11 +659,6 @@ def organizer_earnings(user: dict = Depends(get_current_user)):
     }
 
 
-# -------------------------------------------------------------------
-# Admin payout endpoints
-# -------------------------------------------------------------------
-
-
 @router.get("/admin/payouts")
 def admin_list_payouts():
     store = get_store_snapshot()
@@ -891,11 +698,7 @@ def admin_list_payouts():
 
         event_id = int(p.get("event_id") or 0)
         event_row = events.get(str(event_id)) or events.get(event_id) or {}
-        event_title = (
-            p.get("event_title")
-            or (event_row or {}).get("title")
-            or f"Event {event_id}"
-        )
+        event_title = p.get("event_title") or (event_row or {}).get("title") or f"Event {event_id}"
 
         row = {
             "payment_id": payment_id,
@@ -942,12 +745,8 @@ def admin_list_payouts():
             "organizer_payouts": round(total_organizer_payouts, 2),
             "payouts_paid": round(total_paid_out, 2),
             "payouts_owed": round(total_owed, 2),
-            "paid_count": sum(
-                1 for row in rows if str(row.get("payout_status") or "") == "paid"
-            ),
-            "unpaid_count": sum(
-                1 for row in rows if str(row.get("payout_status") or "") != "paid"
-            ),
+            "paid_count": sum(1 for row in rows if str(row.get("payout_status") or "") == "paid"),
+            "unpaid_count": sum(1 for row in rows if str(row.get("payout_status") or "") != "paid"),
         },
         "payouts": rows,
     }
@@ -984,11 +783,6 @@ def admin_mark_payout_paid(payment_id: int):
     }
 
 
-# -------------------------------------------------------------------
-# Public endpoints
-# -------------------------------------------------------------------
-
-
 @router.get("/public/events")
 def public_list_events():
     out = []
@@ -1014,11 +808,8 @@ def public_get_event_alias(event_id: int):
 @router.get("/events/{event_id}/requirements")
 def public_get_event_requirements(event_id: int):
     _get_event_or_404(event_id)
-
     raw = _REQUIREMENTS.get(int(event_id))
-    normalized = _normalize_public_requirements_payload(raw or {})
-
-    return normalized
+    return _normalize_public_requirements_payload(raw or {})
 
 
 @router.get("/events/{event_id}/diagram")
@@ -1048,11 +839,7 @@ def get_event_stats(event_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    apps = [
-        a
-        for a in _APPLICATIONS.values()
-        if int(a.get("event_id") or 0) == int(event_id)
-    ]
+    apps = [a for a in _APPLICATIONS.values() if int(a.get("event_id") or 0) == int(event_id)]
 
     slot = _ensure_diagram_slot(event_id)
     doc = slot.get("diagram", {}) if isinstance(slot, dict) else {}
@@ -1071,9 +858,7 @@ def get_event_stats(event_id: int):
         if isinstance(root_booths, list):
             booths.extend([b for b in root_booths if isinstance(b, dict)])
 
-    sold = sum(
-        1 for a in apps if _coerce_payment_status(a.get("payment_status")) == "paid"
-    )
+    sold = sum(1 for a in apps if _coerce_payment_status(a.get("payment_status")) == "paid")
 
     pending = sum(
         1
@@ -1081,9 +866,7 @@ def get_event_stats(event_id: int):
         if str(a.get("status") or "").strip().lower() in ("submitted", "under_review")
     )
 
-    approved = sum(
-        1 for a in apps if str(a.get("status") or "").strip().lower() == "approved"
-    )
+    approved = sum(1 for a in apps if str(a.get("status") or "").strip().lower() == "approved")
 
     revenue = sum(
         _safe_float(a.get("booth_price"))
@@ -1107,14 +890,11 @@ def get_event_stats(event_id: int):
         "approval_rate": approval_rate,
     }
 
+
 @router.post("/dev/reset")
 def dev_reset():
-    from app.store import _EVENTS, _REQUIREMENTS, _DIAGRAMS, save_store
-
     _EVENTS.clear()
     _REQUIREMENTS.clear()
     _DIAGRAMS.clear()
     save_store()
-
     return {"ok": True, "message": "Store reset"}
-
