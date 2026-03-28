@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 
-const API_BASE = import.meta.env.VITE_API_BASE;
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  "https://event-app-api-production-ccce.up.railway.app";
 
 type VendorProfile = {
   businessName: string;
