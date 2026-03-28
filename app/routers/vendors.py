@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,7 +40,6 @@ def _user_vendor_key(user: Dict[str, Any]) -> str:
     raise HTTPException(status_code=400, detail="Unable to resolve vendor identity")
 
 
-# 🔥 FIX: normalize camelCase → snake_case
 def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "business_name": payload.get("businessName", ""),
@@ -51,8 +50,14 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "website": payload.get("website", ""),
         "instagram": payload.get("instagram", ""),
         "facebook": payload.get("facebook", ""),
+        "city": payload.get("city", ""),
+        "state": payload.get("state", ""),
+        "country": payload.get("country", ""),
+        "zip": payload.get("zip", ""),
         "logo_url": payload.get("logoUrl", ""),
         "banner_url": payload.get("bannerUrl", ""),
+        "image_urls": payload.get("imageUrls", []),
+        "video_urls": payload.get("videoUrls", []),
         "contact_name": payload.get("contactName", ""),
         "updated_at": _now_iso(),
     }
@@ -69,8 +74,14 @@ class VendorProfileUpsert(BaseModel):
     website: str = ""
     instagram: str = ""
     facebook: str = ""
+    city: str = ""
+    state: str = ""
+    country: str = ""
+    zip: str = ""
     logoUrl: str = ""
     bannerUrl: str = ""
+    imageUrls: List[str] = Field(default_factory=list)
+    videoUrls: List[str] = Field(default_factory=list)
     contactName: str = ""
 
 
@@ -86,17 +97,11 @@ def save_my_vendor_profile(
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     key = _user_vendor_key(user)
-
     existing = _VENDORS.get(key, {})
-
-    # 🔥 FIX: map correctly
     mapped = _map_payload(payload.model_dump())
-
     updated = {**existing, **mapped}
-
     _VENDORS[key] = updated
     save_store()
-
     return updated
 
 

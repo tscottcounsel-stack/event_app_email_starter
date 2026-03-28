@@ -15,8 +15,12 @@ type VendorProfile = {
   email: string;
   phone: string;
   website: string;
+  instagram: string;
+  facebook: string;
 
   country: string;
+  state: string;
+  city: string;
   zip: string;
 
   logoDataUrl?: string;
@@ -36,7 +40,11 @@ const EMPTY_PROFILE: VendorProfile = {
   email: "",
   phone: "",
   website: "",
+  instagram: "",
+  facebook: "",
   country: "United States",
+  state: "",
+  city: "",
   zip: "",
   logoDataUrl: "",
   imageUrls: [],
@@ -117,7 +125,7 @@ async function readJsonOrThrow(res: Response) {
       const j = text ? JSON.parse(text) : null;
       if (j?.detail) msg = String(j.detail);
     } catch {
-      // ignore JSON parse failures
+      // ignore parse failures
     }
     throw new Error(msg);
   }
@@ -138,7 +146,7 @@ function asStringArray(value: any): string[] {
   return value.filter(Boolean).map((item) => String(item));
 }
 
-function normalizeFromSource(source: any): VendorProfile {
+function normalizeFromSource(source: any) {
   const src = source && typeof source === "object" ? source : {};
   const vendorProfile =
     src?.vendor_profile && typeof src.vendor_profile === "object" ? src.vendor_profile : {};
@@ -151,24 +159,25 @@ function normalizeFromSource(source: any): VendorProfile {
     return undefined;
   };
 
-  const businessName = asString(
-    pick("businessName", "business_name", "vendor_business_name", "company_name", "name"),
-    ""
-  );
-  const businessDescription = asString(
-    pick("businessDescription", "business_description", "description", "vendor_description"),
-    ""
-  );
-
   return {
-    businessName,
-    businessDescription,
+    businessName: asString(
+      pick("businessName", "business_name", "vendor_business_name", "company_name", "name"),
+      ""
+    ),
+    businessDescription: asString(
+      pick("businessDescription", "business_description", "description", "vendor_description"),
+      ""
+    ),
     businessType: asString(pick("businessType", "business_type", "vendor_type"), ""),
     yearsInBusiness: asString(pick("yearsInBusiness", "years_in_business"), "5"),
     email: asString(pick("email", "vendor_email", "contact_email"), ""),
     phone: asString(pick("phone", "vendor_phone", "contact_phone"), ""),
     website: asString(pick("website", "website_url"), ""),
+    instagram: asString(pick("instagram", "instagram_url"), ""),
+    facebook: asString(pick("facebook", "facebook_url"), ""),
     country: asString(pick("country"), "United States"),
+    state: asString(pick("state"), ""),
+    city: asString(pick("city"), ""),
     zip: asString(pick("zip", "zip_code", "postal_code"), ""),
     logoDataUrl: asString(
       pick("logoDataUrl", "logo_data_url", "logo_url", "logoUrl"),
@@ -178,7 +187,7 @@ function normalizeFromSource(source: any): VendorProfile {
     videoUrls: asStringArray(pick("videoUrls", "video_urls", "videos")),
     categories: asStringArray(pick("categories", "vendor_categories")),
     updatedAt: asString(pick("updatedAt", "updated_at"), ""),
-  };
+  } as VendorProfile;
 }
 
 function mergeProfiles(
@@ -196,7 +205,11 @@ function mergeProfiles(
     email: asString(next.email ?? base.email, ""),
     phone: asString(next.phone ?? base.phone, ""),
     website: asString(next.website ?? base.website, ""),
+    instagram: asString(next.instagram ?? base.instagram, ""),
+    facebook: asString(next.facebook ?? base.facebook, ""),
     country: asString(next.country ?? base.country, "United States"),
+    state: asString(next.state ?? base.state, ""),
+    city: asString(next.city ?? base.city, ""),
     zip: asString(next.zip ?? base.zip, ""),
     logoDataUrl: asString(next.logoDataUrl ?? base.logoDataUrl, ""),
     imageUrls: asStringArray(next.imageUrls ?? base.imageUrls),
@@ -209,19 +222,20 @@ function mergeProfiles(
 export default function VendorBusinessProfileSetupPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const fileRef = useRef<HTMLInputElement>(null);
+  const logoFileRef = useRef<HTMLInputElement>(null);
+  const galleryFileRef = useRef<HTMLInputElement>(null);
 
   const inboundToast = (location.state as any)?.toast as string | undefined;
   const redirectAfterSave = (location.state as any)?.redirectAfterSave as string | undefined;
 
   const [profile, setProfile] = useState<VendorProfile>(EMPTY_PROFILE);
-  const [imgUrlInput, setImgUrlInput] = useState("");
   const [videoUrlInput, setVideoUrlInput] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [uploadingGallery, setUploadingGallery] = useState(false);
 
   async function apiGetApplications() {
     const res = await fetch(`${API_BASE}/vendor/applications`, {
@@ -263,7 +277,11 @@ export default function VendorBusinessProfileSetupPage() {
           serverProfile.categories.length > 0 ||
           !!serverProfile.logoDataUrl ||
           serverProfile.imageUrls.length > 0 ||
-          serverProfile.videoUrls.length > 0;
+          serverProfile.videoUrls.length > 0 ||
+          !!serverProfile.instagram ||
+          !!serverProfile.facebook ||
+          !!serverProfile.city ||
+          !!serverProfile.state;
 
         if (hasServerData) {
           const merged = mergeProfiles(serverProfile, localProfile);
@@ -360,6 +378,26 @@ export default function VendorBusinessProfileSetupPage() {
     return Object.keys(next).length === 0;
   }
 
+  async function uploadImageFile(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`${API_BASE}/upload/image`, {
+      method: "POST",
+      headers: {
+        ...buildVendorHeaders(),
+      },
+      body: formData,
+    });
+
+    const data = await readJsonOrThrow(res);
+    const relativeUrl = String(data?.url || "").trim();
+    if (!relativeUrl) {
+      throw new Error("Upload succeeded but no file URL was returned.");
+    }
+    return `${API_BASE}${relativeUrl}`;
+  }
+
   async function save() {
     setStatusMsg("");
 
@@ -388,8 +426,12 @@ export default function VendorBusinessProfileSetupPage() {
           email: payload.email,
           phone: payload.phone,
           website: payload.website,
-          instagram: "",
-          facebook: "",
+          instagram: payload.instagram,
+          facebook: payload.facebook,
+          city: payload.city,
+          state: payload.state,
+          country: payload.country,
+          zip: payload.zip,
           logoUrl: payload.logoDataUrl || "",
           bannerUrl: "",
           contactName: payload.businessName,
@@ -433,43 +475,49 @@ export default function VendorBusinessProfileSetupPage() {
       setUploadingLogo(true);
       setStatusMsg("Uploading logo…");
 
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const res = await fetch(`${API_BASE}/upload/image`, {
-        method: "POST",
-        headers: {
-          ...buildVendorHeaders(),
-        },
-        body: formData,
-      });
-
-      const data = await readJsonOrThrow(res);
-      const fullUrl = `${API_BASE}${String(data?.url || "")}?t=${Date.now()}`;
+      const fullUrl = `${await uploadImageFile(file)}?t=${Date.now()}`;
 
       setField("logoDataUrl", fullUrl);
-      setStatusMsg(`Logo uploaded successfully: ${fullUrl}`);
-
-      try {
-        const local = safeJsonParse<VendorProfile>(localStorage.getItem(LS_KEY));
-        const merged = mergeProfiles(mergeProfiles(EMPTY_PROFILE, local), { logoDataUrl: fullUrl });
-        localStorage.setItem(LS_KEY, JSON.stringify(merged));
-      } catch {
-        // ignore storage failures
-      }
+      setStatusMsg("Logo uploaded successfully.");
     } catch (e: any) {
       console.error(e);
-      setStatusMsg(`Upload failed: ${String(e?.message || e)}`);
+      setStatusMsg(`Logo upload failed: ${String(e?.message || e)}`);
     } finally {
       setUploadingLogo(false);
     }
   }
 
-  function addImage() {
-    const value = String(imgUrlInput || "").trim();
-    if (!value) return;
-    setProfile((prev) => ({ ...prev, imageUrls: [...(prev?.imageUrls ?? []), value] }));
-    setImgUrlInput("");
+  async function onPickGalleryImages(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
+    try {
+      setUploadingGallery(true);
+      setStatusMsg(`Uploading ${files.length} image${files.length === 1 ? "" : "s"}…`);
+
+      const uploadedUrls: string[] = [];
+      for (const file of Array.from(files)) {
+        if (file.size > 5 * 1024 * 1024) {
+          throw new Error(`${file.name} is over 5MB.`);
+        }
+        const url = `${await uploadImageFile(file)}?t=${Date.now()}`;
+        uploadedUrls.push(url);
+      }
+
+      setProfile((prev) => {
+        const merged = [...(prev.imageUrls ?? [])];
+        for (const url of uploadedUrls) {
+          if (!merged.includes(url)) merged.push(url);
+        }
+        return { ...prev, imageUrls: merged };
+      });
+
+      setStatusMsg(`Uploaded ${uploadedUrls.length} image${uploadedUrls.length === 1 ? "" : "s"} successfully.`);
+    } catch (e: any) {
+      console.error(e);
+      setStatusMsg(`Gallery upload failed: ${String(e?.message || e)}`);
+    } finally {
+      setUploadingGallery(false);
+    }
   }
 
   function removeImage(url: string) {
@@ -524,7 +572,7 @@ export default function VendorBusinessProfileSetupPage() {
           <button
             onClick={save}
             className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-60"
-            disabled={loading || saving || uploadingLogo}
+            disabled={loading || saving || uploadingLogo || uploadingGallery}
           >
             {saving ? "Saving…" : "Save Profile"}
           </button>
@@ -578,7 +626,7 @@ export default function VendorBusinessProfileSetupPage() {
 
               <div>
                 <button
-                  onClick={() => fileRef.current?.click()}
+                  onClick={() => logoFileRef.current?.click()}
                   className="rounded-xl border px-4 py-2 font-bold hover:bg-slate-50 disabled:opacity-60"
                   disabled={uploadingLogo}
                 >
@@ -586,7 +634,7 @@ export default function VendorBusinessProfileSetupPage() {
                 </button>
 
                 <input
-                  ref={fileRef}
+                  ref={logoFileRef}
                   type="file"
                   hidden
                   accept="image/*"
@@ -674,6 +722,52 @@ export default function VendorBusinessProfileSetupPage() {
       </div>
 
       <div className="rounded-2xl bg-white p-6 shadow ring-1 ring-slate-200">
+        <div className="text-xl font-extrabold">Online Presence</div>
+
+        <div className="mt-6 grid gap-6 md:grid-cols-2">
+          <div>
+            <div className="text-sm font-bold">Instagram</div>
+            <input
+              value={profile?.instagram ?? ""}
+              onChange={(e) => setField("instagram", e.target.value)}
+              className="mt-2 w-full rounded-xl border px-4 py-3"
+              placeholder="@yourhandle or https://instagram.com/yourhandle"
+            />
+          </div>
+
+          <div>
+            <div className="text-sm font-bold">Facebook</div>
+            <input
+              value={profile?.facebook ?? ""}
+              onChange={(e) => setField("facebook", e.target.value)}
+              className="mt-2 w-full rounded-xl border px-4 py-3"
+              placeholder="https://facebook.com/yourpage"
+            />
+          </div>
+
+          <div>
+            <div className="text-sm font-bold">City</div>
+            <input
+              value={profile?.city ?? ""}
+              onChange={(e) => setField("city", e.target.value)}
+              className="mt-2 w-full rounded-xl border px-4 py-3"
+              placeholder="City"
+            />
+          </div>
+
+          <div>
+            <div className="text-sm font-bold">State</div>
+            <input
+              value={profile?.state ?? ""}
+              onChange={(e) => setField("state", e.target.value)}
+              className="mt-2 w-full rounded-xl border px-4 py-3"
+              placeholder="State"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white p-6 shadow ring-1 ring-slate-200">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-xl font-extrabold">Business Categories</div>
@@ -726,21 +820,32 @@ export default function VendorBusinessProfileSetupPage() {
       </div>
 
       <div className="rounded-2xl bg-white p-6 shadow ring-1 ring-slate-200">
-        <div className="text-xl font-extrabold">Business Images</div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xl font-extrabold">Business Images</div>
+            <div className="mt-1 text-sm text-slate-600">
+              Upload gallery images directly for your public vendor profile.
+            </div>
+          </div>
 
-        <div className="mt-4 flex gap-3">
-          <input
-            value={imgUrlInput}
-            onChange={(e) => setImgUrlInput(e.target.value)}
-            className="w-full rounded-xl border px-4 py-3"
-            placeholder="Image URL"
-          />
-          <button
-            onClick={addImage}
-            className="rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white"
-          >
-            Add
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={() => galleryFileRef.current?.click()}
+              className="rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-60"
+              disabled={uploadingGallery}
+            >
+              {uploadingGallery ? "Uploading…" : "Upload Images"}
+            </button>
+
+            <input
+              ref={galleryFileRef}
+              type="file"
+              hidden
+              accept="image/*"
+              multiple
+              onChange={(e) => onPickGalleryImages(e.target.files)}
+            />
+          </div>
         </div>
 
         {(profile?.imageUrls ?? []).length ? (
@@ -759,7 +864,9 @@ export default function VendorBusinessProfileSetupPage() {
               </div>
             ))}
           </div>
-        ) : null}
+        ) : (
+          <div className="mt-4 text-sm text-slate-500">No business images yet.</div>
+        )}
       </div>
 
       <div className="rounded-2xl bg-white p-6 shadow ring-1 ring-slate-200">
@@ -804,7 +911,7 @@ export default function VendorBusinessProfileSetupPage() {
         <button
           onClick={save}
           className="rounded-full bg-indigo-600 px-6 py-3 font-bold text-white hover:bg-indigo-700 disabled:opacity-60"
-          disabled={saving || uploadingLogo}
+          disabled={saving || uploadingLogo || uploadingGallery}
         >
           {saving ? "Saving…" : "Save Profile"}
         </button>
