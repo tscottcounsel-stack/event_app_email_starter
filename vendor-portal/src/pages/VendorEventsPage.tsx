@@ -1,9 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
 
 const API_BASE =
-  import.meta.env.VITE_API_BASE ||
   import.meta.env.VITE_API_BASE ||
   "https://event-app-api-production-ccce.up.railway.app";
 
@@ -28,7 +27,9 @@ type VendorEvent = {
   date?: string;
   image_url?: string | null;
   banner_url?: string | null;
+  heroImageUrl?: string | null;
   published?: boolean;
+  archived?: boolean;
   status?: string;
   [key: string]: any;
 };
@@ -44,6 +45,28 @@ function normalizeEventId(event: VendorEvent): string {
     "";
 
   return String(raw).trim();
+}
+
+function isPublishedEvent(event: VendorEvent) {
+  if (event?.archived === true) return false;
+  if (event?.published === true) return true;
+
+  const status = String(event?.status ?? "").trim().toLowerCase();
+  return status === "published" || status === "live";
+}
+
+function dedupeEvents(items: VendorEvent[]) {
+  const seen = new Set<string>();
+  const out: VendorEvent[] = [];
+
+  for (const item of items) {
+    const key = normalizeEventId(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
 }
 
 function formatDateRange(start?: string, end?: string, fallback?: string) {
@@ -78,13 +101,59 @@ function locationLine(event: VendorEvent) {
   return parts.join(" • ") || "Location TBD";
 }
 
+async function tryFetchEvents(
+  url: string,
+  headers: Record<string, string>
+): Promise<{ ok: boolean; events: VendorEvent[]; message?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    let data: any = null;
+
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        events: [],
+        message:
+          (data && (data.detail || data.message)) ||
+          `Failed to load events (${res.status}).`,
+      };
+    }
+
+    const rawEvents = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.events)
+        ? data.events
+        : [];
+
+    const normalized = dedupeEvents(
+      rawEvents.filter((event: VendorEvent) => !!normalizeEventId(event))
+    );
+
+    return { ok: true, events: normalized };
+  } catch {
+    return { ok: false, events: [], message: "Failed to load events." };
+  }
+}
+
 export default function VendorEventsPage() {
   const navigate = useNavigate();
   const [events, setEvents] = useState<VendorEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const session = useMemo(() => readSession(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,80 +163,63 @@ export default function VendorEventsPage() {
         setLoading(true);
         setError(null);
 
-        const headers: Record<string, string> = {
+        const session = readSession();
+
+        const authedHeaders: Record<string, string> = {
           Accept: "application/json",
         };
 
         if (session?.accessToken) {
-          headers["Authorization"] = `Bearer ${session.accessToken}`;
+          authedHeaders.Authorization = `Bearer ${session.accessToken}`;
         }
         if (session?.email) {
-          headers["x-user-email"] = session.email;
+          authedHeaders["x-user-email"] = session.email;
         }
 
-        console.log("VendorEventsPage API_BASE:", API_BASE);
+        const publicHeaders: Record<string, string> = {
+          Accept: "application/json",
+        };
 
-        const candidateUrls = [`${API_BASE}/vendor/events`, `${API_BASE}/events`];
+        const candidateRequests: Array<{
+          url: string;
+          headers: Record<string, string>;
+          preferPublishedOnly?: boolean;
+        }> = [
+          { url: `${API_BASE}/vendor/events`, headers: authedHeaders, preferPublishedOnly: true },
+          { url: `${API_BASE}/public/events`, headers: publicHeaders, preferPublishedOnly: false },
+          { url: `${API_BASE}/events`, headers: authedHeaders, preferPublishedOnly: true },
+        ];
 
         let loaded: VendorEvent[] = [];
         let lastMessage = "Failed to load events.";
-        let foundSuccessfulResponse = false;
-        let foundSuccessfulEmptyResponse = false;
 
-        for (const url of candidateUrls) {
-          try {
-            console.log("Fetching events from:", url);
+        for (const request of candidateRequests) {
+          const result = await tryFetchEvents(request.url, request.headers);
 
-            const res = await fetch(url, { method: "GET", headers });
-            const text = await res.text();
+          if (!result.ok) {
+            lastMessage = result.message || lastMessage;
+            continue;
+          }
 
-            let data: any = null;
-            if (text) {
-              try {
-                data = JSON.parse(text);
-              } catch {
-                data = null;
-              }
-            }
+          const nextEvents = request.preferPublishedOnly
+            ? result.events.filter(isPublishedEvent)
+            : result.events;
 
-            console.log("Events response status:", url, res.status);
-            console.log("Events response data:", url, data);
-
-            if (!res.ok) {
-              lastMessage =
-                (data && (data.detail || data.message)) ||
-                `Failed to load events (${res.status}).`;
-              continue;
-            }
-
-            const nextEvents = Array.isArray(data)
-              ? data
-              : Array.isArray(data?.events)
-                ? data.events
-                : [];
-
-            console.log("Normalized events:", nextEvents);
-
-            if (nextEvents.length > 0) {
-              loaded = nextEvents;
-              foundSuccessfulResponse = true;
-              foundSuccessfulEmptyResponse = false;
-              lastMessage = "";
-              break;
-            }
-
-            foundSuccessfulEmptyResponse = true;
+          if (nextEvents.length > 0) {
+            loaded = nextEvents;
             lastMessage = "";
-          } catch (err) {
-            console.warn("Failed URL:", url, err);
-            lastMessage = "Failed to load events.";
+            break;
+          }
+
+          if (!loaded.length) {
+            lastMessage = "";
           }
         }
 
         if (cancelled) return;
 
         setEvents(loaded);
-        setError(foundSuccessfulResponse || foundSuccessfulEmptyResponse ? null : lastMessage);
+        setError(lastMessage || null);
       } catch (err: any) {
         if (!cancelled) {
           setEvents([]);
@@ -185,7 +237,7 @@ export default function VendorEventsPage() {
     return () => {
       cancelled = true;
     };
-  }, [session?.accessToken, session?.email]);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -216,34 +268,43 @@ export default function VendorEventsPage() {
               event?.end_date,
               String(event?.event_date ?? event?.date ?? "Dates TBD")
             );
-
-            console.log("EVENT CARD:", event);
-            console.log("EVENT ID USED:", eventId);
+            const imageUrl =
+              String(event?.heroImageUrl ?? event?.image_url ?? event?.banner_url ?? "").trim();
 
             return (
               <div
                 key={eventId || `${title}-${dates}`}
-                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+                className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
               >
-                <div className="text-3xl font-black text-slate-900">{title}</div>
-
-                <div className="mt-2 text-lg text-slate-600">{location}</div>
-
-                <div className="mt-1 text-lg text-slate-600">{dates}</div>
-
-                {event?.description ? (
-                  <div className="mt-3 text-sm text-slate-600">{String(event.description)}</div>
+                {imageUrl ? (
+                  <img
+                    src={imageUrl}
+                    alt={title}
+                    className="h-48 w-full object-cover"
+                  />
                 ) : null}
 
-                <div className="mt-5">
-                  <button
-                    type="button"
-                    onClick={() => navigate(`/vendor/events/${eventId}`)}
-                    disabled={!eventId}
-                    className="rounded-lg bg-violet-600 px-5 py-3 font-bold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    View Event
-                  </button>
+                <div className="p-5">
+                  <div className="text-3xl font-black text-slate-900">{title}</div>
+
+                  <div className="mt-2 text-lg text-slate-600">{location}</div>
+
+                  <div className="mt-1 text-lg text-slate-600">{dates}</div>
+
+                  {event?.description ? (
+                    <div className="mt-3 text-sm text-slate-600">{String(event.description)}</div>
+                  ) : null}
+
+                  <div className="mt-5">
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/vendor/events/${eventId}`)}
+                      disabled={!eventId}
+                      className="rounded-lg bg-violet-600 px-5 py-3 font-bold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      View Event
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -253,8 +314,3 @@ export default function VendorEventsPage() {
     </div>
   );
 }
-
-
-
-
-

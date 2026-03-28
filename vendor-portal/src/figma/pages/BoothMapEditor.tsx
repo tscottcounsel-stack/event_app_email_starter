@@ -994,7 +994,7 @@ useEffect(() => {
 
 
 
-  async function saveNow() {
+  async function saveNow(nextPublished: boolean = isPublished) {
     if (!eventId) return;
 
     try {
@@ -1004,8 +1004,8 @@ useEffect(() => {
 
       const doc: DiagramDoc = {
         version: 2,
-        published: isPublished,
-        meta: { published: isPublished },
+        published: nextPublished,
+        meta: { published: nextPublished },
         canvas: { width: canvasW, height: canvasH, gridSize },
         levels: levels.map((lvl) => ({
           id: lvl.id,
@@ -1017,10 +1017,12 @@ useEffect(() => {
 
       await saveEventDiagram(eventId, doc);
       localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: doc }));
+      setIsPublished(nextPublished);
       setStatusMsg("Saved");
     } catch (e: any) {
       setSaveError(e?.message ? String(e.message) : "Save failed");
       setStatusMsg("Save failed");
+      throw e;
     } finally {
       setIsSaving(false);
     }
@@ -1510,8 +1512,7 @@ const overlayDetail = overlayName
                   <button
                     onClick={async () => {
                       try {
-                        setIsPublished(false);
-                        await saveNow();
+                        await saveNow(false);
                         window.alert(
                           "Layout unpublished (event remains published on vendor side — no unpublish endpoint yet)."
                         );
@@ -1530,8 +1531,7 @@ const overlayDetail = overlayName
                 <button
                   onClick={async () => {
                     try {
-                      setIsPublished(true);
-                      await saveNow();
+                      await saveNow(true);
                       await publishEventNow();
                       window.alert("Event published.");
                     } catch (e: any) {
