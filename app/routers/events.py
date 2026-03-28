@@ -26,7 +26,10 @@ from app.store import (
 router = APIRouter(tags=["Events"])
 
 
-UPLOAD_DIR = Path("uploads")
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
