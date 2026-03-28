@@ -141,37 +141,32 @@ async function fileToDataUrl(file: File): Promise<string> {
 }
 
 /**
- * For <input type="datetime-local">:
- * - value must be "YYYY-MM-DDTHH:mm" (no seconds, no timezone)
+ * For <input type="date">:
+ * - value must be "YYYY-MM-DD"
  */
-function isoToLocalInput(iso?: string | null) {
+function isoToDateInput(iso?: string | null) {
   const s = safeStr(iso);
   if (!s) return "";
 
-  // If backend already stores date-only "YYYY-MM-DD"
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
 
-  // Otherwise parse ISO timestamp and render local date/time
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return "";
 
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  return `${yyyy}-${mm}-${dd}T00:00`;
+  return d.toISOString().slice(0, 10);
 }
 
-function localInputToIso(value?: string | null) {
-  const v = safeStr(value);
-  if (!v) return null;
+function normalizeDateInput(value?: string | null) {
+  const raw = safeStr(value);
+  if (!raw) return null;
 
-  // v like "2026-04-04T00:00"
-  const datePart = v.split("T")[0] || "";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return null;
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/;
+  if (dateOnly.test(raw)) return raw;
 
-  // Store DATE-ONLY to avoid timezone shifts
-  return datePart;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  return parsed.toISOString().slice(0, 10);
 }
 
 
@@ -300,7 +295,7 @@ export default function OrganizerEventDetailsPage() {
   // ✅ Category
   const [category, setCategory] = useState("");
 
-  // datetime-local values
+  // date-only values
   const [startLocal, setStartLocal] = useState("");
   const [endLocal, setEndLocal] = useState("");
 
@@ -362,9 +357,9 @@ export default function OrganizerEventDetailsPage() {
         // ✅ Category load (best-effort)
         setCategory(pickCategoryFromEvent(ev));
 
-        // ✅ Convert ISO -> datetime-local
-        setStartLocal(isoToLocalInput(ev.start_date ?? null));
-        setEndLocal(isoToLocalInput(ev.end_date ?? null));
+        // ✅ Convert ISO -> date input
+        setStartLocal(isoToDateInput(ev.start_date ?? null));
+        setEndLocal(isoToDateInput(ev.end_date ?? null));
 
         // ✅ Prefer backend canonical, fall back to legacy
         setTicketSalesUrl(
@@ -549,7 +544,11 @@ export default function OrganizerEventDetailsPage() {
     setErr(null);
 
     try {
-      const headers = { ...buildAuthHeaders(), "Content-Type": "application/json" };
+      const headers = {
+        ...buildAuthHeaders(),
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      };
 
       const cat = normalizeCategory(category);
 
@@ -564,9 +563,9 @@ export default function OrganizerEventDetailsPage() {
         city: safeStr(city) || undefined,
         state: safeStr(stateCode) || undefined,
 
-        // ✅ store as ISO; empty -> null (prevents 1970)
-        start_date: localInputToIso(startLocal),
-        end_date: localInputToIso(endLocal),
+        // ✅ normalize to YYYY-MM-DD; empty/invalid -> null (prevents 1970)
+        start_date: normalizeDateInput(startLocal),
+        end_date: normalizeDateInput(endLocal),
 
         // ✅ category (best-effort)
         category: cat || undefined,
@@ -583,7 +582,7 @@ export default function OrganizerEventDetailsPage() {
       };
 
       const res = await fetch(`${API_BASE}/organizer/events/${eid}`, {
-        method: "PUT",
+        method: "PATCH",
         headers,
         body: JSON.stringify(payload),
       });
@@ -622,8 +621,8 @@ export default function OrganizerEventDetailsPage() {
         // ✅ reload category from server response
         setCategory(pickCategoryFromEvent(next));
 
-        setStartLocal(isoToLocalInput(next.start_date ?? null));
-        setEndLocal(isoToLocalInput(next.end_date ?? null));
+        setStartLocal(isoToDateInput(next.start_date ?? null));
+        setEndLocal(isoToDateInput(next.end_date ?? null));
 
         setTicketSalesUrl(
           safeStr((next as any).ticket_sales_url ?? (next as any).ticketUrl)
@@ -1119,7 +1118,7 @@ export default function OrganizerEventDetailsPage() {
           <label className="block">
             <div className="mb-1 text-sm font-medium text-gray-700">Start Date</div>
             <input
-              type="datetime-local"
+              type="date"
               className="w-full rounded-lg border px-3 py-2"
               value={startLocal}
               onChange={(e) => setStartLocal(e.target.value)}
@@ -1129,7 +1128,7 @@ export default function OrganizerEventDetailsPage() {
           <label className="block">
             <div className="mb-1 text-sm font-medium text-gray-700">End Date</div>
             <input
-              type="datetime-local"
+              type="date"
               className="w-full rounded-lg border px-3 py-2"
               value={endLocal}
               onChange={(e) => setEndLocal(e.target.value)}
