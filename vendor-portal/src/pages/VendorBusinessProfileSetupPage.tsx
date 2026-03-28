@@ -404,21 +404,36 @@ export default function VendorBusinessProfileSetupPage() {
   }
 }
   async function onPickLogo(file: File | null) {
-    if (!file) return;
+  if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setStatusMsg("Logo must be under 5MB.");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      setField("logoDataUrl", String(reader.result || ""));
-      setStatusMsg("Logo saved locally.");
-    };
-    reader.readAsDataURL(file);
+  if (file.size > 5 * 1024 * 1024) {
+    setStatusMsg("Logo must be under 5MB.");
+    return;
   }
 
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch(`${API_BASE}/upload/image`, {
+      method: "POST",
+      headers: {
+        ...buildVendorHeaders(),
+      },
+      body: formData,
+    });
+
+    const data = await readJsonOrThrow(res);
+
+    const fullUrl = `${API_BASE}${data.url}`;
+
+    setField("logoDataUrl", fullUrl);
+    setStatusMsg("Logo uploaded successfully.");
+  } catch (e: any) {
+    console.error(e);
+    setStatusMsg(`Upload failed: ${String(e?.message || e)}`);
+  }
+}
   function addImage() {
     const value = String(imgUrlInput || "").trim();
     if (!value) return;
