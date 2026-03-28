@@ -4,7 +4,7 @@ import { readSession } from "../auth/authStorage";
 
 const API_BASE =
   import.meta.env.VITE_API_BASE ||
-  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE_URL ||
   "https://event-app-api-production-ccce.up.railway.app";
 
 type VendorProfile = {
@@ -217,6 +217,11 @@ export default function VendorPublicProfilePage() {
   const [reviews, setReviews] = useState<VendorReview[]>([]);
   const [averageRating, setAverageRating] = useState(0);
   const [reviewCount, setReviewCount] = useState(0);
+  const [newRating, setNewRating] = useState(5);
+  const [newComment, setNewComment] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [submitSuccess, setSubmitSuccess] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -269,10 +274,55 @@ export default function VendorPublicProfilePage() {
     [vendorId, profile.vendor_id]
   );
 
+  async function loadReviewsForVendor(targetVendorId: string) {
+    if (!targetVendorId) {
+      setReviews([]);
+      setAverageRating(0);
+      setReviewCount(0);
+      return;
+    }
+
+    setReviewsLoading(true);
+    setReviewsError("");
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/vendors/${encodeURIComponent(targetVendorId)}/reviews`,
+        {
+          headers: buildVendorHeaders(),
+        }
+      );
+
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        let message = text || `Failed to load reviews (${res.status})`;
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed?.detail) message = String(parsed.detail);
+        } catch {}
+        throw new Error(message);
+      }
+
+      const data: VendorReviewsResponse = text ? JSON.parse(text) : {};
+
+      setReviews(Array.isArray(data?.reviews) ? data.reviews : []);
+      setAverageRating(Number(data?.rating || 0));
+      setReviewCount(Number(data?.review_count || 0));
+    } catch (err: any) {
+      console.error("Failed to load vendor reviews", err);
+      setReviews([]);
+      setAverageRating(0);
+      setReviewCount(0);
+      setReviewsError(String(err?.message || err || "Failed to load reviews."));
+    } finally {
+      setReviewsLoading(false);
+    }
+  }
+
   useEffect(() => {
     let mounted = true;
 
-    async function loadReviews() {
+    async function run() {
       if (!effectiveVendorId) {
         setReviews([]);
         setAverageRating(0);
@@ -319,11 +369,55 @@ export default function VendorPublicProfilePage() {
       }
     }
 
-    void loadReviews();
+    void run();
     return () => {
       mounted = false;
     };
   }, [effectiveVendorId]);
+
+  async function submitReview() {
+    if (!effectiveVendorId) return;
+
+    setSubmittingReview(true);
+    setSubmitError("");
+    setSubmitSuccess("");
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/vendors/${encodeURIComponent(effectiveVendorId)}/reviews`,
+        {
+          method: "POST",
+          headers: {
+            ...buildVendorHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            rating: newRating,
+            comment: newComment,
+          }),
+        }
+      );
+
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        let msg = text || "Failed to submit review";
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed?.detail) msg = String(parsed.detail);
+        } catch {}
+        throw new Error(msg);
+      }
+
+      setNewRating(5);
+      setNewComment("");
+      setSubmitSuccess("Review submitted.");
+      await loadReviewsForVendor(effectiveVendorId);
+    } catch (err: any) {
+      setSubmitError(String(err?.message || err || "Failed to submit review"));
+    } finally {
+      setSubmittingReview(false);
+    }
+  }
 
   const locationLine = useMemo(() => {
     const parts = [profile.city, profile.state, profile.country].filter(Boolean);
@@ -493,6 +587,51 @@ export default function VendorPublicProfilePage() {
                   </div>
                 </div>
 
+                <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <h3 className="mb-2 font-bold text-slate-900">Leave a Review</h3>
+
+                  <div className="mb-2 flex gap-2">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => setNewRating(star)}
+                        className={`text-2xl ${
+                          star <= newRating ? "text-amber-500" : "text-slate-300"
+                        }`}
+                        aria-label={`Set rating to ${star} star${star > 1 ? "s" : ""}`}
+                      >
+                        ★
+                      </button>
+                    ))}
+                  </div>
+
+                  <textarea
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    placeholder="Write your review..."
+                    rows={4}
+                    className="w-full rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 outline-none ring-0 placeholder:text-slate-400 focus:border-indigo-500"
+                  />
+
+                  {submitError ? (
+                    <div className="mt-2 text-sm font-medium text-rose-600">{submitError}</div>
+                  ) : null}
+
+                  {submitSuccess ? (
+                    <div className="mt-2 text-sm font-medium text-emerald-600">{submitSuccess}</div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={submitReview}
+                    disabled={submittingReview}
+                    className="mt-3 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {submittingReview ? "Submitting..." : "Submit Review"}
+                  </button>
+                </div>
+
                 {reviewsLoading ? (
                   <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">
                     Loading reviews...
@@ -646,8 +785,3 @@ export default function VendorPublicProfilePage() {
     </div>
   );
 }
-
-
-
-
-
