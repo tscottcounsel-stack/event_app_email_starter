@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
@@ -20,6 +24,53 @@ from app.store import (
 )
 
 router = APIRouter(tags=["Events"])
+
+
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
+
+
+def _sanitize_upload_filename(filename: str) -> str:
+    original = os.path.basename(str(filename or "").strip())
+    stem, ext = os.path.splitext(original)
+    ext = ext.lower()
+
+    if ext not in _ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported image type")
+
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("._-")
+    if not safe_stem:
+        safe_stem = "image"
+
+    return f"{safe_stem}-{uuid4().hex[:12]}{ext}"
+
+
+
+
+
+@router.post("/upload/image")
+async def upload_image(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    filename = _sanitize_upload_filename(file.filename or "")
+    destination = UPLOAD_DIR / filename
+
+    try:
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        destination.write_bytes(contents)
+    finally:
+        await file.close()
+
+    return {"url": f"/uploads/{filename}"}
 
 
 class EventCreate(BaseModel):
