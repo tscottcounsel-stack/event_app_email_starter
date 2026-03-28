@@ -944,8 +944,23 @@ def get_event_stats(event_id: int):
 
 @router.post("/dev/reset")
 def dev_reset():
+    # Clear all in-memory stores
     _EVENTS.clear()
     _REQUIREMENTS.clear()
     _DIAGRAMS.clear()
+    _APPLICATIONS.clear()
+    _PAYMENTS.clear()
+
+    # 👇 ADD THIS (this is what removes practice accounts)
+    try:
+        from app.routers.users import _USERS
+        _USERS.clear()
+    except Exception:
+        pass
+
     save_store()
-    return {"ok": True, "message": "Store reset"}
+
+    return {
+        "ok": True,
+        "message": "Full system reset complete (events, users, applications, payments, diagrams cleared)",
+    }
