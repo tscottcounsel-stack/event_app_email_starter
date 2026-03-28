@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.routers.auth import get_current_user
-from app.store import _REVIEWS, _VENDORS, next_review_id, save_store
+from app.store import _APPLICATIONS, _EVENTS, _REVIEWS, _VENDORS, next_review_id, save_store
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
 
@@ -110,6 +110,48 @@ def _review_summary(vendor_id: Any) -> Dict[str, Any]:
     }
 
 
+def _can_organizer_review_vendor(vendor_key: str, user: Dict[str, Any]) -> bool:
+    user_email = _safe_str(user.get("email")).lower()
+    user_id = _safe_str(user.get("organizer_id") or user.get("id") or user.get("sub"))
+
+    for app in _APPLICATIONS.values():
+        if not isinstance(app, dict):
+            continue
+
+        app_vendor_email = _safe_str(app.get("vendor_email")).lower()
+        app_vendor_id = _safe_str(app.get("vendor_id")).lower()
+
+        if vendor_key not in {app_vendor_email, app_vendor_id}:
+            continue
+
+        if _safe_str(app.get("payment_status")).lower() != "paid":
+            continue
+
+        try:
+            event_id = int(app.get("event_id") or 0)
+        except Exception:
+            continue
+
+        event = _EVENTS.get(event_id)
+        if not isinstance(event, dict):
+            continue
+
+        organizer_email = _safe_str(
+            event.get("organizer_email") or event.get("owner_email") or event.get("email")
+        ).lower()
+        organizer_id = _safe_str(
+            event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
+        )
+
+        if user_email and organizer_email and user_email == organizer_email:
+            return True
+
+        if user_id and organizer_id and user_id == organizer_id:
+            return True
+
+    return False
+
+
 class VendorProfileUpsert(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -191,6 +233,12 @@ def create_vendor_review(
     user_role = _safe_str(user.get("role")).lower()
     if user_role not in {"organizer", "admin"}:
         raise HTTPException(status_code=403, detail="Only organizers or admins can leave reviews.")
+
+    if user_role != "admin" and not _can_organizer_review_vendor(vendor_key, user):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only review vendors after a completed (paid) event.",
+        )
 
     vendor_reviews = _REVIEWS.setdefault(vendor_key, {})
     review_id = next_review_id(vendor_key)
