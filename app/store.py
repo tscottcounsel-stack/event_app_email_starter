@@ -77,6 +77,7 @@ _BOOTHS: Dict[int, Dict[str, Any]] = {}
 _TEMPLATES: Dict[int, Dict[str, Any]] = {}
 
 _VENDORS: Dict[str, Dict[str, Any]] = {}
+_REVIEWS: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
 _NEXT_EVENT_ID = 1
 _NEXT_BOOTH_ID = 1
@@ -88,7 +89,7 @@ def load_store() -> None:
     global _EVENTS, _REQUIREMENTS, _REQUIREMENT_TEMPLATES, _DIAGRAMS, _APPLICATIONS
     global _PAYMENTS, _PAYOUTS, _AUDIT_LOGS, _VERIFICATIONS
     global _LAYOUT_META, _BOOTHS, _TEMPLATES
-    global _VENDORS
+    global _VENDORS, _REVIEWS
     global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
 
     with _LOCK:
@@ -178,6 +179,15 @@ def load_store() -> None:
         _TEMPLATES = _int_keyed(raw.get("templates", {}))
         _VENDORS = _lower_str_keyed(raw.get("vendors", {}))
 
+        raw_reviews = raw.get("reviews", {}) or {}
+        _REVIEWS = {}
+        if isinstance(raw_reviews, dict):
+            for vendor_key, vendor_reviews in raw_reviews.items():
+                normalized_vendor_key = str(vendor_key or "").strip().lower()
+                if not normalized_vendor_key or not isinstance(vendor_reviews, dict):
+                    continue
+                _REVIEWS[normalized_vendor_key] = _int_keyed(vendor_reviews)
+
         nxt = raw.get("next", {}) or {}
         _NEXT_EVENT_ID = int(nxt.get("event_id", 1) or 1)
         _NEXT_BOOTH_ID = int(nxt.get("booth_id", 1) or 1)
@@ -232,6 +242,7 @@ def save_store() -> None:
             "booths": _str_keyed(_BOOTHS),
             "templates": _str_keyed(_TEMPLATES),
             "vendors": _VENDORS,
+            "reviews": {vendor_key: _str_keyed(vendor_reviews) for vendor_key, vendor_reviews in _REVIEWS.items()},
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
@@ -292,6 +303,13 @@ def next_application_id() -> int:
         return val
 
 
+def next_review_id(vendor_key: Any) -> int:
+    normalized_vendor_key = str(vendor_key or "").strip().lower()
+    with _LOCK:
+        vendor_reviews = _REVIEWS.get(normalized_vendor_key, {})
+        return _next_id_from_keys(vendor_reviews, 1)
+
+
 def find_existing_application(
     vendor_email: Any, event_id: Any
 ) -> Dict[str, Any] | None:
@@ -332,6 +350,7 @@ def get_store_snapshot() -> Dict[str, Any]:
             "booths": _str_keyed(_BOOTHS),
             "templates": _str_keyed(_TEMPLATES),
             "vendors": dict(_VENDORS),
+            "reviews": {vendor_key: _str_keyed(vendor_reviews) for vendor_key, vendor_reviews in _REVIEWS.items()},
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
