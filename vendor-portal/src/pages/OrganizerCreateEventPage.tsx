@@ -1,29 +1,28 @@
-
 // src/pages/OrganizerCreateEventPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+const RAW_API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  "https://event-app-api-production-ccce.up.railway.app";
+
+const API_BASE = String(RAW_API_BASE).replace(/\/+$/, "");
 
 type NextStep = "requirements" | "layout" | "details";
 
 type CreatePayload = {
   title: string;
   description?: string;
-
   start_date?: string;
   end_date?: string;
-
   venue_name?: string;
   street_address?: string;
   city?: string;
   state?: string;
-
   ticketSalesUrl?: string;
   googleMapsLink?: string;
-
   heroImageUrl?: string;
   imageUrls?: string[];
   videoUrls?: string[];
@@ -60,6 +59,19 @@ const BUILT_IN_TEMPLATE_OPTIONS: BuiltInTemplateOption[] = [
 function cleanStr(v?: string) {
   const s = String(v ?? "").trim();
   return s.length ? s : undefined;
+}
+
+function normalizeDateInput(value?: string) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/;
+  if (dateOnly.test(raw)) return raw;
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+
+  return parsed.toISOString().slice(0, 10);
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -142,7 +154,14 @@ export default function OrganizerCreateEventPage() {
     const t = title.trim();
     if (!t) return "Event title is required.";
     if (t.length < 3) return "Event title must be at least 3 characters.";
-    if (startDate && endDate && endDate < startDate) return "End date cannot be before start date.";
+
+    const start = normalizeDateInput(startDate);
+    const end = normalizeDateInput(endDate);
+
+    if (startDate && !start) return "Start date is invalid.";
+    if (endDate && !end) return "End date is invalid.";
+    if (start && end && end < start) return "End date cannot be before start date.";
+
     return null;
   }, [title, startDate, endDate]);
 
@@ -182,9 +201,9 @@ export default function OrganizerCreateEventPage() {
 
     run();
     return () => {
-      cancelled = true
+      cancelled = true;
     };
-  }, []);
+  }, [selectedSavedTemplateId]);
 
   async function createEvent(payload: CreatePayload) {
     const headers = { ...buildAuthHeaders(), "Content-Type": "application/json" };
@@ -222,6 +241,9 @@ export default function OrganizerCreateEventPage() {
     try {
       setSaving(true);
 
+      const normalizedStartDate = normalizeDateInput(startDate);
+      const normalizedEndDate = normalizeDateInput(endDate);
+
       const payload: CreatePayload = {
         title: title.trim(),
         description: cleanStr(description),
@@ -231,8 +253,8 @@ export default function OrganizerCreateEventPage() {
         city: cleanStr(city),
         state: cleanStr(stateCode),
 
-        start_date: cleanStr(startDate),
-        end_date: cleanStr(endDate),
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
 
         ticketSalesUrl: cleanStr(ticketSalesUrl),
         googleMapsLink: cleanStr(googleMapsLink),
@@ -500,20 +522,20 @@ export default function OrganizerCreateEventPage() {
               <div>
                 <div className="text-xs font-bold text-slate-600">Start Date</div>
                 <input
+                  type="date"
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
                   value={startDate}
                   onChange={(e) => setStartDate(e.target.value)}
-                  placeholder="YYYY-MM-DD or ISO"
                 />
               </div>
 
               <div>
                 <div className="text-xs font-bold text-slate-600">End Date</div>
                 <input
+                  type="date"
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
                   value={endDate}
                   onChange={(e) => setEndDate(e.target.value)}
-                  placeholder="YYYY-MM-DD or ISO"
                 />
               </div>
 
@@ -655,8 +677,3 @@ export default function OrganizerCreateEventPage() {
     </div>
   );
 }
-
-
-
-
-
