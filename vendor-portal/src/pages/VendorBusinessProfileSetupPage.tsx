@@ -225,6 +225,14 @@ export default function VendorBusinessProfileSetupPage() {
     return await readJsonOrThrow(res);
   }
 
+  async function apiGetMyProfile() {
+    const res = await fetch(`${API_BASE}/vendors/me`, {
+      method: "GET",
+      headers: buildVendorHeaders(),
+    });
+    return await readJsonOrThrow(res);
+  }
+
   useEffect(() => {
     let mounted = true;
 
@@ -234,6 +242,37 @@ export default function VendorBusinessProfileSetupPage() {
 
       const local = safeJsonParse<VendorProfile>(localStorage.getItem(LS_KEY));
       const localProfile = mergeProfiles(EMPTY_PROFILE, local);
+
+      try {
+        const meData = await apiGetMyProfile();
+        if (!mounted) return;
+
+        const serverProfile = mergeProfiles(
+          EMPTY_PROFILE,
+          normalizeFromApplication(meData)
+        );
+
+        const hasServerData =
+          !!serverProfile.businessName ||
+          !!serverProfile.email ||
+          !!serverProfile.phone ||
+          !!serverProfile.businessDescription ||
+          serverProfile.categories.length > 0 ||
+          !!serverProfile.logoDataUrl ||
+          serverProfile.imageUrls.length > 0 ||
+          serverProfile.videoUrls.length > 0;
+
+        if (hasServerData) {
+          const merged = mergeProfiles(serverProfile, localProfile);
+          setProfile(merged);
+          try {
+            localStorage.setItem(LS_KEY, JSON.stringify(merged));
+          } catch {}
+          return;
+        }
+      } catch (e: any) {
+        // fall through to application/local fallback
+      }
 
       try {
         const data = await apiGetApplications();
@@ -252,6 +291,7 @@ export default function VendorBusinessProfileSetupPage() {
           !!applicationProfile.businessName ||
           !!applicationProfile.email ||
           !!applicationProfile.phone ||
+          !!applicationProfile.businessDescription ||
           applicationProfile.categories.length > 0 ||
           !!applicationProfile.logoDataUrl;
 
@@ -262,14 +302,16 @@ export default function VendorBusinessProfileSetupPage() {
           try {
             localStorage.setItem(LS_KEY, JSON.stringify(merged));
           } catch {}
+        } else if (!hasApplicationData && localProfile.businessName) {
+          setStatusMsg("Loaded saved local draft.");
         }
       } catch (e: any) {
         if (!mounted) return;
         setProfile(localProfile);
         setStatusMsg(
-          `Loaded local profile only. Vendor profile backend is not available yet${
-            e?.message ? `: ${String(e.message)}` : "."
-          }`
+          localProfile.businessName
+            ? "Loaded saved local draft."
+            : `Failed to load vendor profile: ${String(e?.message || e || "Unknown error")}`
         );
       } finally {
         if (mounted) setLoading(false);
@@ -281,7 +323,6 @@ export default function VendorBusinessProfileSetupPage() {
       mounted = false;
     };
   }, []);
-
   function setField<K extends keyof VendorProfile>(k: K, v: VendorProfile[K]) {
     setProfile((p) => mergeProfiles(p, { [k]: v } as Partial<VendorProfile>));
     setStatusMsg("");
