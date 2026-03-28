@@ -34,7 +34,6 @@ type EventModel = {
 
   venue_name?: string;
 
-  // Backend canonical
   street_address?: string;
   city?: string;
   state?: string;
@@ -49,22 +48,18 @@ type EventModel = {
   requirements_published?: boolean;
   layout_published?: boolean;
 
-  // Media stored on event
   heroImageUrl?: string;
   imageUrls?: string[];
   videoUrls?: string[];
 
-  // ✅ Category fields (best-effort)
   category?: string | null;
   event_type?: string | null;
   industry?: string | null;
   type?: string | null;
 
-  // Backend canonical
   ticket_sales_url?: string;
   google_maps_url?: string;
 
-  // Legacy fields (keep reading)
   address?: string;
   ticketUrl?: string;
   googleMapsUrl?: string;
@@ -131,19 +126,58 @@ function isLikelyHttpUrl(s: string) {
   }
 }
 
-async function fileToDataUrl(file: File): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.readAsDataURL(file);
+function buildUploadHeaders() {
+  const headers = buildAuthHeaders() as Record<string, string>;
+  const normalized: Record<string, string> = {};
+
+  Object.entries(headers || {}).forEach(([key, value]) => {
+    if (key.toLowerCase() !== "content-type") {
+      normalized[key] = value;
+    }
   });
+
+  return normalized;
 }
 
-/**
- * For <input type="date">:
- * - value must be "YYYY-MM-DD"
- */
+function toAbsoluteMediaUrl(url?: string | null) {
+  const value = safeStr(url);
+  if (!value) return "";
+  if (isLikelyHttpUrl(value)) return value;
+  if (value.startsWith("/")) return `${API_BASE}${value}`;
+  return `${API_BASE}/${value.replace(/^\/+/, "")}`;
+}
+
+async function uploadImageFile(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_BASE}/upload/image`, {
+    method: "POST",
+    headers: buildUploadHeaders(),
+    body: formData,
+  });
+
+  const contentType = res.headers.get("content-type") || "";
+  const body = contentType.includes("application/json")
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => "");
+
+  if (!res.ok) {
+    const msg =
+      (typeof body === "string" && body.trim()) ||
+      (body && typeof body === "object" && ((body as any).detail || (body as any).message)) ||
+      `Upload failed (${res.status})`;
+    throw new Error(String(msg));
+  }
+
+  const relativeUrl = safeStr(body?.url);
+  if (!relativeUrl) {
+    throw new Error("Upload succeeded but no URL was returned.");
+  }
+
+  return toAbsoluteMediaUrl(relativeUrl);
+}
+
 function isoToDateInput(iso?: string | null) {
   const s = safeStr(iso);
   if (!s) return "";
@@ -168,7 +202,6 @@ function normalizeDateInput(value?: string | null) {
 
   return parsed.toISOString().slice(0, 10);
 }
-
 
 async function fetchFirstJson(urls: string[], headers: Record<string, string>) {
   for (const url of urls) {
@@ -236,7 +269,6 @@ function downloadCsv(filename: string, rows: string[][]) {
   URL.revokeObjectURL(href);
 }
 
-
 /* ---------------- Category ---------------- */
 
 const CATEGORY_OPTIONS = [
@@ -276,6 +308,7 @@ export default function OrganizerEventDetailsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const [event, setEvent] = useState<EventModel | null>(null);
   const [stats, setStats] = useState<EventStats | null>(null);
@@ -283,38 +316,25 @@ export default function OrganizerEventDetailsPage() {
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
   const [downloadingVendorList, setDownloadingVendorList] = useState(false);
 
-  // Core editable fields
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-
   const [venue, setVenue] = useState("");
   const [streetAddress, setStreetAddress] = useState("");
   const [city, setCity] = useState("");
   const [stateCode, setStateCode] = useState("");
-
-  // ✅ Category
   const [category, setCategory] = useState("");
-
-  // date-only values
   const [startLocal, setStartLocal] = useState("");
   const [endLocal, setEndLocal] = useState("");
-
-  // Public flyer links
   const [ticketSalesUrl, setTicketSalesUrl] = useState("");
   const [googleMapsUrl, setGoogleMapsUrl] = useState("");
-
-  // Media
   const [heroImageUrl, setHeroImageUrl] = useState("");
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
-
   const [imgDraft, setImgDraft] = useState("");
   const [vidDraft, setVidDraft] = useState("");
-
   const [uploadingImages, setUploadingImages] = useState(false);
   const [uploadingHero, setUploadingHero] = useState(false);
 
-  // Public preview route
   const previewPublicHref = useMemo(() => `/events/${eid}`, [eid]);
   const coreInfoRef = useRef<HTMLDivElement | null>(null);
   const recentActivityRef = useRef<HTMLDivElement | null>(null);
@@ -343,34 +363,19 @@ export default function OrganizerEventDetailsPage() {
         if (cancelled) return;
 
         setEvent(ev);
-
         setTitle(safeStr(ev.title));
         setDescription(safeStr(ev.description));
-
         setVenue(safeStr(ev.venue_name));
-
-        // ✅ Prefer backend canonical, fall back to legacy
         setStreetAddress(safeStr((ev as any).street_address ?? (ev as any).address));
         setCity(safeStr(ev.city));
         setStateCode(safeStr(ev.state));
-
-        // ✅ Category load (best-effort)
         setCategory(pickCategoryFromEvent(ev));
-
-        // ✅ Convert ISO -> date input
         setStartLocal(isoToDateInput(ev.start_date ?? null));
         setEndLocal(isoToDateInput(ev.end_date ?? null));
-
-        // ✅ Prefer backend canonical, fall back to legacy
-        setTicketSalesUrl(
-          safeStr((ev as any).ticket_sales_url ?? (ev as any).ticketUrl)
-        );
-        setGoogleMapsUrl(
-          safeStr((ev as any).google_maps_url ?? (ev as any).googleMapsUrl)
-        );
-
-        setHeroImageUrl(safeStr(ev.heroImageUrl));
-        setImageUrls(asArrayOfStrings(ev.imageUrls));
+        setTicketSalesUrl(safeStr((ev as any).ticket_sales_url ?? (ev as any).ticketUrl));
+        setGoogleMapsUrl(safeStr((ev as any).google_maps_url ?? (ev as any).googleMapsUrl));
+        setHeroImageUrl(toAbsoluteMediaUrl(ev.heroImageUrl));
+        setImageUrls(asArrayOfStrings(ev.imageUrls).map(toAbsoluteMediaUrl).filter(Boolean));
         setVideoUrls(asArrayOfStrings(ev.videoUrls));
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ? String(e.message) : String(e));
@@ -542,6 +547,7 @@ export default function OrganizerEventDetailsPage() {
     if (!eid) return;
     setSaving(true);
     setErr(null);
+    setStatusMsg(null);
 
     try {
       const headers = {
@@ -555,27 +561,16 @@ export default function OrganizerEventDetailsPage() {
       const payload: Partial<EventModel> = {
         title: safeStr(title) || undefined,
         description: safeStr(description) || undefined,
-
         venue_name: safeStr(venue) || undefined,
-
-        // ✅ backend canonical
         street_address: safeStr(streetAddress) || undefined,
         city: safeStr(city) || undefined,
         state: safeStr(stateCode) || undefined,
-
-        // ✅ normalize to YYYY-MM-DD; empty/invalid -> null (prevents 1970)
         start_date: normalizeDateInput(startLocal),
         end_date: normalizeDateInput(endLocal),
-
-        // ✅ category (best-effort)
         category: cat || undefined,
-        // Mirror to event_type for compatibility with older code/DB fields
         event_type: cat || undefined,
-
-        // ✅ backend canonical
         ticket_sales_url: safeStr(ticketSalesUrl) || undefined,
         google_maps_url: safeStr(googleMapsUrl) || undefined,
-
         heroImageUrl: safeStr(heroImageUrl) || undefined,
         imageUrls,
         videoUrls,
@@ -607,34 +602,23 @@ export default function OrganizerEventDetailsPage() {
 
       if (next) {
         setEvent(next);
-
         setTitle(safeStr(next.title));
         setDescription(safeStr(next.description));
-
         setVenue(safeStr(next.venue_name));
-        setStreetAddress(
-          safeStr((next as any).street_address ?? (next as any).address)
-        );
+        setStreetAddress(safeStr((next as any).street_address ?? (next as any).address));
         setCity(safeStr(next.city));
         setStateCode(safeStr(next.state));
-
-        // ✅ reload category from server response
         setCategory(pickCategoryFromEvent(next));
-
         setStartLocal(isoToDateInput(next.start_date ?? null));
         setEndLocal(isoToDateInput(next.end_date ?? null));
-
-        setTicketSalesUrl(
-          safeStr((next as any).ticket_sales_url ?? (next as any).ticketUrl)
-        );
-        setGoogleMapsUrl(
-          safeStr((next as any).google_maps_url ?? (next as any).googleMapsUrl)
-        );
-
-        setHeroImageUrl(safeStr(next.heroImageUrl));
-        setImageUrls(asArrayOfStrings(next.imageUrls));
+        setTicketSalesUrl(safeStr((next as any).ticket_sales_url ?? (next as any).ticketUrl));
+        setGoogleMapsUrl(safeStr((next as any).google_maps_url ?? (next as any).googleMapsUrl));
+        setHeroImageUrl(toAbsoluteMediaUrl(next.heroImageUrl));
+        setImageUrls(asArrayOfStrings(next.imageUrls).map(toAbsoluteMediaUrl).filter(Boolean));
         setVideoUrls(asArrayOfStrings(next.videoUrls));
       }
+
+      setStatusMsg("Changes saved successfully.");
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : String(e));
     } finally {
@@ -643,7 +627,7 @@ export default function OrganizerEventDetailsPage() {
   }
 
   function addImageUrl() {
-    const v = safeStr(imgDraft);
+    const v = toAbsoluteMediaUrl(imgDraft);
     if (!v) return;
     setImageUrls((prev) => (prev.includes(v) ? prev : [...prev, v]));
     setImgDraft("");
@@ -670,16 +654,23 @@ export default function OrganizerEventDetailsPage() {
     if (!files || files.length === 0) return;
     setUploadingImages(true);
     setErr(null);
+    setStatusMsg(null);
 
     try {
-      const dataUrls = await Promise.all(Array.from(files).map(fileToDataUrl));
+      const uploadedUrls = await Promise.all(Array.from(files).map(uploadImageFile));
       setImageUrls((prev) => {
         const next = [...prev];
-        for (const u of dataUrls) if (u && !next.includes(u)) next.push(u);
+        for (const url of uploadedUrls) {
+          if (url && !next.includes(url)) next.push(url);
+        }
         return next;
       });
 
-      if (!safeStr(heroImageUrl) && dataUrls[0]) setHeroImageUrl(dataUrls[0]);
+      if (!safeStr(heroImageUrl) && uploadedUrls[0]) {
+        setHeroImageUrl(uploadedUrls[0]);
+      }
+
+      setStatusMsg(uploadedUrls.length === 1 ? "Image uploaded." : `${uploadedUrls.length} images uploaded.`);
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : String(e));
     } finally {
@@ -691,12 +682,14 @@ export default function OrganizerEventDetailsPage() {
     if (!file) return;
     setUploadingHero(true);
     setErr(null);
+    setStatusMsg(null);
 
     try {
-      const u = await fileToDataUrl(file);
-      if (u) {
-        setHeroImageUrl(u);
-        setImageUrls((prev) => (prev.includes(u) ? prev : [u, ...prev]));
+      const url = await uploadImageFile(file);
+      if (url) {
+        setHeroImageUrl(url);
+        setImageUrls((prev) => (prev.includes(url) ? prev : [url, ...prev]));
+        setStatusMsg("Hero image uploaded.");
       }
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : String(e));
@@ -709,19 +702,6 @@ export default function OrganizerEventDetailsPage() {
     return (
       <div className="p-6">
         <div className="text-gray-600">Loading event…</div>
-      </div>
-    );
-  }
-
-  if (err) {
-    return (
-      <div className="p-6">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
-          {err}
-        </div>
-        <button className="mt-4 rounded-lg border px-4 py-2" onClick={() => navigate(-1)}>
-          Back
-        </button>
       </div>
     );
   }
@@ -760,6 +740,18 @@ export default function OrganizerEventDetailsPage() {
           </button>
         </div>
       </div>
+
+      {err ? (
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-red-800">
+          {err}
+        </div>
+      ) : null}
+
+      {statusMsg ? (
+        <div className="mb-6 rounded-lg border border-green-200 bg-green-50 p-4 text-green-800">
+          {statusMsg}
+        </div>
+      ) : null}
 
       <div className="mb-6 rounded-2xl border bg-white p-5 shadow-sm">
         <div className="mb-4 flex items-center justify-between gap-3">
@@ -864,7 +856,7 @@ export default function OrganizerEventDetailsPage() {
         <>
           <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Booths Sold
                 <LayoutGrid className="h-4 w-4 text-blue-500" />
               </div>
@@ -872,7 +864,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Revenue
                 <DollarSign className="h-4 w-4 text-emerald-500" />
               </div>
@@ -882,7 +874,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Pending Applications
                 <Clock3 className="h-4 w-4 text-amber-500" />
               </div>
@@ -890,7 +882,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Approved Vendors
                 <BadgeCheck className="h-4 w-4 text-green-500" />
               </div>
@@ -898,7 +890,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Total Applications
                 <Inbox className="h-4 w-4 text-indigo-500" />
               </div>
@@ -906,7 +898,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Booths Remaining
                 <Store className="h-4 w-4 text-purple-500" />
               </div>
@@ -914,7 +906,7 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Approval Rate
                 <Percent className="h-4 w-4 text-pink-500" />
               </div>
@@ -924,28 +916,26 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-4 shadow-sm">
-              <div className="flex justify-between mb-2 text-xs text-gray-500">
+              <div className="mb-2 flex justify-between text-xs text-gray-500">
                 Unread Vendor Replies
                 <MessageSquare className="h-4 w-4 text-purple-500" />
               </div>
-              <div className="text-2xl font-bold">
-                {stats.unread_vendor_replies ?? 0}
-              </div>
+              <div className="text-2xl font-bold">{stats.unread_vendor_replies ?? 0}</div>
             </div>
           </div>
 
           <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
             <div className="rounded-xl border bg-white p-5 shadow-sm">
-              <div className="flex justify-between items-center mb-2">
+              <div className="mb-2 flex items-center justify-between">
                 <div className="text-sm font-semibold">Booth Fill Progress</div>
                 <TrendingUp className="h-5 w-5 text-gray-400" />
               </div>
 
-              <div className="text-xs text-gray-500 mb-2">
+              <div className="mb-2 text-xs text-gray-500">
                 {stats.booths_sold} of {stats.booths_total ?? 0} booths filled
               </div>
 
-              <div className="h-3 w-full bg-gray-100 rounded-full overflow-hidden">
+              <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full bg-blue-600"
                   style={{
@@ -963,16 +953,16 @@ export default function OrganizerEventDetailsPage() {
             </div>
 
             <div className="rounded-xl border bg-white p-5 shadow-sm">
-              <div className="flex justify-between items-center mb-2">
+              <div className="mb-2 flex items-center justify-between">
                 <div className="text-sm font-semibold">Revenue Progress</div>
                 <DollarSign className="h-5 w-5 text-gray-400" />
               </div>
 
-              <div className="text-xs text-gray-500 mb-2">
+              <div className="mb-2 text-xs text-gray-500">
                 ${Number(stats.revenue || 0).toLocaleString()}
               </div>
 
-              <div className="h-3 w-full bg-gray-100 rounded-full overflow-hidden">
+              <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100">
                 <div
                   className="h-full bg-emerald-600"
                   style={{
@@ -996,32 +986,24 @@ export default function OrganizerEventDetailsPage() {
 
           <div className="mb-6 rounded-xl border bg-white p-5 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
-              <div className="text-sm font-semibold text-gray-900">
-                Vendor Conversion Funnel
-              </div>
+              <div className="text-sm font-semibold text-gray-900">Vendor Conversion Funnel</div>
               <TrendingUp className="h-4 w-4 text-gray-400" />
             </div>
 
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
               <div className="rounded-lg border p-3 text-center">
                 <div className="text-xs text-gray-500">Applications</div>
-                <div className="text-xl font-semibold">
-                  {stats.applications ?? 0}
-                </div>
+                <div className="text-xl font-semibold">{stats.applications ?? 0}</div>
               </div>
 
               <div className="rounded-lg border p-3 text-center">
                 <div className="text-xs text-gray-500">Approved</div>
-                <div className="text-xl font-semibold">
-                  {stats.approved_vendors ?? 0}
-                </div>
+                <div className="text-xl font-semibold">{stats.approved_vendors ?? 0}</div>
               </div>
 
               <div className="rounded-lg border p-3 text-center">
                 <div className="text-xs text-gray-500">Booths Sold</div>
-                <div className="text-xl font-semibold">
-                  {stats.booths_sold ?? 0}
-                </div>
+                <div className="text-xl font-semibold">{stats.booths_sold ?? 0}</div>
               </div>
 
               <div className="rounded-lg border p-3 text-center">
@@ -1035,9 +1017,6 @@ export default function OrganizerEventDetailsPage() {
         </>
       ) : null}
 
-
-
-      {/* Core details */}
       <div ref={coreInfoRef} className="mb-8 rounded-xl border bg-white p-5">
         <h2 className="mb-4 text-lg font-semibold">Core Info</h2>
 
@@ -1062,7 +1041,6 @@ export default function OrganizerEventDetailsPage() {
             />
           </label>
 
-          {/* ✅ Category */}
           <label className="block">
             <div className="mb-1 text-sm font-medium text-gray-700">Category</div>
             <select
@@ -1090,9 +1068,7 @@ export default function OrganizerEventDetailsPage() {
               onChange={(e) => setStreetAddress(e.target.value)}
               placeholder="Street address (e.g., 123 Main St)"
             />
-            <div className="mt-1 text-xs text-gray-500">
-              Used for the public flyer + map link.
-            </div>
+            <div className="mt-1 text-xs text-gray-500">Used for the public flyer + map link.</div>
           </label>
 
           <label className="block">
@@ -1147,7 +1123,6 @@ export default function OrganizerEventDetailsPage() {
         </div>
       </div>
 
-      {/* Public flyer links */}
       <div className="mb-8 rounded-xl border bg-white p-5">
         <h2 className="mb-4 text-lg font-semibold">Public Links</h2>
 
@@ -1183,11 +1158,9 @@ export default function OrganizerEventDetailsPage() {
         </div>
       </div>
 
-      {/* Media */}
       <div className="rounded-xl border bg-white p-5">
         <h2 className="mb-4 text-lg font-semibold">Media</h2>
 
-        {/* Hero */}
         <div className="mb-6">
           <div className="mb-2 text-sm font-medium text-gray-700">Hero Image</div>
 
@@ -1199,12 +1172,13 @@ export default function OrganizerEventDetailsPage() {
               placeholder="Paste hero image URL OR upload below"
             />
 
-            <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border px-4 py-2 text-sm font-medium">
+            <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-60">
               {uploadingHero ? "Uploading…" : "Upload Hero"}
               <input
                 type="file"
                 accept="image/*"
                 className="hidden"
+                disabled={uploadingHero}
                 onChange={(e) => onUploadHero(e.target.files?.[0] || null)}
               />
             </label>
@@ -1217,24 +1191,24 @@ export default function OrganizerEventDetailsPage() {
           ) : null}
         </div>
 
-        {/* Images */}
         <div className="mb-6">
           <div className="mb-2 text-lg font-semibold">Images</div>
 
           <div className="flex flex-col gap-3 md:flex-row md:items-center">
-            <label className="inline-flex cursor-pointer items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white">
+            <label className="inline-flex cursor-pointer items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-60">
               {uploadingImages ? "Uploading…" : "Upload Images"}
               <input
                 type="file"
                 accept="image/*"
                 multiple
                 className="hidden"
+                disabled={uploadingImages}
                 onChange={(e) => onUploadImages(e.target.files)}
               />
             </label>
 
             <div className="text-sm text-gray-600">
-              Stored on the event as embedded images (v1). You can also paste URLs below.
+              Images now upload as real files. You can still paste image URLs below if needed.
             </div>
           </div>
 
@@ -1248,6 +1222,7 @@ export default function OrganizerEventDetailsPage() {
             <button
               className="rounded-lg bg-green-600 px-4 py-2 font-medium text-white"
               onClick={addImageUrl}
+              type="button"
             >
               Add URL
             </button>
@@ -1258,12 +1233,11 @@ export default function OrganizerEventDetailsPage() {
               {imageUrls.map((url) => (
                 <div key={url} className="overflow-hidden rounded-lg border">
                   <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-3 py-2">
-                    <div className="truncate text-xs text-gray-600">
-                      {url.startsWith("data:image/") ? "(uploaded image)" : url}
-                    </div>
+                    <div className="truncate text-xs text-gray-600">{url}</div>
                     <button
                       className="rounded border px-2 py-1 text-xs"
                       onClick={() => removeImage(url)}
+                      type="button"
                     >
                       Remove
                     </button>
@@ -1277,7 +1251,6 @@ export default function OrganizerEventDetailsPage() {
           )}
         </div>
 
-        {/* Videos */}
         <div className="mb-6">
           <div className="mb-2 text-lg font-semibold">Videos</div>
 
@@ -1291,6 +1264,7 @@ export default function OrganizerEventDetailsPage() {
             <button
               className="rounded-lg bg-green-600 px-4 py-2 font-medium text-white"
               onClick={addVideoUrl}
+              type="button"
             >
               Add
             </button>
@@ -1308,12 +1282,14 @@ export default function OrganizerEventDetailsPage() {
                     <button
                       className="rounded border px-3 py-1 text-sm"
                       onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+                      type="button"
                     >
                       Open
                     </button>
                     <button
                       className="rounded border px-3 py-1 text-sm"
                       onClick={() => removeVideo(url)}
+                      type="button"
                     >
                       Remove
                     </button>
@@ -1362,7 +1338,8 @@ export default function OrganizerEventDetailsPage() {
         <button
           className="rounded-lg bg-black px-6 py-3 font-medium text-white disabled:opacity-60"
           onClick={saveChanges}
-          disabled={saving}
+          disabled={saving || uploadingHero || uploadingImages}
+          type="button"
         >
           {saving ? "Saving…" : "Save Changes"}
         </button>
@@ -1370,8 +1347,3 @@ export default function OrganizerEventDetailsPage() {
     </div>
   );
 }
-
-
-
-
-
