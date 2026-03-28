@@ -122,17 +122,9 @@ function inferVerified(source: any): boolean {
   return status === "verified" || status === "approved" || status === "complete";
 }
 
-function absoluteAssetUrl(value: any): string {
-  const raw = asString(value);
-  if (!raw) return "";
-  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
-  if (raw.startsWith("/")) return `${API_BASE}${raw}`;
-  return raw;
-}
-
 function normalizeVendorProfile(source: any): VendorProfile {
   return {
-    vendor_id: asString(source?.vendor_id ?? source?.vendorId ?? source?.id).toLowerCase(),
+    vendor_id: asString(source?.vendor_id ?? source?.vendorId ?? source?.id),
     business_name: asString(
       source?.business_name ??
         source?.businessName ??
@@ -150,18 +142,16 @@ function normalizeVendorProfile(source: any): VendorProfile {
     website: asString(source?.website ?? source?.website_url),
     instagram: asString(source?.instagram ?? source?.instagram_url),
     facebook: asString(source?.facebook ?? source?.facebook_url),
-    logo_url: absoluteAssetUrl(
+    logo_url: asString(
       source?.logo_url ?? source?.logoUrl ?? source?.logo_data_url ?? source?.logoDataUrl
     ),
-    banner_url: absoluteAssetUrl(
+    banner_url: asString(
       source?.banner_url ?? source?.bannerUrl ?? source?.cover_url ?? source?.coverUrl
     ),
     contact_name: asString(
       source?.contact_name ?? source?.contactName ?? source?.full_name
     ),
-    image_urls: asStringArray(
-      source?.image_urls ?? source?.imageUrls ?? source?.images
-    ).map(absoluteAssetUrl),
+    image_urls: asStringArray(source?.image_urls ?? source?.imageUrls ?? source?.images),
     video_urls: asStringArray(source?.video_urls ?? source?.videoUrls ?? source?.videos),
     city: asString(source?.city),
     state: asString(source?.state),
@@ -210,6 +200,14 @@ function buildHref(value: string) {
   if (!v) return "";
   if (v.startsWith("http://") || v.startsWith("https://")) return v;
   return `https://${v}`;
+}
+
+function resolveAssetUrl(value: string) {
+  const v = String(value || "").trim();
+  if (!v) return "";
+  if (v.startsWith("http://") || v.startsWith("https://")) return v;
+  if (v.startsWith("/")) return `${API_BASE}${v}`;
+  return v;
 }
 
 export default function VendorPublicProfilePage() {
@@ -280,7 +278,7 @@ export default function VendorPublicProfilePage() {
   }, [routeVendorId]);
 
   const effectiveVendorId = useMemo(
-    () => String(profile.vendor_id || routeVendorId || "").trim().toLowerCase(),
+    () => String(profile.vendor_id || routeVendorId || "").trim(),
     [profile.vendor_id, routeVendorId]
   );
 
@@ -289,7 +287,6 @@ export default function VendorPublicProfilePage() {
       setReviews([]);
       setAverageRating(0);
       setReviewCount(0);
-      setReviewsError("");
       return;
     }
 
@@ -315,6 +312,7 @@ export default function VendorPublicProfilePage() {
       }
 
       const data: VendorReviewsResponse = text ? JSON.parse(text) : {};
+
       setReviews(Array.isArray(data?.reviews) ? data.reviews : []);
       setAverageRating(Number(data?.rating || 0));
       setReviewCount(Number(data?.review_count || 0));
@@ -337,7 +335,6 @@ export default function VendorPublicProfilePage() {
         setReviews([]);
         setAverageRating(0);
         setReviewCount(0);
-        setReviewsError("");
         return;
       }
 
@@ -444,7 +441,7 @@ export default function VendorPublicProfilePage() {
           <div className="relative">
             {profile.banner_url ? (
               <img
-                src={profile.banner_url}
+                src={resolveAssetUrl(profile.banner_url)}
                 alt="Vendor banner"
                 className="h-72 w-full object-cover"
               />
@@ -457,7 +454,7 @@ export default function VendorPublicProfilePage() {
                 <div className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-2xl border-4 border-white bg-white shadow-lg">
                   {profile.logo_url ? (
                     <img
-                      src={profile.logo_url}
+                      src={resolveAssetUrl(profile.logo_url)}
                       alt="Vendor logo"
                       className="h-full w-full object-cover"
                     />
@@ -577,7 +574,7 @@ export default function VendorPublicProfilePage() {
                         className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50"
                       >
                         <img
-                          src={url}
+                          src={resolveAssetUrl(url)}
                           alt={`Vendor gallery ${index + 1}`}
                           className="aspect-[4/3] h-full w-full object-cover"
                         />
