@@ -122,9 +122,17 @@ function inferVerified(source: any): boolean {
   return status === "verified" || status === "approved" || status === "complete";
 }
 
+function absoluteAssetUrl(value: any): string {
+  const raw = asString(value);
+  if (!raw) return "";
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  if (raw.startsWith("/")) return `${API_BASE}${raw}`;
+  return raw;
+}
+
 function normalizeVendorProfile(source: any): VendorProfile {
   return {
-    vendor_id: asString(source?.vendor_id ?? source?.vendorId ?? source?.id),
+    vendor_id: asString(source?.vendor_id ?? source?.vendorId ?? source?.id).toLowerCase(),
     business_name: asString(
       source?.business_name ??
         source?.businessName ??
@@ -142,16 +150,18 @@ function normalizeVendorProfile(source: any): VendorProfile {
     website: asString(source?.website ?? source?.website_url),
     instagram: asString(source?.instagram ?? source?.instagram_url),
     facebook: asString(source?.facebook ?? source?.facebook_url),
-    logo_url: asString(
+    logo_url: absoluteAssetUrl(
       source?.logo_url ?? source?.logoUrl ?? source?.logo_data_url ?? source?.logoDataUrl
     ),
-    banner_url: asString(
+    banner_url: absoluteAssetUrl(
       source?.banner_url ?? source?.bannerUrl ?? source?.cover_url ?? source?.coverUrl
     ),
     contact_name: asString(
       source?.contact_name ?? source?.contactName ?? source?.full_name
     ),
-    image_urls: asStringArray(source?.image_urls ?? source?.imageUrls ?? source?.images),
+    image_urls: asStringArray(
+      source?.image_urls ?? source?.imageUrls ?? source?.images
+    ).map(absoluteAssetUrl),
     video_urls: asStringArray(source?.video_urls ?? source?.videoUrls ?? source?.videos),
     city: asString(source?.city),
     state: asString(source?.state),
@@ -204,7 +214,7 @@ function buildHref(value: string) {
 
 export default function VendorPublicProfilePage() {
   const params = useParams();
-  const vendorId = useMemo(
+  const routeVendorId = useMemo(
     () => String(params.vendorId ?? params.id ?? "").trim(),
     [params]
   );
@@ -231,8 +241,8 @@ export default function VendorPublicProfilePage() {
       setError("");
 
       try {
-        const endpoint = vendorId
-          ? `${API_BASE}/vendors/public/${encodeURIComponent(vendorId)}`
+        const endpoint = routeVendorId
+          ? `${API_BASE}/vendors/public/${encodeURIComponent(routeVendorId)}`
           : `${API_BASE}/vendors/me`;
 
         const res = await fetch(endpoint, {
@@ -267,11 +277,11 @@ export default function VendorPublicProfilePage() {
     return () => {
       mounted = false;
     };
-  }, [vendorId]);
+  }, [routeVendorId]);
 
   const effectiveVendorId = useMemo(
-    () => String(vendorId || profile.vendor_id || "").trim(),
-    [vendorId, profile.vendor_id]
+    () => String(profile.vendor_id || routeVendorId || "").trim().toLowerCase(),
+    [profile.vendor_id, routeVendorId]
   );
 
   async function loadReviewsForVendor(targetVendorId: string) {
@@ -279,6 +289,7 @@ export default function VendorPublicProfilePage() {
       setReviews([]);
       setAverageRating(0);
       setReviewCount(0);
+      setReviewsError("");
       return;
     }
 
@@ -304,7 +315,6 @@ export default function VendorPublicProfilePage() {
       }
 
       const data: VendorReviewsResponse = text ? JSON.parse(text) : {};
-
       setReviews(Array.isArray(data?.reviews) ? data.reviews : []);
       setAverageRating(Number(data?.rating || 0));
       setReviewCount(Number(data?.review_count || 0));
@@ -327,6 +337,7 @@ export default function VendorPublicProfilePage() {
         setReviews([]);
         setAverageRating(0);
         setReviewCount(0);
+        setReviewsError("");
         return;
       }
 
