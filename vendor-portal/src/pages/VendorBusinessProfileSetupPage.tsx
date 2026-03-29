@@ -284,7 +284,7 @@ export default function VendorBusinessProfileSetupPage() {
           !!serverProfile.state;
 
         if (hasServerData) {
-          const merged = mergeProfiles(serverProfile, localProfile);
+          const merged = mergeProfiles(localProfile, serverProfile);
           setProfile(merged);
           try {
             localStorage.setItem(LS_KEY, JSON.stringify(merged));
@@ -318,7 +318,7 @@ export default function VendorBusinessProfileSetupPage() {
           applicationProfile.categories.length > 0 ||
           !!applicationProfile.logoDataUrl;
 
-        const merged = mergeProfiles(applicationProfile, localProfile);
+        const merged = mergeProfiles(localProfile, applicationProfile);
         setProfile(hasApplicationData ? merged : localProfile);
 
         if (hasApplicationData) {
