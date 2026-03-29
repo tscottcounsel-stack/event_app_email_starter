@@ -268,16 +268,18 @@ try {
   if (!mounted) return;
 
   const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
-  const merged = mergeProfiles(localProfile, serverProfile);
+ const merged = mergeProfiles(localProfile, serverProfile);
 
-  setProfile(merged);
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(merged));
-  } catch {
-    // ignore storage failures
-  }
+setProfile(merged);
+try {
+  localStorage.setItem(LS_KEY, JSON.stringify(merged));
+} catch {
+  // ignore storage failures
+}
 
-  return;
+setLoading(false);
+return;
+
 } catch {
   // fall through
 }
