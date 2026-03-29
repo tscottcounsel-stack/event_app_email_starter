@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -443,91 +444,37 @@ def _extract_price_to_cents(value: Any) -> int:
 
 
 def _normalize_booth_key(value: Any) -> str:
-    raw = str(value or "").strip().lower()
+    raw = str(value or "").strip()
     if not raw:
         return ""
-    raw = raw.replace("_", " ").replace("-", " ")
-    raw = " ".join(raw.split())
-    if raw.startswith("booth "):
-        raw = raw[6:].strip()
-    elif raw.startswith("booth"):
-        raw = raw[5:].strip()
-    raw = " ".join(raw.split())
-    return raw
+
+    lowered = raw.lower().strip()
+    lowered = re.sub(r"[_\-]+", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+
+    compact = lowered.replace(" ", "")
+    if compact.startswith("booth"):
+        compact = compact[5:]
+
+    compact = re.sub(r"[^a-z0-9]", "", compact)
+    return compact
 
 
 def _candidate_booth_keys(booth_id: Any) -> set[str]:
     raw = str(booth_id or "").strip()
-    normalized = _normalize_booth_key(raw)
-    out = {raw, normalized}
+    out = {raw}
+
     if raw.lower().startswith("booth "):
         out.add(raw.split(" ", 1)[1].strip())
     if raw.lower().startswith("booth"):
         out.add(raw[5:].strip())
-    if normalized.isdigit():
-        out.add(f"Booth {normalized}")
-        out.add(f"booth_{normalized}")
-        out.add(f"booth-{normalized}")
-    return {x for x in out if x}
+    if raw.isdigit():
+        out.add(f"Booth {raw}")
+        out.add(f"booth_{raw}")
+        out.add(f"booth-{raw}")
 
-
-def _booth_match_values(booth: Dict[str, Any]) -> set[str]:
-    values = {
-        booth.get("booth_id"),
-        booth.get("id"),
-        booth.get("label"),
-        booth.get("name"),
-        booth.get("number"),
-        booth.get("code"),
-        booth.get("slug"),
-        booth.get("key"),
-        booth.get("value"),
-        booth.get("booth_number"),
-    }
-    out = set()
-    for value in values:
-        s = str(value or "").strip()
-        if not s:
-            continue
-        out.add(s)
-        norm = _normalize_booth_key(s)
-        if norm:
-            out.add(norm)
-    return out
-
-
-def _extract_price_cents_from_booth(booth: Dict[str, Any]) -> int:
-    for price_key in (
-        "price_cents",
-        "amount_cents",
-        "booth_price",
-        "price",
-        "amount",
-        "cost",
-        "fee",
-        "rate",
-    ):
-        cents = _extract_price_to_cents(booth.get(price_key))
-        if cents > 0:
-            return cents
-
-    pricing = booth.get("pricing")
-    if isinstance(pricing, dict):
-        for price_key in (
-            "price_cents",
-            "amount_cents",
-            "booth_price",
-            "price",
-            "amount",
-            "cost",
-            "fee",
-            "rate",
-        ):
-            cents = _extract_price_to_cents(pricing.get(price_key))
-            if cents > 0:
-                return cents
-
-    return 0
+    normalized = {_normalize_booth_key(x) for x in out if str(x or "").strip()}
+    return {x for x in out if x} | {x for x in normalized if x}
 
 
 def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -566,9 +513,13 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
         return 0
 
     event = _EVENTS.get(int(app.get("event_id") or 0), {})
-    booth_keys = {
-        s for s in {_normalize_booth_key(x) for x in _candidate_booth_keys(booth_id)} if s
-    }
+    booth_keys = _candidate_booth_keys(booth_id)
+
+    def booth_matches(*values: Any) -> bool:
+        raw_values = {str(v or "").strip() for v in values if str(v or "").strip()}
+        normalized_values = {_normalize_booth_key(v) for v in raw_values}
+        normalized_values = {v for v in normalized_values if v}
+        return bool((raw_values & booth_keys) or (normalized_values & booth_keys))
 
     for container_key in (
         "booths",
@@ -585,28 +536,70 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
             for k, booth in container.items():
                 if not isinstance(booth, dict):
                     continue
-                booth_match_values = _booth_match_values(booth)
-                booth_match_values.add(_normalize_booth_key(k))
-                if booth_match_values & booth_keys:
-                    cents = _extract_price_cents_from_booth(booth)
-                    if cents > 0:
-                        return cents
+                if booth_matches(
+                    k,
+                    booth.get("booth_id"),
+                    booth.get("id"),
+                    booth.get("label"),
+                    booth.get("name"),
+                    booth.get("number"),
+                    booth.get("code"),
+                ):
+                    for price_key in (
+                        "price_cents",
+                        "amount_cents",
+                        "booth_price",
+                        "price",
+                        "amount",
+                        "cost",
+                    ):
+                        cents = _extract_price_to_cents(booth.get(price_key))
+                        if cents > 0:
+                            return cents
         elif isinstance(container, list):
             for booth in container:
                 if not isinstance(booth, dict):
                     continue
-                booth_match_values = _booth_match_values(booth)
-                if booth_match_values & booth_keys:
-                    cents = _extract_price_cents_from_booth(booth)
-                    if cents > 0:
-                        return cents
+                if booth_matches(
+                    booth.get("booth_id"),
+                    booth.get("id"),
+                    booth.get("label"),
+                    booth.get("name"),
+                    booth.get("number"),
+                    booth.get("code"),
+                ):
+                    for price_key in (
+                        "price_cents",
+                        "amount_cents",
+                        "booth_price",
+                        "price",
+                        "amount",
+                        "cost",
+                    ):
+                        cents = _extract_price_to_cents(booth.get(price_key))
+                        if cents > 0:
+                            return cents
 
     for booth in _extract_booths_from_event(event):
-        booth_match_values = _booth_match_values(booth)
-        if booth_match_values & booth_keys:
-            cents = _extract_price_cents_from_booth(booth)
-            if cents > 0:
-                return cents
+        if booth_matches(
+            booth.get("booth_id"),
+            booth.get("id"),
+            booth.get("label"),
+            booth.get("name"),
+            booth.get("number"),
+            booth.get("code"),
+        ):
+            for price_key in (
+                "price_cents",
+                "amount_cents",
+                "booth_price",
+                "price",
+                "amount",
+                "cost",
+            ):
+                cents = _extract_price_to_cents(booth.get(price_key))
+                if cents > 0:
+                    return cents
     return 0
 
 
@@ -614,26 +607,7 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
     event_cents = _find_event_booth_price_cents(app)
     if event_cents > 0:
         return event_cents
-
-    direct_amount = _extract_price_to_cents(app.get("amount_cents"))
-    if direct_amount > 0:
-        return direct_amount
-
-    for key in ("booth_price", "price", "amount", "cost"):
-        cents = _extract_price_to_cents(app.get(key))
-        if cents > 0:
-            return cents
     return 0
-
-
-def _get_expected_checkout_amount_cents(app: Dict[str, Any]) -> int:
-    locked = app.get("checkout_amount_cents_locked")
-    try:
-        if locked is not None and int(locked) > 0:
-            return int(locked)
-    except Exception:
-        pass
-    return _get_amount_cents_from_app(app)
 
 
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
@@ -646,20 +620,23 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
 
 
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
-    locked_cents = app.get("paid_amount_cents_locked")
-    try:
-        if locked_cents is not None and int(locked_cents) > 0:
-            return int(locked_cents)
-    except Exception:
-        pass
+    for lock_key in ("checkout_amount_cents_locked", "paid_amount_cents_locked"):
+        locked_cents = app.get(lock_key)
+        try:
+            if locked_cents is not None and int(locked_cents) > 0:
+                return int(locked_cents)
+        except Exception:
+            pass
 
-    cents = _persist_resolved_booth_price(app)
+    cents = _find_event_booth_price_cents(app)
     if cents > 0:
+        app["amount_cents"] = cents
+        app["booth_price"] = round(cents / 100.0, 2)
         return cents
 
     raise HTTPException(
         status_code=400,
-        detail="No valid booth price found for this application."
+        detail=f"No valid booth price found for application #{app.get('id')} booth_id={app.get('booth_id') or app.get('requested_booth_id')!r}",
     )
 
 
@@ -1857,10 +1834,20 @@ def vendor_pay_now(
         raise HTTPException(status_code=403, detail="Forbidden")
     _ensure_can_pay_now(app)
 
-    amount_cents = _get_amount_cents_from_app(app)
+    amount_cents = _find_event_booth_price_cents(app)
+    if amount_cents <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Booth price not found for booth_id={app.get('booth_id') or app.get('requested_booth_id')!r}",
+        )
+
     app["checkout_amount_cents_locked"] = amount_cents
-    app["checkout_booth_id_locked"] = str(app.get("booth_id") or "").strip() or None
+    app["checkout_booth_id_locked"] = (
+        str(app.get("booth_id") or app.get("requested_booth_id") or "").strip() or None
+    )
     app["checkout_started_at"] = utc_now_iso()
+    app["amount_cents"] = amount_cents
+    app["booth_price"] = round(amount_cents / 100.0, 2)
 
     body_success_url = body.success_url if body else None
     body_cancel_url = body.cancel_url if body else None
@@ -1916,7 +1903,6 @@ def vendor_pay_now(
             },
         )
 
-        app["checkout_session_id"] = session.id
         app["payment_status"] = "pending"
         app["updated_at"] = utc_now_iso()
         _audit(
@@ -1955,20 +1941,14 @@ def vendor_confirm_payment(
     body: Dict[str, Any] = Body(default={}),
     user: dict = Depends(get_current_user),
 ):
-    expire_reservations_if_needed()
     app = get_application_or_404(app_id)
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     if _payment_exists_for_application(app_id):
-        app["payment_status"] = "paid"
-        app["updated_at"] = utc_now_iso()
-        save_store()
-        return {"ok": True, "already_paid": True, "application_id": app_id}
+        return {"ok": True, "already_paid": True}
 
     session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        session_id = str(app.get("checkout_session_id") or "").strip()
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
@@ -1997,7 +1977,7 @@ def vendor_confirm_payment(
                 status_code=400, detail="Stripe session does not match this application"
             )
 
-        expected_amount_cents = _get_expected_checkout_amount_cents(app)
+        expected_amount_cents = _get_amount_cents_from_app(app)
         amount_total = getattr(session, "amount_total", None)
         if amount_total is not None:
             try:
@@ -2021,11 +2001,6 @@ def vendor_confirm_payment(
         payment = _mark_application_paid(
             app, amount, user=user, source="frontend_confirm"
         )
-        app["checkout_session_id"] = session_id
-        app["checkout_amount_cents_locked"] = expected_amount_cents
-        app["paid_amount_cents_locked"] = int(round(amount * 100))
-        app["updated_at"] = utc_now_iso()
-        save_store()
         return {"ok": True, "application_id": app_id, "payment": payment}
     except HTTPException:
         raise
@@ -2105,7 +2080,7 @@ async def stripe_webhook(request: Request):
 
         app = _APPLICATIONS.get(app_id)
         if app and not _payment_exists_for_application(app_id):
-            expected_amount_cents = _get_expected_checkout_amount_cents(app)
+            expected_amount_cents = _get_amount_cents_from_app(app)
             amount_total = data_obj.get("amount_total")
             if amount_total is not None:
                 try:
