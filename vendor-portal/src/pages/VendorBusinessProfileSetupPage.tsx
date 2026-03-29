@@ -261,31 +261,30 @@ export default function VendorBusinessProfileSetupPage() {
       setStatusMsg("");
 
       const local = safeJsonParse<VendorProfile>(localStorage.getItem(LS_KEY));
-      const localProfile = mergeProfiles(EMPTY_PROFILE, local);
+const localProfile = mergeProfiles(EMPTY_PROFILE, local);
 
-      try {
-        const meData = await apiGetMyProfile();
-        if (!mounted) return;
-
-        const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
-
-        const merged = mergeProfiles(localProfile, serverProfile);
-setProfile(merged);
 try {
-  localStorage.setItem(LS_KEY, JSON.stringify(merged));
+  const meData = await apiGetMyProfile();
+  if (!mounted) return;
+
+  const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
+  const merged = mergeProfiles(localProfile, serverProfile);
+
+  setProfile(merged);
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(merged));
+  } catch {
+    // ignore storage failures
+  }
+
+  return;
 } catch {
-  // ignore storage failures
+  // fall through
 }
-return;
 
-        }
-      } catch {
-        // fall through
-      }
-
-      try {
-        const data = await apiGetApplications();
-        if (!mounted) return;
+try {
+  const data = await apiGetApplications();
+  if (!mounted) return;
 
         const applications = Array.isArray(data)
           ? data
