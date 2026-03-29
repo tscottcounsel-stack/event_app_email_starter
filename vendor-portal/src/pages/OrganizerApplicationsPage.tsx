@@ -1,4 +1,3 @@
-// src/pages/OrganizerApplicationsPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { buildAuthHeaders } from "../auth/authHeaders";
@@ -502,6 +501,16 @@ export default function OrganizerApplicationsPage() {
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(`/organizer/events/${eventId}/application/${app.id}`)
+                    }
+                    className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-900 hover:bg-slate-50"
+                  >
+                    View Application
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
