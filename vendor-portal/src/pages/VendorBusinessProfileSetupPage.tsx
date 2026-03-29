@@ -261,32 +261,31 @@ export default function VendorBusinessProfileSetupPage() {
       setStatusMsg("");
 
       const local = safeJsonParse<VendorProfile>(localStorage.getItem(LS_KEY));
-const localProfile = mergeProfiles(EMPTY_PROFILE, local);
+      const localProfile = mergeProfiles(EMPTY_PROFILE, local);
 
-try {
-  const meData = await apiGetMyProfile();
-  if (!mounted) return;
+      try {
+        const meData = await apiGetMyProfile();
+        if (!mounted) return;
 
-  const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
- const merged = mergeProfiles(localProfile, serverProfile);
+        const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
+        const merged = mergeProfiles(localProfile, serverProfile);
 
-setProfile(merged);
-try {
-  localStorage.setItem(LS_KEY, JSON.stringify(merged));
-} catch {
-  // ignore storage failures
-}
+        setProfile(merged);
+        try {
+          localStorage.setItem(LS_KEY, JSON.stringify(merged));
+        } catch {
+          // ignore storage failures
+        }
 
-setLoading(false);
-return;
+        setLoading(false);
+        return;
+      } catch {
+        // fall through
+      }
 
-} catch {
-  // fall through
-}
-
-try {
-  const data = await apiGetApplications();
-  if (!mounted) return;
+      try {
+        const data = await apiGetApplications();
+        if (!mounted) return;
 
         const applications = Array.isArray(data)
           ? data
@@ -498,7 +497,9 @@ try {
         return { ...prev, imageUrls: merged };
       });
 
-      setStatusMsg(`Uploaded ${uploadedUrls.length} image${uploadedUrls.length === 1 ? "" : "s"} successfully.`);
+      setStatusMsg(
+        `Uploaded ${uploadedUrls.length} image${uploadedUrls.length === 1 ? "" : "s"} successfully.`
+      );
     } catch (e: any) {
       console.error(e);
       setStatusMsg(`Gallery upload failed: ${String(e?.message || e)}`);
@@ -613,7 +614,12 @@ try {
 
               <div>
                 <button
-                  onClick={() => logoFileRef.current?.click()}
+                  onClick={() => {
+                    if (logoFileRef.current) {
+                      logoFileRef.current.value = "";
+                      logoFileRef.current.click();
+                    }
+                  }}
                   className="rounded-xl border px-4 py-2 font-bold hover:bg-slate-50 disabled:opacity-60"
                   disabled={uploadingLogo}
                 >
@@ -625,7 +631,11 @@ try {
                   type="file"
                   hidden
                   accept="image/*"
-                  onChange={(e) => onPickLogo(e.target.files?.[0] || null)}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0] || null;
+                    await onPickLogo(file);
+                    e.currentTarget.value = "";
+                  }}
                 />
 
                 <div className="mt-2 text-xs text-slate-500">
@@ -817,7 +827,12 @@ try {
 
           <div className="flex gap-3">
             <button
-              onClick={() => galleryFileRef.current?.click()}
+              onClick={() => {
+                if (galleryFileRef.current) {
+                  galleryFileRef.current.value = "";
+                  galleryFileRef.current.click();
+                }
+              }}
               className="rounded-xl bg-indigo-600 px-4 py-2 font-bold text-white disabled:opacity-60"
               disabled={uploadingGallery}
             >
@@ -830,7 +845,10 @@ try {
               hidden
               accept="image/*"
               multiple
-              onChange={(e) => onPickGalleryImages(e.target.files)}
+              onChange={async (e) => {
+                await onPickGalleryImages(e.target.files);
+                e.currentTarget.value = "";
+              }}
             />
           </div>
         </div>
