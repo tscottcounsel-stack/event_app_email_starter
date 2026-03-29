@@ -198,10 +198,7 @@ export default function App() {
             path="events/:eventId/applications/:appId"
             element={<OrganizerApplicationViewPage />}
           />
-          <Route
-            path="events/:eventId/vendor/:vendorId"
-            element={<VendorPublicProfilePage />}
-          />
+         
           <Route
             path="vendor-preview/:applicationId"
             element={<OrganizerVendorPreviewPage />}
