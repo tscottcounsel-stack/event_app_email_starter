@@ -602,31 +602,14 @@ def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
         pass
 
     cents = _persist_resolved_booth_price(app)
+    if cents > 0:
+        return cents
 
-    # Fallback: try direct booth lookup again safely
-    if cents <= 0:
-        event = _EVENTS.get(int(app.get("event_id") or 0), {})
-        booth_id = str(app.get("booth_id") or "").strip()
+    raise HTTPException(
+        status_code=400,
+        detail="No valid booth price found for this application."
+    )
 
-        for key in ["booths", "layout", "map_layout", "booth_map"]:
-            container = event.get(key)
-            if isinstance(container, dict):
-                booth = container.get(booth_id)
-                if isinstance(booth, dict):
-                    price = booth.get("price") or booth.get("booth_price")
-                    cents = _extract_price_to_cents(price)
-                    if cents > 0:
-                        app["amount_cents"] = cents
-                        app["booth_price"] = round(cents / 100.0, 2)
-                        break
-
-    # Final fallback
-    if cents <= 0:
-        cents = 10000
-        app["amount_cents"] = cents
-        app["booth_price"] = 100.00
-
-    return cents
 
 def _matches_current_organizer(
     *,
@@ -1829,10 +1812,18 @@ def vendor_pay_now(
     body_description = body.description if body else None
     body_currency = body.currency if body and body.currency else "usd"
 
-    default_success = f"http://localhost:5173/vendor/applications?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
+    frontend_base = (
+        os.getenv("FRONTEND_BASE_URL")
+        or "https://event-app-frontend-7xlfphwaf-tscottcounsel-stacks-projects.vercel.app"
+    ).rstrip("/")
+
+    default_success = (
+        f"{frontend_base}/vendor/applications"
+        f"?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
+    )
     success_url = (body_success_url or default_success).strip()
     cancel_url = (
-        body_cancel_url or "http://localhost:5173/vendor/applications?payment=cancel"
+        body_cancel_url or f"{frontend_base}/vendor/applications?payment=cancel"
     ).strip()
     desc = (body_description or f"Booth payment for application #{app_id}").strip()
     currency = (body_currency or "usd").strip().lower()
