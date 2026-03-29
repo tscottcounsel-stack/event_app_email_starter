@@ -269,29 +269,15 @@ export default function VendorBusinessProfileSetupPage() {
 
         const serverProfile = mergeProfiles(EMPTY_PROFILE, normalizeFromSource(meData));
 
-        const hasServerData =
-          !!serverProfile.businessName ||
-          !!serverProfile.email ||
-          !!serverProfile.phone ||
-          !!serverProfile.businessDescription ||
-          serverProfile.categories.length > 0 ||
-          !!serverProfile.logoDataUrl ||
-          serverProfile.imageUrls.length > 0 ||
-          serverProfile.videoUrls.length > 0 ||
-          !!serverProfile.instagram ||
-          !!serverProfile.facebook ||
-          !!serverProfile.city ||
-          !!serverProfile.state;
+        const merged = mergeProfiles(localProfile, serverProfile);
+setProfile(merged);
+try {
+  localStorage.setItem(LS_KEY, JSON.stringify(merged));
+} catch {
+  // ignore storage failures
+}
+return;
 
-        if (hasServerData) {
-          const merged = mergeProfiles(localProfile, serverProfile);
-          setProfile(merged);
-          try {
-            localStorage.setItem(LS_KEY, JSON.stringify(merged));
-          } catch {
-            // ignore storage failures
-          }
-          return;
         }
       } catch {
         // fall through
