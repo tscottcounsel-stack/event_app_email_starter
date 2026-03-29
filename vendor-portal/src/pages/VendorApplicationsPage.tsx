@@ -470,6 +470,32 @@ export default function VendorApplicationsPage() {
     (async () => {
       try {
         setPaymentMessage(null);
+
+        const appId =
+          resolveNumericApplicationId(params.get("appId")) ||
+          resolveNumericApplicationId(params.get("application_id"));
+        const sessionId = String(params.get("session_id") || "").trim();
+
+        if (appId && sessionId) {
+          const res = await fetch(`${API_BASE}/vendor/applications/${appId}/confirm-payment`, {
+            method: "POST",
+            headers: {
+              ...buildAuthHeaders(),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ session_id: sessionId }),
+          });
+
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            throw new Error(
+              (typeof data?.detail === "string" && data.detail) ||
+                (typeof data?.message === "string" && data.message) ||
+                `Unable to confirm payment (${res.status}).`
+            );
+          }
+        }
+
         await loadApplications();
         setPaymentMessage("Payment confirmed.");
 
@@ -484,7 +510,12 @@ export default function VendorApplicationsPage() {
           `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`
         );
       } catch (e: any) {
-        setPaymentMessage(e?.message || "Payment confirmed.");
+        setPaymentMessage(e?.message || "Payment confirmation could not be verified.");
+        try {
+          await loadApplications();
+        } catch {
+          // keep original error message
+        }
       } finally {
         setLoading(false);
       }
