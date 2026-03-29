@@ -2,6 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import * as ApplicationsAPI from "../components/api/applications";
 
+const API_BASE =
+  import.meta.env.VITE_API_BASE ||
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://event-app-api-production-ccce.up.railway.app";
+
 type DocMeta = {
   name?: string;
   size?: number;
@@ -16,7 +21,7 @@ type DiagramDoc = {
     booths: Array<{ id: string; label?: string }>;
     elements?: any[];
   }>;
-  booths?: Array<{ id: string; label?: string }>; // legacy
+  booths?: Array<{ id: string; label?: string }>;
 };
 
 function chipClass(kind: "neutral" | "good" | "bad" | "warn") {
@@ -36,7 +41,6 @@ function normalizePayment(s?: string | null) {
   const v = String(s ?? "").toLowerCase().trim();
   return v || "unpaid";
 }
-
 
 function docsToList(app: ApplicationsAPI.ServerApplication) {
   const d = ((app.documents ?? app.docs) || {}) as Record<string, DocMeta | DocMeta[] | null>;
@@ -135,6 +139,10 @@ function getBoothLabelFromCachedDiagram(eventId: string, boothId: string): strin
   return null;
 }
 
+function canLeaveReview(status: string, payment: string, vendorEmail: string) {
+  return status === "approved" && payment === "paid" && !!vendorEmail;
+}
+
 export default function OrganizerApplicationViewPage() {
   const nav = useNavigate();
   const { eventId, appId, applicationId } = useParams();
@@ -151,7 +159,6 @@ export default function OrganizerApplicationViewPage() {
   const [reviewComment, setReviewComment] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewDone, setReviewDone] = useState(false);
-
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +178,7 @@ export default function OrganizerApplicationViewPage() {
       }
     }
 
-    run();
+    void run();
     return () => {
       cancelled = true;
     };
@@ -181,17 +188,13 @@ export default function OrganizerApplicationViewPage() {
   const payment = normalizePayment((app as any)?.payment_status);
   const docs = useMemo(() => (app ? docsToList(app) : []), [app]);
 
-  const vendorId = String((app as any)?.vendor_id ?? "").trim();
-  const vendorEmail = String((app as any)?.vendor_email ?? "").trim();
-
+  const vendorEmail = String((app as any)?.vendor_email ?? "").trim().toLowerCase();
   const requestedBoothId = String((app as any)?.requested_booth_id ?? "").trim();
   const boothId = String((app as any)?.booth_id ?? "").trim();
 
   const boothReservedUntilRaw = String((app as any)?.booth_reserved_until ?? "").trim();
   const boothReservedUntil = useMemo(() => parseDateMaybe(boothReservedUntilRaw), [boothReservedUntilRaw]);
 
-  const requestedBoothDisplay = requestedBoothId || boothId || "None requested";
-  const assignedBoothDisplay = boothId || "Not assigned yet";
   const holdMins = useMemo(() => minsUntil(boothReservedUntil), [boothReservedUntil]);
   const holdActive = typeof holdMins === "number" ? holdMins > 0 : false;
 
@@ -200,19 +203,8 @@ export default function OrganizerApplicationViewPage() {
     return getBoothLabelFromCachedDiagram(eid, boothId);
   }, [eid, boothId]);
 
-  // Vendor profile route fallback order:
-  // 1) vendor_id
-  // 2) vendor_email
-  // 3) app.id (last-resort legacy fallback)
-  //
-  // Current App.tsx route:
-  // /organizer/events/:eventId/vendor/:vendorId
-  const vendorProfileKey = vendorId || "";
-
-  const profileHref =
-    eid && vendorProfileKey
-    ? `/organizer/events/${encodeURIComponent(eid)}/vendor/${encodeURIComponent(vendorProfileKey)}`
-    : "";
+  const profileHref = vendorEmail ? `/vendors/${encodeURIComponent(vendorEmail)}` : "";
+  const reviewAllowed = canLeaveReview(status, payment, vendorEmail);
 
   function statusChip() {
     if (status === "approved") return <span className={chipClass("good")}>approved</span>;
@@ -246,7 +238,6 @@ export default function OrganizerApplicationViewPage() {
       setBusy("approve");
       setErr(null);
 
-      // If already approved, skip API call and go straight to assign
       if (normalizeStatus((app as any)?.status) === "approved") {
         gotoAssignBooth((app as any).id);
         return;
@@ -254,7 +245,6 @@ export default function OrganizerApplicationViewPage() {
 
       const updated = await ApplicationsAPI.organizerApproveApplication({ appId: (app as any).id });
       setApp(updated);
-
       gotoAssignBooth((updated as any).id);
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : "Approve failed");
@@ -272,7 +262,6 @@ export default function OrganizerApplicationViewPage() {
 
       const updated = await ApplicationsAPI.organizerRejectApplication({ appId: (app as any).id });
       setApp(updated);
-
       nav(`/organizer/events/${encodeURIComponent(eid)}/applications`);
     } catch (e: any) {
       setErr(e?.message ? String(e.message) : "Reject failed");
@@ -281,21 +270,48 @@ export default function OrganizerApplicationViewPage() {
     }
   }
 
-
   async function submitReview() {
-    if (!vendorId) return;
+    if (!vendorEmail || !reviewAllowed) return;
+
     try {
       setReviewBusy(true);
-      const res = await fetch(`/reviews?vendor_id=${encodeURIComponent(vendorId)}&rating=${reviewRating}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ comment: reviewComment, event_id: eid }),
-      });
-      if (!res.ok) throw new Error("Failed to submit review");
+      setErr(null);
+
+      const authHeaders =
+        typeof (ApplicationsAPI as any).buildAuthHeaders === "function"
+          ? (ApplicationsAPI as any).buildAuthHeaders()
+          : {};
+
+      const res = await fetch(
+        `${API_BASE}/vendors/${encodeURIComponent(vendorEmail)}/reviews`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            ...authHeaders,
+          },
+          body: JSON.stringify({
+            rating: reviewRating,
+            comment: reviewComment,
+          }),
+        }
+      );
+
+      const text = await res.text().catch(() => "");
+      if (!res.ok) {
+        let msg = text || "Failed to submit review";
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed?.detail) msg = String(parsed.detail);
+        } catch {}
+        throw new Error(msg);
+      }
+
       setReviewDone(true);
       setShowReview(false);
-    } catch (e) {
-      alert("Review failed");
+    } catch (e: any) {
+      setErr(e?.message ? String(e.message) : "Review failed");
     } finally {
       setReviewBusy(false);
     }
@@ -332,7 +348,7 @@ export default function OrganizerApplicationViewPage() {
             ) : (
               <button
                 disabled
-                title="Vendor profile is unavailable because this application has no vendor id or vendor email yet."
+                title="Vendor profile is unavailable because this application has no vendor email yet."
                 className="cursor-not-allowed rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-400"
               >
                 View Vendor Profile
@@ -361,7 +377,7 @@ export default function OrganizerApplicationViewPage() {
                   </span>
                 </div>
 
-                                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <div className="text-xs font-semibold text-gray-500">Requirements</div>
                     <div className="mt-1 text-sm text-gray-900">
@@ -389,6 +405,7 @@ export default function OrganizerApplicationViewPage() {
                   <div>
                     <div className="text-xs font-semibold text-gray-500">Compliance</div>
                     <div className="mt-1 text-sm text-gray-900">
+                      {status === "submitted" || status === "approved" ? "Included in submission" : "In progress"}
                     </div>
                   </div>
                   <div>
@@ -517,15 +534,27 @@ export default function OrganizerApplicationViewPage() {
                   Assign Booth
                 </button>
 
-                <button
-                  onClick={() => setShowReview(true)}
-                  className="mt-2 w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
-                >
-                  Leave Review
-                </button>
+                {reviewAllowed ? (
+                  <button
+                    onClick={() => setShowReview(true)}
+                    className="mt-2 w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                  >
+                    Leave Review
+                  </button>
+                ) : (
+                  <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
+                    Reviews unlock after the application is approved and payment is marked paid.
+                  </div>
+                )}
+
+                {reviewDone ? (
+                  <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+                    Review submitted.
+                  </div>
+                ) : null}
 
                 <div className="mt-3 text-xs text-gray-500">
-                  Approve opens the booth picker for this application. Vendor profile opens organizer-safe preview.
+                  Approve opens the booth picker for this application. Vendor profile opens the public vendor profile using vendor email.
                 </div>
               </div>
 
@@ -535,6 +564,8 @@ export default function OrganizerApplicationViewPage() {
                   status: <span className="font-mono">{status}</span>
                   <br />
                   payment_status: <span className="font-mono">{payment}</span>
+                  <br />
+                  vendor_email: <span className="font-mono">{vendorEmail || "—"}</span>
                   <br />
                   booth_id:{" "}
                   <span className="font-mono" title={boothId || ""}>
@@ -546,54 +577,52 @@ export default function OrganizerApplicationViewPage() {
           </div>
         )}
 
-      {showReview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-            <h2 className="text-lg font-bold mb-3">Leave Review</h2>
+        {showReview && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+              <h2 className="mb-3 text-lg font-bold">Leave Review</h2>
 
-            <div className="mb-3">
-              <label className="text-sm font-semibold">Rating</label>
-              <select
-                value={reviewRating}
-                onChange={(e) => setReviewRating(Number(e.target.value))}
-                className="mt-1 w-full border rounded px-2 py-1"
-              >
-                {[5,4,3,2,1].map(v => <option key={v} value={v}>{v} Stars</option>)}
-              </select>
-            </div>
+              <div className="mb-3">
+                <label className="text-sm font-semibold">Rating</label>
+                <select
+                  value={reviewRating}
+                  onChange={(e) => setReviewRating(Number(e.target.value))}
+                  className="mt-1 w-full rounded border px-2 py-1"
+                >
+                  {[5, 4, 3, 2, 1].map((v) => (
+                    <option key={v} value={v}>
+                      {v} Stars
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="mb-3">
-              <label className="text-sm font-semibold">Comment</label>
-              <textarea
-                value={reviewComment}
-                onChange={(e) => setReviewComment(e.target.value)}
-                className="mt-1 w-full border rounded px-2 py-1"
-                rows={3}
-              />
-            </div>
+              <div className="mb-3">
+                <label className="text-sm font-semibold">Comment</label>
+                <textarea
+                  value={reviewComment}
+                  onChange={(e) => setReviewComment(e.target.value)}
+                  className="mt-1 w-full rounded border px-2 py-1"
+                  rows={3}
+                />
+              </div>
 
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowReview(false)} className="px-3 py-1 border rounded">
-                Cancel
-              </button>
-              <button
-                onClick={submitReview}
-                disabled={reviewBusy}
-                className="px-3 py-1 bg-indigo-600 text-white rounded"
-              >
-                {reviewBusy ? "Submitting..." : "Submit"}
-              </button>
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowReview(false)} className="rounded border px-3 py-1">
+                  Cancel
+                </button>
+                <button
+                  onClick={submitReview}
+                  disabled={reviewBusy}
+                  className="rounded bg-indigo-600 px-3 py-1 text-white"
+                >
+                  {reviewBusy ? "Submitting..." : "Submit"}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-
-</div>
+        )}
+      </div>
     </div>
   );
 }
-
-
-
-
-
