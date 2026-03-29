@@ -36,3 +36,8 @@ async def upload_image(
         "ok": True,
         "url": f"/uploads/{unique_name}",
     }
+return {
+    "ok": True,
+    "marker": "UPLOAD_ROUTE_TEST_123",
+    "url": f"/uploads/{unique_name}",
+}
