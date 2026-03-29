@@ -29,10 +29,6 @@ def _safe_list_of_str(value: Any) -> List[str]:
 
 
 def _user_vendor_key(user: Dict[str, Any]) -> str:
-    user_id = user.get("id")
-    if user_id:
-        return str(user_id).strip().lower()
-
     email = _safe_str(user.get("email")).lower()
     if email:
         return email
@@ -199,9 +195,17 @@ def save_my_vendor_profile(
     mapped = _map_payload(payload.model_dump())
     updated = {**existing, **mapped}
     updated["vendor_id"] = key
+    updated["email"] = key
     _VENDORS[key] = updated
     save_store()
     return updated
+
+
+@router.get("/by-email/{email}")
+def get_vendor_profile_by_email(email: str):
+    vendor_key = _normalize_vendor_key(email)
+    vendor = _get_vendor_or_404(vendor_key)
+    return {**vendor, "vendor_id": vendor_key}
 
 
 @router.get("/public/{vendor_id}")
