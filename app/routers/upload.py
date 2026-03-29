@@ -24,9 +24,7 @@ async def upload_image(
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         raise HTTPException(status_code=400, detail="Invalid file type")
 
-    # 🔥 PURE UUID (NO PREFIX)
     unique_name = f"{uuid.uuid4().hex}{ext}"
-
     file_path = UPLOAD_DIR / unique_name
 
     with file_path.open("wb") as buffer:
@@ -34,10 +32,6 @@ async def upload_image(
 
     return {
         "ok": True,
+        "marker": "UPLOAD_ROUTE_TEST_123",
         "url": f"/uploads/{unique_name}",
     }
-return {
-    "ok": True,
-    "marker": "UPLOAD_ROUTE_TEST_123",
-    "url": f"/uploads/{unique_name}",
-}
