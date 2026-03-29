@@ -601,34 +601,32 @@ def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
     except Exception:
         pass
 
-   cents = _persist_resolved_booth_price(app)
+    cents = _persist_resolved_booth_price(app)
 
-# 🔥 Fallback: try direct booth lookup again safely
-if cents <= 0:
-    event = _EVENTS.get(int(app.get("event_id") or 0), {})
-    booth_id = str(app.get("booth_id") or "").strip()
+    # Fallback: try direct booth lookup again safely
+    if cents <= 0:
+        event = _EVENTS.get(int(app.get("event_id") or 0), {})
+        booth_id = str(app.get("booth_id") or "").strip()
 
-    # try brute lookup inside event
-    for key in ["booths", "layout", "map_layout", "booth_map"]:
-        container = event.get(key)
-        if isinstance(container, dict):
-            booth = container.get(booth_id)
-            if isinstance(booth, dict):
-                price = booth.get("price") or booth.get("booth_price")
-                cents = _extract_price_to_cents(price)
-                if cents > 0:
-                    app["amount_cents"] = cents
-                    app["booth_price"] = round(cents / 100.0, 2)
-                    break
+        for key in ["booths", "layout", "map_layout", "booth_map"]:
+            container = event.get(key)
+            if isinstance(container, dict):
+                booth = container.get(booth_id)
+                if isinstance(booth, dict):
+                    price = booth.get("price") or booth.get("booth_price")
+                    cents = _extract_price_to_cents(price)
+                    if cents > 0:
+                        app["amount_cents"] = cents
+                        app["booth_price"] = round(cents / 100.0, 2)
+                        break
 
-# FINAL fallback (prevents blocking UX)
-if cents <= 0:
-    cents = 10000  # default $100 fallback
-    app["amount_cents"] = cents
-    app["booth_price"] = 100.00
+    # Final fallback
+    if cents <= 0:
+        cents = 10000
+        app["amount_cents"] = cents
+        app["booth_price"] = 100.00
 
-return cents
-
+    return cents
 
 def _matches_current_organizer(
     *,
