@@ -11,8 +11,14 @@ from fastapi.staticfiles import StaticFiles
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-UPLOADS_DIR = BASE_DIR / "uploads"
+
+# 🔥 CRITICAL FIX — USE RAILWAY PERSISTENT VOLUME
+UPLOADS_DIR = Path("/data/uploads")
+
+# Ensure directory exists (Railway-safe)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+logger.info("UPLOADS DIR: %s", UPLOADS_DIR)
 
 
 def _safe_call(func, label: str) -> None:
