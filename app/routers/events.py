@@ -53,28 +53,6 @@ def _sanitize_upload_filename(filename: str) -> str:
 
 
 
-@router.post("/upload/image")
-async def upload_image(
-    file: UploadFile = File(...),
-    user: dict = Depends(get_current_user),
-):
-    if not file:
-        raise HTTPException(status_code=400, detail="No file uploaded")
-
-    filename = _sanitize_upload_filename(file.filename or "")
-    destination = UPLOAD_DIR / filename
-
-    try:
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-        destination.write_bytes(contents)
-    finally:
-        await file.close()
-
-    return {"url": f"/uploads/{filename}"}
-
 
 class EventCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
