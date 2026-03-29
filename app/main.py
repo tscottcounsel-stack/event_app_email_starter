@@ -156,5 +156,6 @@ for module_name in [
     "app.routers.users",
     "app.routers.vendors",
     "app.routers.vendors_v2",
+    "app.routers.upload",
 ]:
     _try_include(app, module_name, "router")
