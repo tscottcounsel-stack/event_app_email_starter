@@ -557,19 +557,47 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     except Exception:
         return 0
 
-    diagram = event.get("diagram") or {}
-    if isinstance(diagram, str):
-        try:
-            diagram = json.loads(diagram)
-        except Exception:
-            return 0
-
-    if not isinstance(diagram, dict):
-        return 0
-
-    booths = diagram.get("booths") or []
+       booths = _extract_booths_from_event(event)
     if not isinstance(booths, list):
         return 0
+
+    booth_keys = _app_booth_candidates(app)
+
+    for booth in booths:
+        if not isinstance(booth, dict):
+            continue
+
+        booth_values = set()
+
+        for field in ["id", "label", "name", "number", "booth_id", "boothId", "booth_number"]:
+            val = booth.get(field)
+            if not val:
+                continue
+
+            s = str(val).strip().lower()
+            booth_values.add(s)
+
+            digits = "".join(c for c in s if c.isdigit())
+            if digits:
+                booth_values.add(digits)
+                booth_values.add(f"booth {digits}")
+                booth_values.add(f"booth_{digits}")
+                booth_values.add(f"booth-{digits}")
+
+        if booth_keys & booth_values:
+            return _extract_price_to_cents(
+                booth.get("price_cents")
+                or booth.get("price")
+                or booth.get("amount_cents")
+                or booth.get("amount")
+                or booth.get("booth_price")
+                or booth.get("boothPrice")
+                or booth.get("cost")
+                or booth.get("fee")
+                or 0
+            )
+
+    return 0
 
     booth_keys = _app_booth_candidates(app)
 
