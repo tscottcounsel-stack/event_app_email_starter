@@ -1916,16 +1916,14 @@ def vendor_pay_now(
         raise HTTPException(status_code=403, detail="Forbidden")
     _ensure_can_pay_now(app)
 
-    amount_cents = _find_event_booth_price_cents(app)
-    if amount_cents <= 0:
-        amount_cents = _find_booth_price_cents_for_app(app)
+    amount_cents = _get_amount_cents_from_app(app)
     if amount_cents <= 0:
         raise HTTPException(
             status_code=400,
             detail=f"Booth price not found for booth_id={app.get('booth_id')!r}",
         )
 
-    app["checkout_amount_cents_locked"] = amount_cents
+    app["checkout_amount_cents_locked"] = int(amount_cents)
     app["checkout_booth_id_locked"] = str(
         app.get("booth_id")
         or app.get("requested_booth_id")
@@ -1933,8 +1931,8 @@ def vendor_pay_now(
         or ""
     ).strip() or None
     app["checkout_started_at"] = utc_now_iso()
-    app["amount_cents"] = amount_cents
-    app["booth_price"] = round(amount_cents / 100.0, 2)
+    app["amount_cents"] = int(amount_cents)
+    app["booth_price"] = round(int(amount_cents) / 100.0, 2)
 
     body_success_url = body.success_url if body else None
     body_cancel_url = body.cancel_url if body else None
@@ -1975,7 +1973,7 @@ def vendor_pay_now(
                     "price_data": {
                         "currency": currency,
                         "product_data": {"name": desc},
-                        "unit_amount": amount_cents,
+                        "unit_amount": int(amount_cents),
                     },
                     "quantity": 1,
                 }
@@ -1986,7 +1984,8 @@ def vendor_pay_now(
                 "vendor_email": str(app.get("vendor_email") or ""),
                 "vendor_id": str(app.get("vendor_id") or ""),
                 "booth_id": str(app.get("checkout_booth_id_locked") or app.get("booth_id") or ""),
-                "amount_cents": str(amount_cents),
+                "requested_booth_id": str(app.get("requested_booth_id") or ""),
+                "amount_cents": str(int(amount_cents)),
             },
         )
 
@@ -1997,7 +1996,7 @@ def vendor_pay_now(
             entity_type="application",
             entity_id=app_id,
             user=user,
-            details={"session_id": session.id, "amount_cents": amount_cents},
+            details={"session_id": session.id, "amount_cents": int(amount_cents)},
         )
         save_store()
         return {"ok": True, "url": session.url, "session_id": session.id}
@@ -2009,7 +2008,7 @@ def vendor_pay_now(
             "ok": False,
             "mock": True,
             "detail": f"Stripe not configured: {str(e)}",
-            "amount_cents": amount_cents,
+            "amount_cents": int(amount_cents),
         }
 
 
@@ -2023,25 +2022,71 @@ def vendor_create_checkout_session_legacy(
 
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
-def confirm_payment(app_id: int, user: dict = Depends(get_current_user)):
+def vendor_confirm_payment(
+    app_id: int,
+    body: Dict[str, Any] = Body(default={}),
+    user: dict = Depends(get_current_user),
+):
+    expire_reservations_if_needed()
     app = get_application_or_404(app_id)
 
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    amount_cents = app.get("checkout_amount_cents_locked")
+    if _payment_exists_for_application(app_id) or _coerce_payment_status(app.get("payment_status")) == "paid":
+        return {"ok": True, "already_paid": True, "application_id": int(app_id)}
 
-    if not amount_cents or int(amount_cents) <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No locked checkout amount found"
-        )
+    session_id = str((body or {}).get("session_id") or "").strip()
 
-    amount = int(amount_cents) / 100
+    expected_amount_cents = 0
+    try:
+        expected_amount_cents = int(app.get("checkout_amount_cents_locked") or 0)
+    except Exception:
+        expected_amount_cents = 0
+    if expected_amount_cents <= 0:
+        expected_amount_cents = _get_amount_cents_from_app(app)
 
-    _mark_application_paid(app, amount, user=user, source="frontend_confirm")
+    if session_id:
+        try:
+            import stripe
 
-    return {"ok": True}
+            secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+            if not secret:
+                raise RuntimeError("STRIPE_SECRET_KEY not set")
+
+            stripe.api_key = secret
+            session = stripe.checkout.Session.retrieve(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Stripe session not found")
+
+            payment_status = str(getattr(session, "payment_status", "") or "").strip().lower()
+            status = str(getattr(session, "status", "") or "").strip().lower()
+            if payment_status != "paid" and status != "complete":
+                raise HTTPException(status_code=400, detail="Stripe session not paid")
+
+            metadata = getattr(session, "metadata", None) or {}
+            session_app_id = str(metadata.get("application_id") or "").strip()
+            if session_app_id and session_app_id != str(app_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Stripe session does not match this application",
+                )
+
+            amount_total = getattr(session, "amount_total", None)
+            if amount_total is not None and int(amount_total) != int(expected_amount_cents):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Stripe amount does not match application total",
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Payment confirmation failed: {e}")
+
+    amount = round(int(expected_amount_cents) / 100.0, 2)
+    payment = _mark_application_paid(app, amount, user=user, source="frontend_confirm")
+    return {"ok": True, "application_id": int(app_id), "payment": payment}
+
 @router.post("/applications/{application_id}/mark-paid")
 def mark_application_paid(application_id: int, user: dict = Depends(get_current_user)):
     _require_admin(user)

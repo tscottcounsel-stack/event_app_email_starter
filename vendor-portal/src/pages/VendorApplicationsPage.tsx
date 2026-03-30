@@ -476,7 +476,11 @@ export default function VendorApplicationsPage() {
           resolveNumericApplicationId(params.get("application_id"));
         const sessionId = String(params.get("session_id") || "").trim();
 
-        if (appId && sessionId) {
+        if (!appId) {
+          throw new Error("Missing application ID after payment return.");
+        }
+
+        if (sessionId) {
           const res = await fetch(`${API_BASE}/vendor/applications/${appId}/confirm-payment`, {
             method: "POST",
             headers: {
