@@ -994,65 +994,63 @@ useEffect(() => {
 
 
 
-async function saveNow(nextPublished: boolean = isPublished) {
-  if (!eventId) return;
+  async function saveNow(nextPublished: boolean = isPublished) {
+    if (!eventId) return;
 
-  try {
-    setIsSaving(true);
-    setSaveError(null);
-    setStatusMsg("Saving…");
+    try {
+      setIsSaving(true);
+      setSaveError(null);
+      setStatusMsg("Saving…");
 
-console.log("SAVE LEVELS", levels);
-
-    const doc: DiagramDoc = {
-      version: 2,
-      published: nextPublished,
-      meta: { published: nextPublished },
-      canvas: {
-        width: Number(canvasW),
-        height: Number(canvasH),
-        gridSize: Number(gridSize),
-      },
-      levels: levels.map((lvl) => ({
-        id: String(lvl.id),
-        name: String(lvl.name),
-        booths: (Array.isArray(lvl.booths) ? lvl.booths : []).map((b: any) => ({
-          id: String(b?.id ?? ""),
-          label: String(b?.label ?? ""),
-          x: Number(b?.x ?? 0),
-          y: Number(b?.y ?? 0),
-          width: Number(b?.width ?? 140),
-          height: Number(b?.height ?? 110),
-          category: String(b?.category ?? ""),
-          price: Number(b?.price ?? 0),
-          status: String(b?.status ?? "available"),
-          companyName: String(b?.companyName ?? ""),
+      const doc: DiagramDoc = {
+        version: 2,
+        published: nextPublished,
+        meta: { published: nextPublished },
+        canvas: {
+          width: Number(canvasW),
+          height: Number(canvasH),
+          gridSize: Number(gridSize),
+        },
+        levels: levels.map((lvl) => ({
+          id: String(lvl.id),
+          name: String(lvl.name),
+          booths: (Array.isArray(lvl.booths) ? lvl.booths : []).map((b: any) => ({
+            id: String(b?.id ?? ""),
+            x: Number(b?.x ?? 0),
+            y: Number(b?.y ?? 0),
+            width: Number(b?.width ?? 140),
+            height: Number(b?.height ?? 110),
+            label: String(b?.label ?? ""),
+            status: String(b?.status ?? "available"),
+            category: String(b?.category ?? ""),
+            price: Number(b?.price ?? 0),
+            companyName: String(b?.companyName ?? ""),
+          })),
+          elements: (Array.isArray(lvl.elements) ? lvl.elements : []).map((el: any) => ({
+            id: String(el?.id ?? ""),
+            type: (String(el?.type ?? "shape") as ElementType),
+            x: Number(el?.x ?? 0),
+            y: Number(el?.y ?? 0),
+            width: Number(el?.width ?? 100),
+            height: Number(el?.height ?? 60),
+            ...(el?.label != null ? { label: String(el.label) } : {}),
+          })),
         })),
-        elements: (Array.isArray(lvl.elements) ? lvl.elements : []).map((el: any) => ({
-          id: String(el?.id ?? ""),
-          type: String(el?.type ?? "shape"),
-          x: Number(el?.x ?? 0),
-          y: Number(el?.y ?? 0),
-          width: Number(el?.width ?? 100),
-          height: Number(el?.height ?? 60),
-          label: el?.label == null ? undefined : String(el.label),
-        })),
-      })),
-    };
+      };
 
-    await saveEventDiagram(eventId, doc);
-    localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: doc }));
-    setIsPublished(nextPublished);
-    setStatusMsg("Saved");
-  } catch (e: any) {
-    console.error("SAVE ERROR:", e);
-    console.error("LEVELS SNAPSHOT:", levels);
-    setSaveError(e?.message ? String(e.message) : "Save failed");
-    setStatusMsg("Save failed");
-  } finally {
-    setIsSaving(false);
+      await saveEventDiagram(eventId, doc);
+      localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: doc }));
+      setIsPublished(nextPublished);
+      setStatusMsg("Saved");
+    } catch (e: any) {
+      console.error("SAVE ERROR:", e);
+      setSaveError(e?.message ? String(e.message) : "Save failed");
+      setStatusMsg("Save failed");
+      throw e;
+    } finally {
+      setIsSaving(false);
+    }
   }
-}
 
   async function publishEventNow() {
     if (!eventId) return;
