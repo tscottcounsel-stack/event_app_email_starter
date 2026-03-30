@@ -25,8 +25,8 @@ def _safe_call(func, label: str) -> None:
     try:
         func()
         logger.info("%s initialized", label)
-  except Exception as exc:
-    raise RuntimeError(f"FAILED TO LOAD ROUTER: {module_name} → {exc}")
+    except Exception as exc:
+        logger.warning("%s init skipped: %s", label, exc)
 
 
 def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> None:
@@ -40,6 +40,7 @@ def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> N
         logger.info("Included router from %s", module_name)
     except Exception as exc:
         raise RuntimeError(f"FAILED TO LOAD ROUTER: {module_name} -> {exc}")
+
 
 def _load_store_if_available() -> None:
     try:
