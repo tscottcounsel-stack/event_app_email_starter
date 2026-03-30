@@ -442,18 +442,129 @@ def _extract_price_to_cents(value: Any) -> int:
         return 0
 
 
-def _candidate_booth_keys(booth_id: Any) -> set[str]:
-    raw = str(booth_id or "").strip()
-    out = {raw}
-    if raw.lower().startswith("booth "):
-        out.add(raw.split(" ", 1)[1].strip())
-    if raw.lower().startswith("booth"):
-        out.add(raw[5:].strip())
-    if raw.isdigit():
-        out.add(f"Booth {raw}")
-        out.add(f"booth_{raw}")
-        out.add(f"booth-{raw}")
-    return {x for x in out if x}
+
+def _normalize_booth_token(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    s = s.replace("_", " ").replace("-", " ")
+    s = " ".join(s.split()).lower()
+    if s.startswith("booth "):
+        tail = s[6:].strip()
+        if tail:
+            return tail
+    return s
+
+
+def _candidate_booth_keys(*values: Any) -> set[str]:
+    out: set[str] = set()
+
+    def add(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+
+        normalized = _normalize_booth_token(raw)
+        if normalized:
+            out.add(normalized)
+
+        out.add(raw)
+        out.add(raw.lower())
+
+        compact = raw.replace(" ", "")
+        if compact:
+            out.add(compact)
+            out.add(compact.lower())
+
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits:
+            out.add(digits)
+            out.add(f"Booth {digits}")
+            out.add(f"booth {digits}")
+            out.add(f"booth_{digits}")
+            out.add(f"booth-{digits}")
+
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+
+    return {x for x in out if str(x).strip()}
+
+
+def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
+    values = [
+        app.get("booth_id"),
+        app.get("requested_booth_id"),
+        app.get("checkout_booth_id_locked"),
+        app.get("booth_label"),
+        app.get("booth_name"),
+        app.get("booth_number"),
+        app.get("assigned_booth_id"),
+        app.get("assigned_booth_label"),
+        app.get("selected_booth_id"),
+        app.get("selected_booth_label"),
+        app.get("booth"),
+        app.get("selected_booth"),
+    ]
+
+    booth_meta = app.get("booth_meta")
+    if isinstance(booth_meta, dict):
+        values.extend(
+            [
+                booth_meta.get("id"),
+                booth_meta.get("booth_id"),
+                booth_meta.get("label"),
+                booth_meta.get("name"),
+                booth_meta.get("number"),
+                booth_meta.get("code"),
+            ]
+        )
+
+    return _candidate_booth_keys(values)
+
+
+def _booth_match_values(node: Dict[str, Any]) -> set[str]:
+    return _candidate_booth_keys(
+        node.get("booth_id"),
+        node.get("id"),
+        node.get("label"),
+        node.get("name"),
+        node.get("number"),
+        node.get("code"),
+        node.get("key"),
+        node.get("slug"),
+        node.get("booth"),
+        node.get("title"),
+        node.get("boothId"),
+        node.get("assignedBoothId"),
+        node.get("assigned_booth_id"),
+    )
+
+
+def _booth_price_from_node(node: Dict[str, Any]) -> int:
+    for price_key in (
+        "priceCents",
+        "price_cents",
+        "amountCents",
+        "amount_cents",
+        "boothPriceCents",
+        "booth_price_cents",
+        "boothAmountCents",
+        "booth_amount_cents",
+        "boothPrice",
+        "booth_price",
+        "price",
+        "amount",
+        "cost",
+        "fee",
+    ):
+        cents = _extract_price_to_cents(node.get(price_key))
+        if cents > 0:
+            return cents
+    return 0
 
 
 def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -475,25 +586,64 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
             ):
                 found.append(node)
-            for _, value in node.items():
-                if isinstance(value, (dict, list)):
-                    visit(value)
-        elif isinstance(node, list):
-            for item in node:
-                visit(item)
-
-    visit(event)
-    return found
-
-
-def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    booth_id = str(app.get("booth_id") or "").strip()
-    if not booth_id:
+            for _, value in node.def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
+    booth_keys = _app_booth_candidates(app)
+    if not booth_keys:
         return 0
 
     event = _EVENTS.get(int(app.get("event_id") or 0), {})
-    booth_keys = _candidate_booth_keys(booth_id)
+    if not isinstance(event, dict):
+        return 0
 
+    def maybe_price_from_booth(booth: Any, extra_keys: Optional[List[Any]] = None) -> int:
+        if not isinstance(booth, dict):
+            return 0
+        match_values = _booth_match_values(booth)
+        if extra_keys:
+            match_values |= _candidate_booth_keys(extra_keys)
+        if booth_keys & match_values:
+            return _booth_price_from_node(booth)
+        return 0
+
+    def scan_container(container: Any, container_key: str = "") -> int:
+        if isinstance(container, dict):
+            for k, booth in container.items():
+                extra = [container_key, k]
+                if isinstance(booth, dict):
+                    cents = maybe_price_from_booth(booth, extra)
+                    if cents > 0:
+                        return cents
+                    booth_meta = booth.get("booth")
+                    if isinstance(booth_meta, dict):
+                        merged = dict(booth_meta)
+                        for key in (
+                            "priceCents",
+                            "price_cents",
+                            "amountCents",
+                            "amount_cents",
+                            "boothPrice",
+                            "booth_price",
+                            "price",
+                            "amount",
+                            "cost",
+                            "fee",
+                        ):
+                            if key not in merged and key in booth:
+                                merged[key] = booth.get(key)
+                        cents = maybe_price_from_booth(merged, extra)
+                        if cents > 0:
+                            return cents
+                cents = scan_container(booth, str(k))
+                if cents > 0:
+                    return cents
+        elif isinstance(container, list):
+            for index, booth in enumerate(container):
+                cents = scan_container(booth, f"{container_key}[{index}]")
+                if cents > 0:
+                    return cents
+        return 0
+
+    # 1) Direct event-level containers used by older event payloads.
     for container_key in (
         "booths",
         "layout",
@@ -503,69 +653,65 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
         "layout_items",
         "map_items",
         "items",
+        "sections",
+        "elements",
+        "nodes",
     ):
-        container = event.get(container_key)
-        if isinstance(container, dict):
-            for k, booth in container.items():
-                if str(k).strip() in booth_keys and isinstance(booth, dict):
-                    for price_key in (
-                        "price_cents",
-                        "amount_cents",
-                        "booth_price",
-                        "price",
-                        "amount",
-                        "cost",
-                    ):
-                        cents = _extract_price_to_cents(booth.get(price_key))
-                        if cents > 0:
-                            return cents
-        elif isinstance(container, list):
-            for booth in container:
+        cents = scan_container(event.get(container_key), container_key)
+        if cents > 0:
+            return cents
+
+    # 2) Organizer DiagramEditor shape: event.diagram.diagram.boothMap[label] = { priceCents, ... }
+    diagram_slot = event.get("diagram")
+    diagram_doc: Dict[str, Any] = {}
+    if isinstance(diagram_slot, dict):
+        if isinstance(diagram_slot.get("diagram"), dict):
+            diagram_doc = diagram_slot.get("diagram") or {}
+        else:
+            diagram_doc = diagram_slot
+
+    if isinstance(diagram_doc, dict):
+        booth_map = diagram_doc.get("boothMap")
+        if isinstance(booth_map, dict):
+            for label, booth in booth_map.items():
                 if not isinstance(booth, dict):
                     continue
-                booth_match_values = {
-                    str(booth.get("booth_id") or "").strip(),
-                    str(booth.get("id") or "").strip(),
-                    str(booth.get("label") or "").strip(),
-                    str(booth.get("name") or "").strip(),
-                    str(booth.get("number") or "").strip(),
-                    str(booth.get("code") or "").strip(),
-                }
-                if booth_match_values & booth_keys:
-                    for price_key in (
-                        "price_cents",
-                        "amount_cents",
-                        "booth_price",
-                        "price",
-                        "amount",
-                        "cost",
-                    ):
-                        cents = _extract_price_to_cents(booth.get(price_key))
-                        if cents > 0:
-                            return cents
-
-    for booth in _extract_booths_from_event(event):
-        booth_match_values = {
-            str(booth.get("booth_id") or "").strip(),
-            str(booth.get("id") or "").strip(),
-            str(booth.get("label") or "").strip(),
-            str(booth.get("name") or "").strip(),
-            str(booth.get("number") or "").strip(),
-            str(booth.get("code") or "").strip(),
-        }
-        if booth_match_values & booth_keys:
-            for price_key in (
-                "price_cents",
-                "amount_cents",
-                "booth_price",
-                "price",
-                "amount",
-                "cost",
-            ):
-                cents = _extract_price_to_cents(booth.get(price_key))
+                cents = maybe_price_from_booth(booth, [label, booth.get("label"), booth.get("name")])
                 if cents > 0:
                     return cents
+
+        # Some saved diagrams use root-level booths/levels instead of boothMap.
+        cents = scan_container(diagram_doc.get("booths"), "diagram.booths")
+        if cents > 0:
+            return cents
+        cents = scan_container(diagram_doc.get("levels"), "diagram.levels")
+        if cents > 0:
+            return cents
+        cents = scan_container(diagram_doc.get("elements"), "diagram.elements")
+        if cents > 0:
+            return cents
+
+    # 3) Generic deep scan fallback for any nested event shape.
+    cents = scan_container(event, "event")
+    if cents > 0:
+        return cents
+
+    for booth in _extract_booths_from_event(event):
+        cents = maybe_price_from_booth(booth)
+        if cents > 0:
+            return cents
+
     return 0
+  elif isinstance(node, list):
+            for item in node:
+                cents = deep_search(item, parent_key)
+                if cents > 0:
+                    return cents
+
+        return 0
+
+    return deep_search(event)
+
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
@@ -573,11 +719,15 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
     if event_cents > 0:
         return event_cents
 
-    direct_amount = _extract_price_to_cents(app.get("amount_cents"))
-    if direct_amount > 0:
-        return direct_amount
-
-    for key in ("booth_price", "price", "amount", "cost"):
+    for key in (
+        "checkout_amount_cents_locked",
+        "paid_amount_cents_locked",
+        "amount_cents",
+        "booth_price",
+        "price",
+        "amount",
+        "cost",
+    ):
         cents = _extract_price_to_cents(app.get(key))
         if cents > 0:
             return cents
@@ -593,19 +743,23 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
     return 0
 
 
+
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
-    locked_cents = app.get("paid_amount_cents_locked")
-    try:
-        if locked_cents is not None and int(locked_cents) > 0:
-            return int(locked_cents)
-    except Exception:
-        pass
+    for key in ("checkout_amount_cents_locked", "paid_amount_cents_locked"):
+        try:
+            locked_cents = app.get(key)
+            if locked_cents is not None and int(locked_cents) > 0:
+                return int(locked_cents)
+        except Exception:
+            pass
 
     cents = _persist_resolved_booth_price(app)
     if cents > 0:
         return cents
+
     raise HTTPException(
-        status_code=400, detail="No valid booth price found for this application."
+        status_code=400,
+        detail=f"Booth price not found for booth_id={app.get('booth_id')!r}",
     )
 
 
@@ -894,6 +1048,28 @@ def _require_organizer_or_admin(user: Dict[str, Any]) -> None:
     role = str(user.get("role") or "").strip().lower()
     if role not in {"organizer", "admin"}:
         raise HTTPException(status_code=403, detail="Organizer access required.")
+
+
+def _ensure_event_access_for_current_organizer(
+    event: Dict[str, Any], user: Dict[str, Any]
+) -> None:
+    organizer_email = _norm_email(user.get("email"))
+    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
+
+    if str(user.get("role") or "").strip().lower() == "admin":
+        return
+
+    if _matches_current_organizer(
+        organizer_email=organizer_email,
+        organizer_id=organizer_id,
+        record_email=event.get("organizer_email") or event.get("owner_email"),
+        record_id=event.get("organizer_id")
+        or event.get("owner_id")
+        or event.get("created_by"),
+    ):
+        return
+
+    raise HTTPException(status_code=403, detail="Not allowed to view this event")
 
 
 def _mark_application_paid(
@@ -1404,27 +1580,7 @@ def organizer_list_event_applications(
     expire_reservations_if_needed()
 
     event = get_event_or_404(event_id)
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     apps = [
         dict(a)
@@ -1460,26 +1616,7 @@ def organizer_get_application(
     expire_reservations_if_needed()
     event = get_event_or_404(event_id)
 
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     app = dict(get_application_or_404(app_id))
     if int(app.get("event_id") or 0) != int(event_id):
@@ -1500,26 +1637,7 @@ def organizer_event_stats(event_id: int, user: dict = Depends(get_current_user))
     expire_reservations_if_needed()
     event = dict(get_event_or_404(event_id))
 
-    organizer_email = _norm_email(user.get("email"))
-    organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
-    event_email = _norm_email(event.get("organizer_email") or event.get("owner_email"))
-    event_owner_id = (
-        event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
-    )
-
-    allowed = False
-    if organizer_email and event_email and event_email == organizer_email:
-        allowed = True
-    if (
-        organizer_id is not None
-        and event_owner_id is not None
-        and str(event_owner_id) == str(organizer_id)
-    ):
-        allowed = True
-    if str(user.get("role") or "").strip().lower() == "admin":
-        allowed = True
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Not allowed to view this event")
+    _ensure_event_access_for_current_organizer(event, user)
 
     apps = [
         a
@@ -1827,6 +1945,7 @@ def _ensure_can_pay_now(app: Dict[str, Any]):
     return pay
 
 
+
 @router.post("/vendor/applications/{app_id}/pay-now")
 def vendor_pay_now(
     app_id: int,
@@ -1839,7 +1958,25 @@ def vendor_pay_now(
         raise HTTPException(status_code=403, detail="Forbidden")
     _ensure_can_pay_now(app)
 
-    amount_cents = _get_amount_cents_from_app(app)
+    amount_cents = _find_event_booth_price_cents(app)
+    if amount_cents <= 0:
+        amount_cents = _find_booth_price_cents_for_app(app)
+    if amount_cents <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Booth price not found for booth_id={app.get('booth_id')!r}",
+        )
+
+    app["checkout_amount_cents_locked"] = amount_cents
+    app["checkout_booth_id_locked"] = str(
+        app.get("booth_id")
+        or app.get("requested_booth_id")
+        or app.get("checkout_booth_id_locked")
+        or ""
+    ).strip() or None
+    app["checkout_started_at"] = utc_now_iso()
+    app["amount_cents"] = amount_cents
+    app["booth_price"] = round(amount_cents / 100.0, 2)
 
     body_success_url = body.success_url if body else None
     body_cancel_url = body.cancel_url if body else None
@@ -1848,10 +1985,13 @@ def vendor_pay_now(
 
     frontend_base = (
         os.getenv("FRONTEND_BASE_URL")
-        or "https://event-app-frontend-pfugcs6ui-tscottcounsel-stacks-projects.vercel.app"
+        or "https://event-app-frontend-7xlfphwaf-tscottcounsel-stacks-projects.vercel.app"
     ).rstrip("/")
 
-    default_success = f"{frontend_base}/vendor/applications?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
+    default_success = (
+        f"{frontend_base}/vendor/applications"
+        f"?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
+    )
     success_url = (body_success_url or default_success).strip()
     cancel_url = (
         body_cancel_url or f"{frontend_base}/vendor/applications?payment=cancel"
@@ -1887,7 +2027,7 @@ def vendor_pay_now(
                 "event_id": str(app.get("event_id") or ""),
                 "vendor_email": str(app.get("vendor_email") or ""),
                 "vendor_id": str(app.get("vendor_id") or ""),
-                "booth_id": str(app.get("booth_id") or ""),
+                "booth_id": str(app.get("checkout_booth_id_locked") or app.get("booth_id") or ""),
                 "amount_cents": str(amount_cents),
             },
         )
@@ -1925,84 +2065,25 @@ def vendor_create_checkout_session_legacy(
 
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
-def vendor_confirm_payment(
-    app_id: int,
-    body: Dict[str, Any] = Body(default={}),
-    user: dict = Depends(get_current_user),
-):
-    if not _is_dev_mode():
-        raise HTTPException(
-            status_code=403,
-            detail="Frontend payment confirmation is disabled outside development. Rely on Stripe webhook.",
-        )
-
+def confirm_payment(app_id: int, user: dict = Depends(get_current_user)):
     app = get_application_or_404(app_id)
+
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if _payment_exists_for_application(app_id):
-        return {"ok": True, "already_paid": True}
+    amount_cents = app.get("checkout_amount_cents_locked")
 
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-
-    try:
-        import stripe
-
-        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-        if not secret:
-            raise RuntimeError("STRIPE_SECRET_KEY not set")
-
-        stripe.api_key = secret
-        session = stripe.checkout.Session.retrieve(session_id)
-
-        if not session:
-            raise HTTPException(status_code=404, detail="Stripe session not found")
-
-        payment_status = str(getattr(session, "payment_status", "") or "")
-        status = str(getattr(session, "status", "") or "")
-        if payment_status != "paid" and status != "complete":
-            raise HTTPException(status_code=400, detail="Stripe session not paid")
-
-        metadata = getattr(session, "metadata", None) or {}
-        session_app_id = str(metadata.get("application_id") or "").strip()
-        if session_app_id and session_app_id != str(app_id):
-            raise HTTPException(
-                status_code=400, detail="Stripe session does not match this application"
-            )
-
-        expected_amount_cents = _get_amount_cents_from_app(app)
-        amount_total = getattr(session, "amount_total", None)
-        if amount_total is not None:
-            try:
-                if int(amount_total) != int(expected_amount_cents):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Stripe amount does not match application total",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                raise HTTPException(
-                    status_code=400, detail="Invalid Stripe amount_total"
-                )
-
-        amount = (
-            round((int(amount_total) / 100.0), 2)
-            if amount_total is not None
-            else round(expected_amount_cents / 100.0, 2)
+    if not amount_cents or int(amount_cents) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No locked checkout amount found"
         )
-        payment = _mark_application_paid(
-            app, amount, user=user, source="frontend_confirm_dev"
-        )
-        return {"ok": True, "application_id": app_id, "payment": payment}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Payment confirmation failed: {e}")
 
+    amount = int(amount_cents) / 100
 
+    _mark_application_paid(app, amount, user=user, source="frontend_confirm")
+
+    return {"ok": True}
 @router.post("/applications/{application_id}/mark-paid")
 def mark_application_paid(application_id: int, user: dict = Depends(get_current_user)):
     _require_admin(user)
