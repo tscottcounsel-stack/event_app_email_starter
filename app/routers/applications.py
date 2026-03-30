@@ -514,13 +514,76 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
 
     event = _EVENTS.get(int(app.get("event_id") or 0), {})
     booth_keys = _candidate_booth_keys(booth_id)
+    booth_keys_normalized = {_normalize_booth_key(v) for v in booth_keys if v}
+    booth_keys_normalized = {v for v in booth_keys_normalized if v}
 
     def booth_matches(*values: Any) -> bool:
         raw_values = {str(v or "").strip() for v in values if str(v or "").strip()}
         normalized_values = {_normalize_booth_key(v) for v in raw_values}
         normalized_values = {v for v in normalized_values if v}
-        return bool((raw_values & booth_keys) or (normalized_values & booth_keys))
+        return bool((raw_values & booth_keys) or (normalized_values & booth_keys_normalized))
 
+    def price_from_booth(booth: Dict[str, Any]) -> int:
+        for price_key in (
+            "price_cents",
+            "amount_cents",
+            "booth_price",
+            "price",
+            "amount",
+            "cost",
+        ):
+            cents = _extract_price_to_cents(booth.get(price_key))
+            if cents > 0:
+                return cents
+        return 0
+
+    def search_node(node: Any, parent_key: str = "") -> int:
+        if isinstance(node, dict):
+            direct_price = 0
+            if booth_matches(
+                parent_key,
+                node.get("booth_id"),
+                node.get("id"),
+                node.get("label"),
+                node.get("name"),
+                node.get("number"),
+                node.get("code"),
+                node.get("key"),
+                node.get("uid"),
+            ):
+                direct_price = price_from_booth(node)
+                if direct_price > 0:
+                    return direct_price
+
+            # Support shapes like {"booth_abc": {"pricing": {"price": 300}}}
+            nested_price_sources = (
+                node.get("pricing"),
+                node.get("pricing_data"),
+                node.get("payment"),
+                node.get("fees"),
+                node.get("meta"),
+            )
+            if booth_matches(parent_key, node.get("booth_id"), node.get("id")):
+                for nested in nested_price_sources:
+                    if isinstance(nested, dict):
+                        cents = price_from_booth(nested)
+                        if cents > 0:
+                            return cents
+
+            for k, v in node.items():
+                cents = search_node(v, str(k))
+                if cents > 0:
+                    return cents
+
+        elif isinstance(node, list):
+            for item in node:
+                cents = search_node(item, parent_key)
+                if cents > 0:
+                    return cents
+
+        return 0
+
+    # First, check the most likely top-level containers.
     for container_key in (
         "booths",
         "layout",
@@ -532,53 +595,14 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
         "items",
     ):
         container = event.get(container_key)
-        if isinstance(container, dict):
-            for k, booth in container.items():
-                if not isinstance(booth, dict):
-                    continue
-                if booth_matches(
-                    k,
-                    booth.get("booth_id"),
-                    booth.get("id"),
-                    booth.get("label"),
-                    booth.get("name"),
-                    booth.get("number"),
-                    booth.get("code"),
-                ):
-                    for price_key in (
-                        "price_cents",
-                        "amount_cents",
-                        "booth_price",
-                        "price",
-                        "amount",
-                        "cost",
-                    ):
-                        cents = _extract_price_to_cents(booth.get(price_key))
-                        if cents > 0:
-                            return cents
-        elif isinstance(container, list):
-            for booth in container:
-                if not isinstance(booth, dict):
-                    continue
-                if booth_matches(
-                    booth.get("booth_id"),
-                    booth.get("id"),
-                    booth.get("label"),
-                    booth.get("name"),
-                    booth.get("number"),
-                    booth.get("code"),
-                ):
-                    for price_key in (
-                        "price_cents",
-                        "amount_cents",
-                        "booth_price",
-                        "price",
-                        "amount",
-                        "cost",
-                    ):
-                        cents = _extract_price_to_cents(booth.get(price_key))
-                        if cents > 0:
-                            return cents
+        cents = search_node(container, container_key)
+        if cents > 0:
+            return cents
+
+    # Then deep-scan the whole event for any matching booth object.
+    cents = search_node(event)
+    if cents > 0:
+        return cents
 
     for booth in _extract_booths_from_event(event):
         if booth_matches(
@@ -588,18 +612,13 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
             booth.get("name"),
             booth.get("number"),
             booth.get("code"),
+            booth.get("key"),
+            booth.get("uid"),
         ):
-            for price_key in (
-                "price_cents",
-                "amount_cents",
-                "booth_price",
-                "price",
-                "amount",
-                "cost",
-            ):
-                cents = _extract_price_to_cents(booth.get(price_key))
-                if cents > 0:
-                    return cents
+            cents = price_from_booth(booth)
+            if cents > 0:
+                return cents
+
     return 0
 
 
