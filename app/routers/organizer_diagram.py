@@ -4,6 +4,8 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from datetime import datetime, timezone
+
 from app.routers.auth import get_current_user
 from app.store import _EVENTS
 
@@ -117,34 +119,20 @@ def save_event_diagram(
     payload: Dict[str, Any],
     user: dict = Depends(get_current_user),
 ):
-    """
-    Save or update the diagram for an event.
-
-    Expected payload:
-    {
-        "diagram": { ... },
-        "expect_version": number | null
-    }
-    """
-
     event = _get_event_or_404(event_id)
     _ensure_event_access(event, user)
 
     diagram = payload.get("diagram")
     expect_version = payload.get("expect_version")
 
-    if not diagram:
+    if not isinstance(diagram, dict):
         raise HTTPException(status_code=400, detail="diagram is required")
 
     current = _DIAGRAM_STORE.get(event_id)
 
-    # Version check (optimistic locking)
     if current and expect_version is not None:
         if current["version"] != expect_version:
-            raise HTTPException(
-                status_code=409,
-                detail="Diagram version mismatch",
-            )
+            raise HTTPException(status_code=409, detail="Diagram version mismatch")
 
     next_version = 1 if not current else current["version"] + 1
 
@@ -156,4 +144,10 @@ def save_event_diagram(
     }
 
     _DIAGRAM_STORE[event_id] = saved
+
+    # IMPORTANT: mirror diagram onto the actual event so pricing code in
+    # applications.py can resolve booth prices from _EVENTS
+    event["diagram"] = diagram
+    event["updated_at"] = datetime.now(timezone.utc).isoformat()
+
     return saved
