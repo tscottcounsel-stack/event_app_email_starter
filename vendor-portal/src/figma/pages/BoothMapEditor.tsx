@@ -332,51 +332,73 @@ export default function BoothMapEditor() {
   const isVendorRoute = location.pathname.startsWith("/vendor/");
   const vendorMode = Boolean(isVendorRoute && !pickerMode);
 
-  useEffect(() => {
-    if (!vendorMode) return;
-    if (!eventId) return;
-    if (vendorAppId) return;
+useEffect(() => {
+  if (!vendorMode) return;
+  if (!eventId) return;
 
-    let cancelled = false;
+  let cancelled = false;
 
-    async function fixAppId() {
-      try {
-        const draft = await vendorGetOrCreateDraftApplication(Number(eventId));
+  async function fixAppId() {
+    try {
+      let needsRepair = false;
 
-        const resolvedDraftId =
-          (draft as any)?.id ??
-          (draft as any)?.application?.id ??
-          (draft as any)?.applicationId ??
-          (draft as any)?.application_id ??
-          (draft as any)?.data?.id ??
-          (draft as any)?.data?.application?.id ??
-          (draft as any)?.data?.applicationId ??
-          (draft as any)?.data?.application_id;
+      if (!vendorAppId) {
+        needsRepair = true;
+      } else {
+        try {
+          const existing = await vendorGetApplication({ applicationId: vendorAppId });
 
-        const numericId = Number(resolvedDraftId);
-        if (!numericId || Number.isNaN(numericId)) return;
-        if (cancelled) return;
+          const existingEventId = String(
+            (existing as any)?.event_id ??
+            (existing as any)?.eventId ??
+            (existing as any)?.event?.id ??
+            ""
+          ).trim();
 
-        const params = new URLSearchParams(location.search);
-        params.delete("appld");
-        params.delete("applicationId");
-        params.set("appId", String(numericId));
-
-        navigate(
-          `/vendor/events/${encodeURIComponent(String(eventId))}/map?${params.toString()}`,
-          { replace: true }
-        );
-      } catch (e) {
-        console.error("Failed to self-heal appId", e);
+          if (!existingEventId || existingEventId !== String(eventId)) {
+            needsRepair = true;
+          }
+        } catch {
+          needsRepair = true;
+        }
       }
+
+      if (!needsRepair) return;
+
+      const draft = await vendorGetOrCreateDraftApplication(Number(eventId));
+
+      const resolvedDraftId =
+        (draft as any)?.id ??
+        (draft as any)?.application?.id ??
+        (draft as any)?.applicationId ??
+        (draft as any)?.application_id ??
+        (draft as any)?.data?.id ??
+        (draft as any)?.data?.application?.id ??
+        (draft as any)?.data?.applicationId ??
+        (draft as any)?.data?.application_id;
+
+      const numericId = Number(resolvedDraftId);
+      if (!numericId || Number.isNaN(numericId)) return;
+      if (cancelled) return;
+
+      const params = new URLSearchParams(location.search);
+      params.set("appId", String(numericId));
+
+      navigate(
+        `/vendor/events/${encodeURIComponent(String(eventId))}/map?${params.toString()}`,
+        { replace: true }
+      );
+    } catch (e) {
+      console.error("Failed to fix appId", e);
     }
+  }
 
-    fixAppId();
+  fixAppId();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [vendorMode, eventId, vendorAppId, location.search, navigate]);
+  return () => {
+    cancelled = true;
+  };
+}, [vendorMode, eventId, vendorAppId, location.search, navigate]);
 
   const [isPublished, setIsPublished] = useState<boolean>(false);
   const [layoutOverrideUntil, setLayoutOverrideUntil] = useState<number | null>(null);
