@@ -767,48 +767,15 @@ useEffect(() => {
         );
         setIsPublished(publishedFlag);
 
-        if (!apiHasLayout) {
-          const cached = safeJsonParse<any>(localStorage.getItem(lsDiagramKey(eventId)));
-          if (cached?.diagram) {
-            const dLocal = cached.diagram as DiagramDoc;
-            const publishedFlagLocal = Boolean(
-              (dLocal as any)?.published ?? (dLocal as any)?.meta?.published
-            );
-
-            setIsPublished(publishedFlagLocal);
-            setCanvasW(dLocal.canvas?.width ?? 1200);
-            setCanvasH(dLocal.canvas?.height ?? 800);
-            setGridSize(dLocal.canvas?.gridSize ?? 20);
-
-            if (dLocal.levels?.length) {
-              setLevels(
-                dLocal.levels.map((lvl) => ({
-                  id: lvl.id,
-                  name: lvl.name,
-                  booths: Array.isArray(lvl.booths) ? lvl.booths : [],
-                  elements: Array.isArray(lvl.elements) ? lvl.elements : [],
-                }))
-              );
-              setActiveLevelId(dLocal.levels[0].id);
-            } else if (Array.isArray(dLocal.booths)) {
-              setLevels([
-                {
-                  id: "level-1",
-                  name: "Level 1",
-                  booths: dLocal.booths,
-                  elements: Array.isArray(dLocal.elements) ? dLocal.elements : [],
-                },
-              ]);
-              setActiveLevelId("level-1");
-            }
-
-            setStatusMsg("Loaded (local)");
-            return;
-          }
-
-          setStatusMsg("No saved diagram found");
-          return;
-        }
+       if (!apiHasLayout) {
+  // 🚫 Do NOT load from localStorage
+  setLevels([
+    { id: "level-1", name: "Level 1", booths: [], elements: [] },
+  ]);
+  setActiveLevelId("level-1");
+  setStatusMsg("New diagram initialized");
+  return;
+}
 
         const d = apiDiagram as DiagramDoc;
         setCanvasW(d.canvas?.width ?? 1200);
