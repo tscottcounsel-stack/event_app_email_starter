@@ -500,18 +500,27 @@ export default function VendorEventMapLayoutPage() {
     return s === "available";
   }
 
-  async function selectBooth(b: Booth) {
+ async function selectBooth(b: Booth) {
     if (!isBoothSelectable(b)) return;
+
     const nextBoothId = String(b.id);
+    const boothPrice = Number(b.price || 0);
+
     setSelectedBoothId(nextBoothId);
     setSaveSelectionError(null);
 
     try {
       setSaveSelectionBusy(true);
-      const saved = await persistBoothSelection(nextBoothId);
+
+      const saved = await persistBoothSelection({
+        booth_id: nextBoothId,
+        booth_price: boothPrice,
+      });
+
       await loadVendorApps();
 
       const savedAppId = String((saved as any)?.id || "").trim();
+
       if (eventId && savedAppId && savedAppId !== String(appId || "").trim()) {
         navigate(
           `/vendor/events/${encodeURIComponent(String(eventId))}/layout?appId=${encodeURIComponent(savedAppId)}`,
@@ -523,7 +532,12 @@ export default function VendorEventMapLayoutPage() {
     } finally {
       setSaveSelectionBusy(false);
     }
+  } catch (e: any) {
+    setSaveSelectionError(e?.message || "Failed to save booth request.");
+  } finally {
+    setSaveSelectionBusy(false);
   }
+}
 
   function clearSelection() {
     setSelectedBoothId(null);
@@ -644,15 +658,31 @@ export default function VendorEventMapLayoutPage() {
     return out;
   }
 
-  async function persistBoothSelection(nextBoothId: string) {
-    if (!eventId) throw new Error("Missing eventId.");
+ async function persistBoothSelection(payload: {
+    booth_id: string;
+    booth_price: number;
+  }) {
+    if (!eventId) {
+      throw new Error("Missing event ID.");
+    }
 
     const progress = loadVendorProgress(String(eventId), appId || undefined);
-    const body = {
-      requested_booth_id: String(nextBoothId),
-      checked: normalizeCheckedForSubmit(progress?.checked),
-      notes: (typeof progress?.notes === "string" ? progress.notes : "") || "",
-    };
+    const checked = normalizeCheckedForSubmit(progress?.checked);
+    const notes = String(progress?.notes || "").trim();
+
+    const createdOrUpdated = await vendorApplyToEvent({
+      eventId: Number(eventId),
+      body: {
+        booth_id: payload.booth_id,
+        booth_price: payload.booth_price,
+        checked,
+        notes,
+      } as any,
+    });
+
+    return ((createdOrUpdated as any)?.application ?? createdOrUpdated ?? null) as any;
+  },
+});
 
     const existingAppId = String((activeEventApp as any)?.id || appId || "").trim();
 
@@ -706,7 +736,10 @@ export default function VendorEventMapLayoutPage() {
     loadVendorProfileSnapshot();
 
     try {
-      const applied = await persistBoothSelection(String(selectedBooth.id));
+      const applied = await persistBoothSelection({
+        booth_id: String(selectedBooth.id),
+        booth_price: Number(selectedBooth.price || 0),
+      });
       await submitApplication({ applicationId: (applied as any).id });
 
       navigate(
