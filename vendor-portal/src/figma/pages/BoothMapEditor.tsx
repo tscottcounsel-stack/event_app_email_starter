@@ -1234,22 +1234,7 @@ const overlayDetail = overlayName
       const savedBoothId = String(
         updated?.requested_booth_id || updated?.booth_id || boothLabelSafe
       ).trim();
-      setVendorBoothId(savedBoothId);const boothObj = activeLevel.booths.find(
-  (b: any) => String(b.id) === String(boothId)
-);
-
-const boothLabelSafe = boothObj?.label
-  ? String(boothObj.label).trim()
-  : String(boothId).trim();
-
-const updated = await vendorUpdateApplication({
-  applicationId: effectiveAppId,
-  booth_id: boothLabelSafe,
-} as any);
-
-const savedBoothId = String(
-  updated?.requested_booth_id || updated?.booth_id || boothLabelSafe
-).trim();
+      setVendorBoothId(savedBoothId);
 
       try {
         const result = await evaluateVendorSubmissionReadiness(effectiveAppId);
