@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -443,38 +442,121 @@ def _extract_price_to_cents(value: Any) -> int:
         return 0
 
 
-def _normalize_booth_key(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
+
+def _normalize_booth_token(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
         return ""
-
-    lowered = raw.lower().strip()
-    lowered = re.sub(r"[_\-]+", " ", lowered)
-    lowered = re.sub(r"\s+", " ", lowered)
-
-    compact = lowered.replace(" ", "")
-    if compact.startswith("booth"):
-        compact = compact[5:]
-
-    compact = re.sub(r"[^a-z0-9]", "", compact)
-    return compact
+    s = s.replace("_", " ").replace("-", " ")
+    s = " ".join(s.split()).lower()
+    if s.startswith("booth "):
+        tail = s[6:].strip()
+        if tail:
+            return tail
+    return s
 
 
-def _candidate_booth_keys(booth_id: Any) -> set[str]:
-    raw = str(booth_id or "").strip()
-    out = {raw}
+def _candidate_booth_keys(*values: Any) -> set[str]:
+    out: set[str] = set()
 
-    if raw.lower().startswith("booth "):
-        out.add(raw.split(" ", 1)[1].strip())
-    if raw.lower().startswith("booth"):
-        out.add(raw[5:].strip())
-    if raw.isdigit():
-        out.add(f"Booth {raw}")
-        out.add(f"booth_{raw}")
-        out.add(f"booth-{raw}")
+    def add(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
 
-    normalized = {_normalize_booth_key(x) for x in out if str(x or "").strip()}
-    return {x for x in out if x} | {x for x in normalized if x}
+        normalized = _normalize_booth_token(raw)
+        if normalized:
+            out.add(normalized)
+
+        out.add(raw)
+        out.add(raw.lower())
+
+        compact = raw.replace(" ", "")
+        if compact:
+            out.add(compact)
+            out.add(compact.lower())
+
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits:
+            out.add(digits)
+            out.add(f"Booth {digits}")
+            out.add(f"booth {digits}")
+            out.add(f"booth_{digits}")
+            out.add(f"booth-{digits}")
+
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+        else:
+            add(value)
+
+    return {x for x in out if str(x).strip()}
+
+
+def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
+    values = [
+        app.get("booth_id"),
+        app.get("requested_booth_id"),
+        app.get("checkout_booth_id_locked"),
+        app.get("booth_label"),
+        app.get("booth_name"),
+        app.get("booth_number"),
+        app.get("assigned_booth_id"),
+        app.get("assigned_booth_label"),
+        app.get("selected_booth_id"),
+        app.get("selected_booth_label"),
+        app.get("booth"),
+        app.get("selected_booth"),
+    ]
+
+    booth_meta = app.get("booth_meta")
+    if isinstance(booth_meta, dict):
+        values.extend(
+            [
+                booth_meta.get("id"),
+                booth_meta.get("booth_id"),
+                booth_meta.get("label"),
+                booth_meta.get("name"),
+                booth_meta.get("number"),
+                booth_meta.get("code"),
+            ]
+        )
+
+    return _candidate_booth_keys(values)
+
+
+def _booth_match_values(node: Dict[str, Any]) -> set[str]:
+    return _candidate_booth_keys(
+        node.get("booth_id"),
+        node.get("id"),
+        node.get("label"),
+        node.get("name"),
+        node.get("number"),
+        node.get("code"),
+        node.get("key"),
+        node.get("slug"),
+        node.get("booth"),
+        node.get("title"),
+    )
+
+
+def _booth_price_from_node(node: Dict[str, Any]) -> int:
+    for price_key in (
+        "price_cents",
+        "amount_cents",
+        "booth_price_cents",
+        "booth_amount_cents",
+        "booth_price",
+        "price",
+        "amount",
+        "cost",
+        "fee",
+    ):
+        cents = _extract_price_to_cents(node.get(price_key))
+        if cents > 0:
+            return cents
+    return 0
 
 
 def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -507,83 +589,26 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     return found
 
 
+
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    booth_id = str(app.get("booth_id") or app.get("requested_booth_id") or "").strip()
-    if not booth_id:
+    booth_keys = _app_booth_candidates(app)
+    if not booth_keys:
         return 0
 
     event = _EVENTS.get(int(app.get("event_id") or 0), {})
-    booth_keys = _candidate_booth_keys(booth_id)
-    booth_keys_normalized = {_normalize_booth_key(v) for v in booth_keys if v}
-    booth_keys_normalized = {v for v in booth_keys_normalized if v}
-
-    def booth_matches(*values: Any) -> bool:
-        raw_values = {str(v or "").strip() for v in values if str(v or "").strip()}
-        normalized_values = {_normalize_booth_key(v) for v in raw_values}
-        normalized_values = {v for v in normalized_values if v}
-        return bool((raw_values & booth_keys) or (normalized_values & booth_keys_normalized))
-
-    def price_from_booth(booth: Dict[str, Any]) -> int:
-        for price_key in (
-            "price_cents",
-            "amount_cents",
-            "booth_price",
-            "price",
-            "amount",
-            "cost",
-        ):
-            cents = _extract_price_to_cents(booth.get(price_key))
-            if cents > 0:
-                return cents
+    if not isinstance(event, dict):
         return 0
 
-    def search_node(node: Any, parent_key: str = "") -> int:
-        if isinstance(node, dict):
-            direct_price = 0
-            if booth_matches(
-                parent_key,
-                node.get("booth_id"),
-                node.get("id"),
-                node.get("label"),
-                node.get("name"),
-                node.get("number"),
-                node.get("code"),
-                node.get("key"),
-                node.get("uid"),
-            ):
-                direct_price = price_from_booth(node)
-                if direct_price > 0:
-                    return direct_price
-
-            # Support shapes like {"booth_abc": {"pricing": {"price": 300}}}
-            nested_price_sources = (
-                node.get("pricing"),
-                node.get("pricing_data"),
-                node.get("payment"),
-                node.get("fees"),
-                node.get("meta"),
-            )
-            if booth_matches(parent_key, node.get("booth_id"), node.get("id")):
-                for nested in nested_price_sources:
-                    if isinstance(nested, dict):
-                        cents = price_from_booth(nested)
-                        if cents > 0:
-                            return cents
-
-            for k, v in node.items():
-                cents = search_node(v, str(k))
-                if cents > 0:
-                    return cents
-
-        elif isinstance(node, list):
-            for item in node:
-                cents = search_node(item, parent_key)
-                if cents > 0:
-                    return cents
-
+    def maybe_price_from_booth(booth: Any, extra_keys: Optional[List[Any]] = None) -> int:
+        if not isinstance(booth, dict):
+            return 0
+        match_values = _booth_match_values(booth)
+        if extra_keys:
+            match_values |= _candidate_booth_keys(extra_keys)
+        if booth_keys & match_values:
+            return _booth_price_from_node(booth)
         return 0
 
-    # First, check the most likely top-level containers.
     for container_key in (
         "booths",
         "layout",
@@ -593,39 +618,77 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
         "layout_items",
         "map_items",
         "items",
+        "sections",
+        "elements",
+        "nodes",
     ):
         container = event.get(container_key)
-        cents = search_node(container, container_key)
+        if isinstance(container, dict):
+            for k, booth in container.items():
+                cents = maybe_price_from_booth(booth, [k])
+                if cents > 0:
+                    return cents
+        elif isinstance(container, list):
+            for index, booth in enumerate(container):
+                cents = maybe_price_from_booth(booth, [container_key, index])
+                if cents > 0:
+                    return cents
+
+    for booth in _extract_booths_from_event(event):
+        cents = maybe_price_from_booth(booth)
         if cents > 0:
             return cents
 
-    # Then deep-scan the whole event for any matching booth object.
-    cents = search_node(event)
-    if cents > 0:
-        return cents
-
-    for booth in _extract_booths_from_event(event):
-        if booth_matches(
-            booth.get("booth_id"),
-            booth.get("id"),
-            booth.get("label"),
-            booth.get("name"),
-            booth.get("number"),
-            booth.get("code"),
-            booth.get("key"),
-            booth.get("uid"),
-        ):
-            cents = price_from_booth(booth)
+    def deep_search(node: Any, parent_key: str = "") -> int:
+        if isinstance(node, dict):
+            cents = maybe_price_from_booth(node, [parent_key])
             if cents > 0:
                 return cents
 
-    return 0
+            booth_meta = node.get("booth")
+            if isinstance(booth_meta, dict):
+                merged = dict(booth_meta)
+                for key in ("price", "price_cents", "amount", "amount_cents", "cost", "booth_price"):
+                    if key not in merged and key in node:
+                        merged[key] = node.get(key)
+                cents = maybe_price_from_booth(merged, [parent_key])
+                if cents > 0:
+                    return cents
+
+            for key, value in node.items():
+                cents = deep_search(value, str(key))
+                if cents > 0:
+                    return cents
+
+        elif isinstance(node, list):
+            for item in node:
+                cents = deep_search(item, parent_key)
+                if cents > 0:
+                    return cents
+
+        return 0
+
+    return deep_search(event)
+
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
     event_cents = _find_event_booth_price_cents(app)
     if event_cents > 0:
         return event_cents
+
+    for key in (
+        "checkout_amount_cents_locked",
+        "paid_amount_cents_locked",
+        "amount_cents",
+        "booth_price",
+        "price",
+        "amount",
+        "cost",
+    ):
+        cents = _extract_price_to_cents(app.get(key))
+        if cents > 0:
+            return cents
     return 0
 
 
@@ -638,24 +701,23 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
     return 0
 
 
+
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
-    for lock_key in ("checkout_amount_cents_locked", "paid_amount_cents_locked"):
-        locked_cents = app.get(lock_key)
+    for key in ("checkout_amount_cents_locked", "paid_amount_cents_locked"):
         try:
+            locked_cents = app.get(key)
             if locked_cents is not None and int(locked_cents) > 0:
                 return int(locked_cents)
         except Exception:
             pass
 
-    cents = _find_event_booth_price_cents(app)
+    cents = _persist_resolved_booth_price(app)
     if cents > 0:
-        app["amount_cents"] = cents
-        app["booth_price"] = round(cents / 100.0, 2)
         return cents
 
     raise HTTPException(
         status_code=400,
-        detail=f"No valid booth price found for application #{app.get('id')} booth_id={app.get('booth_id') or app.get('requested_booth_id')!r}",
+        detail=f"Booth price not found for booth_id={app.get('booth_id')!r}",
     )
 
 
@@ -1841,6 +1903,7 @@ def _ensure_can_pay_now(app: Dict[str, Any]):
     return pay
 
 
+
 @router.post("/vendor/applications/{app_id}/pay-now")
 def vendor_pay_now(
     app_id: int,
@@ -1855,15 +1918,20 @@ def vendor_pay_now(
 
     amount_cents = _find_event_booth_price_cents(app)
     if amount_cents <= 0:
+        amount_cents = _find_booth_price_cents_for_app(app)
+    if amount_cents <= 0:
         raise HTTPException(
             status_code=400,
-            detail=f"Booth price not found for booth_id={app.get('booth_id') or app.get('requested_booth_id')!r}",
+            detail=f"Booth price not found for booth_id={app.get('booth_id')!r}",
         )
 
     app["checkout_amount_cents_locked"] = amount_cents
-    app["checkout_booth_id_locked"] = (
-        str(app.get("booth_id") or app.get("requested_booth_id") or "").strip() or None
-    )
+    app["checkout_booth_id_locked"] = str(
+        app.get("booth_id")
+        or app.get("requested_booth_id")
+        or app.get("checkout_booth_id_locked")
+        or ""
+    ).strip() or None
     app["checkout_started_at"] = utc_now_iso()
     app["amount_cents"] = amount_cents
     app["booth_price"] = round(amount_cents / 100.0, 2)
@@ -1917,7 +1985,7 @@ def vendor_pay_now(
                 "event_id": str(app.get("event_id") or ""),
                 "vendor_email": str(app.get("vendor_email") or ""),
                 "vendor_id": str(app.get("vendor_id") or ""),
-                "booth_id": str(app.get("booth_id") or ""),
+                "booth_id": str(app.get("checkout_booth_id_locked") or app.get("booth_id") or ""),
                 "amount_cents": str(amount_cents),
             },
         )
@@ -1960,6 +2028,12 @@ def vendor_confirm_payment(
     body: Dict[str, Any] = Body(default={}),
     user: dict = Depends(get_current_user),
 ):
+    if not _is_dev_mode():
+        raise HTTPException(
+            status_code=403,
+            detail="Frontend payment confirmation is disabled outside development. Rely on Stripe webhook.",
+        )
+
     app = get_application_or_404(app_id)
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -2018,7 +2092,7 @@ def vendor_confirm_payment(
             else round(expected_amount_cents / 100.0, 2)
         )
         payment = _mark_application_paid(
-            app, amount, user=user, source="frontend_confirm"
+            app, amount, user=user, source="frontend_confirm_dev"
         )
         return {"ok": True, "application_id": app_id, "payment": payment}
     except HTTPException:
