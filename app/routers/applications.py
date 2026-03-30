@@ -626,11 +626,6 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
 
     return 0
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
-    # ✅ FIXED INDENTATION (this was your crash)
-    event_cents = _find_event_booth_price_cents(app) or 0
-    if event_cents > 0:
-        return event_cents
-
     direct_amount = _extract_price_to_cents(app.get("amount_cents"))
     if direct_amount > 0:
         return direct_amount
@@ -639,6 +634,10 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
         cents = _extract_price_to_cents(app.get(key))
         if cents > 0:
             return cents
+
+    event_cents = _find_event_booth_price_cents(app) or 0
+    if event_cents > 0:
+        return event_cents
 
     return 0
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
@@ -1020,6 +1019,7 @@ class ReviewCreateBody(BaseModel):
 class ApplyBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
     booth_id: Optional[str] = None
+    booth_price: Optional[float] = None
     notes: Optional[str] = None
     checked: Optional[Dict[str, bool]] = None
 
@@ -1038,6 +1038,7 @@ class ApplicationProgressUpdate(BaseModel):
     docs: Optional[Dict[str, List[UploadedDocMeta]]] = None
     documents: Optional[Dict[str, Any]] = None
     booth_id: Optional[str] = None
+    booth_price: Optional[float] = None
     booth_category_id: Optional[str] = None
 
 
@@ -1133,6 +1134,15 @@ def apply_to_event(
         requested_booth_id = str(body.booth_id or "").strip()
         app["requested_booth_id"] = requested_booth_id or None
 
+    if body.booth_price is not None:
+        try:
+            booth_price = round(float(body.booth_price), 2)
+        except Exception:
+            booth_price = 0.0
+        if booth_price > 0:
+            app["booth_price"] = booth_price
+            app["amount_cents"] = int(round(booth_price * 100))
+
     app["updated_at"] = utc_now_iso()
     _persist_resolved_booth_price(app)
     save_store()
@@ -1211,6 +1221,15 @@ def update_application_progress(
             )
         requested_booth_id = str(payload.booth_id or "").strip()
         app["requested_booth_id"] = requested_booth_id or None
+
+    if payload.booth_price is not None:
+        try:
+            booth_price = round(float(payload.booth_price), 2)
+        except Exception:
+            booth_price = 0.0
+        if booth_price > 0:
+            app["booth_price"] = booth_price
+            app["amount_cents"] = int(round(booth_price * 100))
 
     if payload.booth_category_id is not None:
         app["booth_category_id"] = str(payload.booth_category_id).strip() or None
