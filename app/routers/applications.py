@@ -2491,7 +2491,7 @@ def create_organizer_review(
     }
 
 @router.get("/debug/application-event/{app_id}")
-def debug_application_event(app_id: int, user: dict = Depends(get_current_user)):
+def debug_application_event(app_id: int):
     app = _APPLICATIONS.get(int(app_id))
     event = None
     if isinstance(app, dict):
