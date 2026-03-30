@@ -535,34 +535,46 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     if not isinstance(event, dict):
         return 0
 
-    booth_map = (
-        event.get("diagram", {}).get("boothMap")
-        or event.get("boothMap")
-        or []
-    )
-
     booth_keys = _app_booth_candidates(app)
 
-    if not isinstance(booth_map, list):
-        return 0
+    # ✅ NEW: support levels[].booths[] (YOUR ACTUAL DATA STRUCTURE)
+    levels = event.get("diagram", {}).get("levels") or []
+    for level in levels:
+        booths = level.get("booths") or []
+        for booth in booths:
+            if not isinstance(booth, dict):
+                continue
 
-    for item in booth_map:
-        if not isinstance(item, dict):
-            continue
+            values = _booth_match_values(booth)
 
-        item_values = _booth_match_values(item)
+            if booth_keys & values:
+                cents = _extract_price_to_cents(
+                    booth.get("price")
+                    or booth.get("price_cents")
+                    or booth.get("priceCents")
+                )
+                if cents > 0:
+                    return cents
 
-        if booth_keys & item_values:
-            cents = _extract_price_to_cents(
-                item.get("price_cents")
-                or item.get("priceCents")
-                or item.get("price")
-            )
-            if cents > 0:
-                return cents
+    # ✅ fallback (keep existing support)
+    booth_map = event.get("diagram", {}).get("boothMap") or []
+    if isinstance(booth_map, list):
+        for item in booth_map:
+            if not isinstance(item, dict):
+                continue
+
+            values = _booth_match_values(item)
+
+            if booth_keys & values:
+                cents = _extract_price_to_cents(
+                    item.get("price")
+                    or item.get("price_cents")
+                    or item.get("priceCents")
+                )
+                if cents > 0:
+                    return cents
 
     return 0
-
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
     # ✅ FIXED INDENTATION (this was your crash)
