@@ -264,15 +264,28 @@ export default function OrganizerCreateEventPage() {
         videoUrls: videoUrls.filter(Boolean),
       };
 
-      const created: any = await createEvent(payload);
+const created = await createEvent(payload);
 
-      const eventId =
-        created?.event?.id ??
-        created?.id ??
-        created?.event_id ??
-        created?.eventId;
+const eventId =
+  created?.event?.id ??
+  created?.id ??
+  created?.event_id ??
+  created?.eventId;
 
-      if (!eventId) throw new Error("Event created, but no event id was returned by the API.");
+if (!eventId) {
+  alert("Event creation failed — no ID returned");
+  return;
+}
+
+// 🔥 VERIFY backend actually has it
+const check = await fetch(`${API_BASE}/events/${eventId}`);
+
+if (!check.ok) {
+  alert("Event was not saved properly. Try again.");
+  return;
+}
+
+navigate(`/organizer/events/${eventId}/layout`);
 
       const templateSelection =
         templateMode === "builtin" && selectedBuiltInTemplateId
