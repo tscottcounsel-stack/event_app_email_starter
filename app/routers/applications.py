@@ -544,38 +544,83 @@ def _booth_match_values(item: Dict[str, Any]) -> set[str]:
 
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    event = get_event_or_404(app.event_id)
+    try:
+        event_id = int(app.get("event_id") or 0)
+    except Exception:
+        return 0
+
+    if event_id <= 0:
+        return 0
+
+    try:
+        event = get_event_or_404(event_id)
+    except Exception:
+        return 0
+
     diagram = event.get("diagram") or {}
+    if isinstance(diagram, str):
+        try:
+            diagram = json.loads(diagram)
+        except Exception:
+            return 0
+
+    if not isinstance(diagram, dict):
+        return 0
+
     booths = diagram.get("booths") or []
+    if not isinstance(booths, list):
+        return 0
 
     booth_keys = _app_booth_candidates(app)
 
     for booth in booths:
+        if not isinstance(booth, dict):
+            continue
+
         label = str(booth.get("label", "")).strip().lower()
         booth_id = str(booth.get("id", "")).strip().lower()
 
-        # 🔥 MATCH 1: direct ID match
         if booth_id and booth_id in booth_keys:
-            price = booth.get("price") or booth.get("price_cents") or 0
-            return int(price)
+            return _extract_price_to_cents(
+                booth.get("price_cents")
+                or booth.get("price")
+                or booth.get("amount_cents")
+                or booth.get("amount")
+                or booth.get("booth_price")
+                or 0
+            )
 
-        # 🔥 MATCH 2: label match
         if label and label in booth_keys:
-            price = booth.get("price") or booth.get("price_cents") or 0
-            return int(price)
+            return _extract_price_to_cents(
+                booth.get("price_cents")
+                or booth.get("price")
+                or booth.get("amount_cents")
+                or booth.get("amount")
+                or booth.get("booth_price")
+                or 0
+            )
 
-        # 🔥 MATCH 3: extract number from label (Booth 2 → "2")
         if label.startswith("booth"):
             num = label.replace("booth", "").strip()
             if num and num in booth_keys:
-                price = booth.get("price") or booth.get("price_cents") or 0
-                return int(price)
+                return _extract_price_to_cents(
+                    booth.get("price_cents")
+                    or booth.get("price")
+                    or booth.get("amount_cents")
+                    or booth.get("amount")
+                    or booth.get("booth_price")
+                    or 0
+                )
 
     return 0
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
-    # ✅ FIXED INDENTATION (this was your crash)
-    event_cents = _find_event_booth_price_cents(app) or 0
+    try:
+        event_cents = _find_event_booth_price_cents(app) or 0
+    except Exception as e:
+        print(f"⚠️ Event booth price lookup failed for app {app.get('id')}: {e}")
+        event_cents = 0
+
     if event_cents > 0:
         return event_cents
 
@@ -589,8 +634,14 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
             return cents
 
     return 0
+
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
-    cents = _find_booth_price_cents_for_app(app)
+    try:
+        cents = _find_booth_price_cents_for_app(app)
+    except Exception as e:
+        print(f"⚠️ Persist price resolution failed for app {app.get('id')}: {e}")
+        return 0
+
     if cents > 0:
         app["amount_cents"] = cents
         app["booth_price"] = round(cents / 100.0, 2)
@@ -1082,7 +1133,10 @@ def apply_to_event(
         app["requested_booth_id"] = requested_booth_id or None
 
     app["updated_at"] = utc_now_iso()
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed during apply for app {app.get('id')}: {e}")
     save_store()
     return {"ok": True, "application": app}
 
@@ -1163,7 +1217,10 @@ def update_application_progress(
     if payload.booth_category_id is not None:
         app["booth_category_id"] = str(payload.booth_category_id).strip() or None
 
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed during progress update for app {app.get('id')}: {e}")
     app["updated_at"] = utc_now_iso()
     save_store()
     return {"ok": True, "application": app}
@@ -1203,7 +1260,12 @@ def vendor_get_application(app_id: int, user: dict = Depends(get_current_user)):
     app["documents"] = d
     app["docs"] = d
     app["payment_status"] = _coerce_payment_status(app.get("payment_status"))
-    _persist_resolved_booth_price(app)
+
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed for vendor app {app.get('id')}: {e}")
+
     return {"application": app}
 
 
@@ -1467,7 +1529,10 @@ def organizer_list_event_applications(
         a["docs"] = d
         a["payment_status"] = _coerce_payment_status(a.get("payment_status"))
         a.update(_application_score(a))
-        _persist_resolved_booth_price(a)
+        try:
+            _persist_resolved_booth_price(a)
+        except Exception as e:
+            print(f"⚠️ Price resolution failed for organizer list app {a.get('id')}: {e}")
         enriched.append(a)
 
     enriched.sort(
@@ -1500,7 +1565,10 @@ def organizer_get_application(
     app["docs"] = d
     app["payment_status"] = _coerce_payment_status(app.get("payment_status"))
     app.update(_application_score(app))
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed for organizer app {app.get('id')}: {e}")
     return {"application": app}
 
 
@@ -1589,7 +1657,10 @@ def organizer_approve_application(app_id: int, user: dict = Depends(get_current_
         app["payment_status"] = "unpaid"
         app["booth_reserved_until"] = (utc_now() + timedelta(hours=24)).isoformat()
 
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed during organizer approve for app {app.get('id')}: {e}")
     app["updated_at"] = utc_now_iso()
     save_store()
     return {"ok": True, "application": app}
@@ -1666,7 +1737,10 @@ def organizer_reserve_booth(
     app["requested_booth_id"] = None
     app["booth_reserved_until"] = (utc_now() + timedelta(hours=hold_hours)).isoformat()
     app["payment_status"] = "unpaid"
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed during booth reservation for app {app.get('id')}: {e}")
     app["updated_at"] = utc_now_iso()
     save_store()
     return {"ok": True, "application": app}
@@ -1757,7 +1831,10 @@ def organizer_change_booth(
 
     app["booth_id"] = new_booth_id
     app["requested_booth_id"] = None
-    _persist_resolved_booth_price(app)
+    try:
+        _persist_resolved_booth_price(app)
+    except Exception as e:
+        print(f"⚠️ Price resolution failed during booth change for app {app.get('id')}: {e}")
     app["updated_at"] = utc_now_iso()
     save_store()
     return {"ok": True, "application": app}
