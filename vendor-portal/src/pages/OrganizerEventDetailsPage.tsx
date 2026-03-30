@@ -494,7 +494,7 @@ export default function OrganizerEventDetailsPage() {
 
   function goToBoothMap() {
     if (!eid) return;
-    navigate(`/organizer/events/${encodeURIComponent(eid)}/map`);
+    navigate(`/organizer/events/${encodeURIComponent(eid)}/layout`);
   }
 
   function scrollToCoreInfo() {
@@ -540,6 +540,32 @@ export default function OrganizerEventDetailsPage() {
       downloadCsv(`event-${eid}-vendors.csv`, rows);
     } finally {
       setDownloadingVendorList(false);
+    }
+  }
+
+
+
+  async function deleteEvent() {
+    if (!eid) return;
+    if (!window.confirm("Delete this event? This cannot be undone.")) return;
+
+    setErr(null);
+    setStatusMsg(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/organizer/events/${eid}`, {
+        method: "DELETE",
+        headers: buildAuthHeaders(),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text?.trim() || `Delete failed (${res.status})`);
+      }
+
+      navigate("/organizer/events");
+    } catch (e: any) {
+      setErr(e?.message ? String(e.message) : "Failed to delete event.");
     }
   }
 
@@ -737,6 +763,14 @@ export default function OrganizerEventDetailsPage() {
           >
             <Eye className="h-4 w-4" />
             Preview as Public
+          </button>
+
+          <button
+            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 font-medium text-white"
+            onClick={() => { void deleteEvent(); }}
+            type="button"
+          >
+            Delete Event
           </button>
         </div>
       </div>

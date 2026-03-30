@@ -236,6 +236,29 @@ export default function OrganizerEventsPage() {
     return topNet > 0 ? top.id : null;
   }, [sortedEvents, earningsMap]);
 
+
+
+  async function deleteEvent(id: number) {
+    if (!id) return;
+    if (!window.confirm("Delete this event? This cannot be undone.")) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/organizer/events/${id}`, {
+        method: "DELETE",
+        headers: buildAuthHeaders(),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `Delete failed (${res.status})`);
+      }
+
+      setRefreshTick((n) => n + 1);
+    } catch (err: any) {
+      setError(err?.message || "Failed to delete event");
+    }
+  }
+
   function openDetails(id: number) {
     navigate(`/organizer/events/${id}/details`);
   }
