@@ -1006,35 +1006,12 @@ useEffect(() => {
         version: 2,
         published: nextPublished,
         meta: { published: nextPublished },
-        canvas: {
-          width: Number(canvasW),
-          height: Number(canvasH),
-          gridSize: Number(gridSize),
-        },
+        canvas: { width: canvasW, height: canvasH, gridSize },
         levels: levels.map((lvl) => ({
-          id: String(lvl.id),
-          name: String(lvl.name),
-          booths: (Array.isArray(lvl.booths) ? lvl.booths : []).map((b: any) => ({
-            id: String(b?.id ?? ""),
-            x: Number(b?.x ?? 0),
-            y: Number(b?.y ?? 0),
-            width: Number(b?.width ?? 140),
-            height: Number(b?.height ?? 110),
-            label: String(b?.label ?? ""),
-            status: String(b?.status ?? "available"),
-            category: String(b?.category ?? ""),
-            price: Number(b?.price ?? 0),
-            companyName: String(b?.companyName ?? ""),
-          })),
-          elements: (Array.isArray(lvl.elements) ? lvl.elements : []).map((el: any) => ({
-            id: String(el?.id ?? ""),
-            type: (String(el?.type ?? "shape") as ElementType),
-            x: Number(el?.x ?? 0),
-            y: Number(el?.y ?? 0),
-            width: Number(el?.width ?? 100),
-            height: Number(el?.height ?? 60),
-            ...(el?.label != null ? { label: String(el.label) } : {}),
-          })),
+          id: lvl.id,
+          name: lvl.name,
+          booths: lvl.booths,
+          elements: lvl.elements,
         })),
       };
 
@@ -1043,7 +1020,6 @@ useEffect(() => {
       setIsPublished(nextPublished);
       setStatusMsg("Saved");
     } catch (e: any) {
-      console.error("SAVE ERROR:", e);
       setSaveError(e?.message ? String(e.message) : "Save failed");
       setStatusMsg("Save failed");
       throw e;
@@ -1250,6 +1226,30 @@ const overlayDetail = overlayName
   async function vendorSelectBooth(boothId: string) {
     if (!vendorMode) return;
 
+    const chosenBooth =
+      activeLevel.booths.find((b: any) => String(b?.id || "").trim() === String(boothId || "").trim()) ||
+      activeLevel.booths.find((b: any) => String(b?.label || "").trim() === String(boothId || "").trim()) ||
+      (selectedBooth &&
+      (
+        String((selectedBooth as any)?.id || "").trim() === String(boothId || "").trim() ||
+        String((selectedBooth as any)?.label || "").trim() === String(boothId || "").trim()
+      )
+        ? (selectedBooth as any)
+        : null);
+
+    const boothInternalId = String(chosenBooth?.id || boothId || "").trim();
+    const boothLabel = String(chosenBooth?.label || "").trim();
+
+    // Persist the vendor-facing booth label when available so backend pricing can
+    // match applications against diagram booths like "Booth 1" and avoid the
+    // stale $100 fallback that came from older booth values.
+    const boothRequestValue = boothLabel || boothInternalId;
+
+    if (!boothRequestValue) {
+      window.alert("Invalid booth selection.");
+      return;
+    }
+
     let effectiveAppId = vendorAppId;
 
     try {
@@ -1282,10 +1282,14 @@ const overlayDetail = overlayName
 
       const updated = await vendorUpdateApplication({
         applicationId: effectiveAppId,
-        booth_id: boothId,
-      });
+        booth_id: boothRequestValue,
+        booth_label: boothLabel || undefined,
+        booth_internal_id: boothInternalId || undefined,
+      } as any);
 
-      const savedBoothId = String(updated?.requested_booth_id || updated?.booth_id || boothId);
+      const savedBoothId = String(
+        updated?.requested_booth_id || updated?.booth_id || boothRequestValue
+      ).trim();
       setVendorBoothId(savedBoothId);
 
       try {
@@ -1300,6 +1304,9 @@ const overlayDetail = overlayName
       const params = new URLSearchParams();
       params.set("appId", String(effectiveAppId));
       params.set("boothId", savedBoothId);
+      if (boothLabel) {
+        params.set("boothLabel", boothLabel);
+      }
 
       navigate(
         `/vendor/events/${encodeURIComponent(String(eventId))}/requirements?${params.toString()}`
@@ -1310,6 +1317,7 @@ const overlayDetail = overlayName
   }
 
   async function assignVendorToSelectedBooth(appId: number) {
+
     if (isLocked) {
       window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
       return;
@@ -1598,15 +1606,9 @@ const overlayDetail = overlayName
             </button>
 
             {!pickerMode && !vendorMode ? (
-             <button
-  onClick={() => {
-    void saveNow();
-  }}
-  style={pill(true)}
-  disabled={isSaving}
->
-  {isSaving ? "Saving…" : "Save"}
-</button>
+              <button onClick={saveNow} style={pill(true)} disabled={isSaving}>
+                {isSaving ? "Saving…" : "Save"}
+              </button>
             ) : null}
 
             {vendorMode ? (
