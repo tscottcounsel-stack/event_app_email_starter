@@ -308,18 +308,6 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
   return primary;
 }
 
-function resolveNumericApplicationId(value: any): string {
-  const candidates = [value?.id, value?.application?.id, value?.applicationId, value?.appId, value];
-
-  for (const candidate of candidates) {
-    const s = String(candidate ?? "").trim();
-    if (!s) continue;
-    if (s === "[object Object]" || s === "undefined" || s === "null") continue;
-    if (/^\d+$/.test(s)) return s;
-  }
-
-  return "";
-}
 
 async function handlePayNow(app: VendorProgressCard) {
   const appId = resolveNumericApplicationId(app.applicationId ?? app.appId);
@@ -605,12 +593,12 @@ if (!res.ok) {
               const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
               const status = it.status || "draft";
 
-              const resolvedApplicationId = resolveNumericApplicationId(it.applicationId ?? it.appId);
+              const resolvedApplicationId = String(it.applicationId || "").trim();
               const params = new URLSearchParams();
               if (resolvedApplicationId) params.set("appId", resolvedApplicationId);
               if (it.boothId) params.set("boothId", it.boothId);
 
-              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?${params.toString()}`;
+              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(resolvedApplicationId)}`;
 
               const reqSource =
                 req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";

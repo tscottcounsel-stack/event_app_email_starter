@@ -1,5 +1,4 @@
-﻿# app/store.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -242,7 +241,10 @@ def save_store() -> None:
             "booths": _str_keyed(_BOOTHS),
             "templates": _str_keyed(_TEMPLATES),
             "vendors": _VENDORS,
-            "reviews": {vendor_key: _str_keyed(vendor_reviews) for vendor_key, vendor_reviews in _REVIEWS.items()},
+            "reviews": {
+                vendor_key: _str_keyed(vendor_reviews)
+                for vendor_key, vendor_reviews in _REVIEWS.items()
+            },
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
@@ -260,50 +262,42 @@ load_store()
 def next_event_id() -> int:
     global _NEXT_EVENT_ID
     with _LOCK:
-        load_store()
         _NEXT_EVENT_ID = max(int(_NEXT_EVENT_ID or 1), _next_id_from_keys(_EVENTS, 1))
         val = _NEXT_EVENT_ID
         _NEXT_EVENT_ID += 1
-        save_store()
         return val
 
 
 def next_booth_id() -> int:
     global _NEXT_BOOTH_ID
     with _LOCK:
-        load_store()
         _NEXT_BOOTH_ID = max(int(_NEXT_BOOTH_ID or 1), _next_id_from_keys(_BOOTHS, 1))
         val = _NEXT_BOOTH_ID
         _NEXT_BOOTH_ID += 1
-        save_store()
         return val
 
 
 def next_template_id() -> int:
     global _NEXT_TEMPLATE_ID
     with _LOCK:
-        load_store()
         _NEXT_TEMPLATE_ID = max(
             int(_NEXT_TEMPLATE_ID or 1),
             _next_id_from_keys(_TEMPLATES, 1),
         )
         val = _NEXT_TEMPLATE_ID
         _NEXT_TEMPLATE_ID += 1
-        save_store()
         return val
 
 
 def next_application_id() -> int:
     global _NEXT_APPLICATION_ID
     with _LOCK:
-        load_store()
         _NEXT_APPLICATION_ID = max(
             int(_NEXT_APPLICATION_ID or 1),
             _next_id_from_keys(_APPLICATIONS, 1),
         )
         val = _NEXT_APPLICATION_ID
         _NEXT_APPLICATION_ID += 1
-        save_store()
         return val
 
 
@@ -355,7 +349,10 @@ def get_store_snapshot() -> Dict[str, Any]:
             "booths": _str_keyed(_BOOTHS),
             "templates": _str_keyed(_TEMPLATES),
             "vendors": dict(_VENDORS),
-            "reviews": {vendor_key: _str_keyed(vendor_reviews) for vendor_key, vendor_reviews in _REVIEWS.items()},
+            "reviews": {
+                vendor_key: _str_keyed(vendor_reviews)
+                for vendor_key, vendor_reviews in _REVIEWS.items()
+            },
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
