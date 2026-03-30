@@ -39,8 +39,7 @@ def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> N
         app.include_router(router)
         logger.info("Included router from %s", module_name)
     except Exception as exc:
-        logger.warning("Skipping router %s: %s", module_name, exc)
-
+        raise RuntimeError(f"FAILED TO LOAD ROUTER: {module_name} -> {exc}")
 
 def _load_store_if_available() -> None:
     try:
