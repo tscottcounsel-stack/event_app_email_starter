@@ -633,9 +633,9 @@ def _booth_match_values(booth: dict) -> list[str]:
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
-    event_cents = _find_event_booth_price_cents(app)
-    if event_cents > 0:
-        return event_cents
+   event_cents = _find_event_booth_price_cents(app) or 0
+if event_cents > 0:
+    return event_cents
 
     direct_amount = _extract_price_to_cents(app.get("amount_cents"))
     if direct_amount > 0:
