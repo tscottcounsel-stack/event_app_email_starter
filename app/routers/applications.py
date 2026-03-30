@@ -2023,84 +2023,25 @@ def vendor_create_checkout_session_legacy(
 
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
-def vendor_confirm_payment(
-    app_id: int,
-    body: Dict[str, Any] = Body(default={}),
-    user: dict = Depends(get_current_user),
-):
-    if not _is_dev_mode():
-        raise HTTPException(
-            status_code=403,
-            detail="Frontend payment confirmation is disabled outside development. Rely on Stripe webhook.",
-        )
-
+def confirm_payment(app_id: int, user: dict = Depends(get_current_user)):
     app = get_application_or_404(app_id)
+
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if _payment_exists_for_application(app_id):
-        return {"ok": True, "already_paid": True}
+    amount_cents = app.get("checkout_amount_cents_locked")
 
-    session_id = str((body or {}).get("session_id") or "").strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-
-    try:
-        import stripe
-
-        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-        if not secret:
-            raise RuntimeError("STRIPE_SECRET_KEY not set")
-
-        stripe.api_key = secret
-        session = stripe.checkout.Session.retrieve(session_id)
-
-        if not session:
-            raise HTTPException(status_code=404, detail="Stripe session not found")
-
-        payment_status = str(getattr(session, "payment_status", "") or "")
-        status = str(getattr(session, "status", "") or "")
-        if payment_status != "paid" and status != "complete":
-            raise HTTPException(status_code=400, detail="Stripe session not paid")
-
-        metadata = getattr(session, "metadata", None) or {}
-        session_app_id = str(metadata.get("application_id") or "").strip()
-        if session_app_id and session_app_id != str(app_id):
-            raise HTTPException(
-                status_code=400, detail="Stripe session does not match this application"
-            )
-
-        expected_amount_cents = _get_amount_cents_from_app(app)
-        amount_total = getattr(session, "amount_total", None)
-        if amount_total is not None:
-            try:
-                if int(amount_total) != int(expected_amount_cents):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Stripe amount does not match application total",
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                raise HTTPException(
-                    status_code=400, detail="Invalid Stripe amount_total"
-                )
-
-        amount = (
-            round((int(amount_total) / 100.0), 2)
-            if amount_total is not None
-            else round(expected_amount_cents / 100.0, 2)
+    if not amount_cents or int(amount_cents) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No locked checkout amount found"
         )
-        payment = _mark_application_paid(
-            app, amount, user=user, source="frontend_confirm_dev"
-        )
-        return {"ok": True, "application_id": app_id, "payment": payment}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Payment confirmation failed: {e}")
 
+    amount = int(amount_cents) / 100
 
+    _mark_application_paid(app, amount, user=user, source="frontend_confirm")
+
+    return {"ok": True}
 @router.post("/applications/{application_id}/mark-paid")
 def mark_application_paid(application_id: int, user: dict = Depends(get_current_user)):
     _require_admin(user)
