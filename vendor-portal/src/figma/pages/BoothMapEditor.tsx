@@ -1,4 +1,4 @@
-// src/figma/pages/BoothMapEditor.tsx
+﻿// src/figma/pages/BoothMapEditor.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { readSession as readAuthSession } from "../../auth/authStorage";
