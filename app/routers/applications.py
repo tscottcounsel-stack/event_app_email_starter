@@ -489,153 +489,86 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     visit(event)
     return found
 
-def _app_booth_candidates(app: dict) -> list[str]:
-    keys = []
+def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
+    candidates = set()
 
-    for k in [
-        "booth_id",
-        "boothId",
-        "requested_booth_id",
-        "booth",
-        "booth_label",
-        "booth_number",
+    for value in [
+        app.get("booth_id"),
+        app.get("boothId"),
+        app.get("requested_booth_id"),
+        app.get("booth"),
+        app.get("booth_label"),
+        app.get("booth_number"),
     ]:
-        v = app.get(k)
-        if v:
-            keys.append(str(v).strip())
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text:
+            candidates.add(text)
 
-    return list(dict.fromkeys(keys))
+    return candidates
+
+
+def _booth_match_values(item: Dict[str, Any]) -> set[str]:
+    values = set()
+
+    for value in [
+        item.get("id"),
+        item.get("booth_id"),
+        item.get("boothId"),
+        item.get("label"),
+        item.get("name"),
+        item.get("number"),
+        item.get("booth_number"),
+    ]:
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text:
+            values.add(text)
+
+    return values
+
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    booth_keys = _app_booth_candidates(app)
-    if not booth_keys:
-        return 0
-
     event = _EVENTS.get(int(app.get("event_id") or 0), {})
     if not isinstance(event, dict):
         return 0
 
-def _booth_match_values(booth: dict) -> list[str]:
-    vals = []
+    booth_map = (
+        event.get("diagram", {}).get("boothMap")
+        or event.get("boothMap")
+        or []
+    )
 
-    for k in [
-        "id",
-        "booth_id",
-        "boothId",
-        "label",
-        "name",
-        "number",
-        "booth_number",
-    ]:
-        v = booth.get(k)
-        if v:
-            vals.append(str(v).strip())
+    booth_keys = _app_booth_candidates(app)
 
-    return list(dict.fromkeys(vals))
-    def maybe_price_from_booth(booth: Any, extra_keys: Optional[List[Any]] = None) -> int:
-        if not isinstance(booth, dict):
-            return 0
-        match_values = _booth_match_values(booth)
-        if extra_keys:
-            match_values |= _candidate_booth_keys(extra_keys)
-        if booth_keys & match_values:
-            return _booth_price_from_node(booth)
+    if not isinstance(booth_map, list):
         return 0
 
-    def scan_container(container: Any, container_key: str = "") -> int:
-        if isinstance(container, dict):
-            for k, booth in container.items():
-                extra = [container_key, k]
-                if isinstance(booth, dict):
-                    cents = maybe_price_from_booth(booth, extra)
-                    if cents > 0:
-                        return cents
-                    booth_meta = booth.get("booth")
-                    if isinstance(booth_meta, dict):
-                        merged = dict(booth_meta)
-                        for key in (
-                            "priceCents",
-                            "price_cents",
-                            "amountCents",
-                            "amount_cents",
-                            "boothPrice",
-                            "booth_price",
-                            "price",
-                            "amount",
-                            "cost",
-                            "fee",
-                        ):
-                            if key not in merged and key in booth:
-                                merged[key] = booth.get(key)
-                        cents = maybe_price_from_booth(merged, extra)
-                        if cents > 0:
-                            return cents
-                cents = scan_container(booth, str(k))
-                if cents > 0:
-                    return cents
-        elif isinstance(container, list):
-            for index, booth in enumerate(container):
-                cents = scan_container(booth, f"{container_key}[{index}]")
-                if cents > 0:
-                    return cents
-        return 0
+    for item in booth_map:
+        if not isinstance(item, dict):
+            continue
 
-    for container_key in (
-        "booths",
-        "layout",
-        "map_layout",
-        "booth_map",
-        "booth_layout",
-        "layout_items",
-        "map_items",
-        "items",
-        "sections",
-        "elements",
-        "nodes",
-    ):
-        cents = scan_container(event.get(container_key), container_key)
-        if cents > 0:
-            return cents
+        item_values = _booth_match_values(item)
 
-    diagram_slot = event.get("diagram")
-    diagram_doc: Dict[str, Any] = {}
-    if isinstance(diagram_slot, dict):
-        if isinstance(diagram_slot.get("diagram"), dict):
-            diagram_doc = diagram_slot.get("diagram") or {}
-        else:
-            diagram_doc = diagram_slot
-
-    if isinstance(diagram_doc, dict):
-        booth_map = diagram_doc.get("boothMap")
-        if isinstance(booth_map, dict):
-            for label, booth in booth_map.items():
-                if not isinstance(booth, dict):
-                    continue
-                cents = maybe_price_from_booth(booth, [label, booth.get("label"), booth.get("name")])
-                if cents > 0:
-                    return cents
-
-        for key in ("booths", "levels", "elements"):
-            cents = scan_container(diagram_doc.get(key), f"diagram.{key}")
+        if booth_keys & item_values:
+            cents = _extract_price_to_cents(
+                item.get("price_cents")
+                or item.get("priceCents")
+                or item.get("price")
+            )
             if cents > 0:
                 return cents
-
-    cents = scan_container(event, "event")
-    if cents > 0:
-        return cents
-
-    for booth in _extract_booths_from_event(event):
-        cents = maybe_price_from_booth(booth)
-        if cents > 0:
-            return cents
 
     return 0
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
-   event_cents = _find_event_booth_price_cents(app) or 0
-if event_cents > 0:
-    return event_cents
+    # ✅ FIXED INDENTATION (this was your crash)
+    event_cents = _find_event_booth_price_cents(app) or 0
+    if event_cents > 0:
+        return event_cents
 
     direct_amount = _extract_price_to_cents(app.get("amount_cents"))
     if direct_amount > 0:
@@ -645,9 +578,8 @@ if event_cents > 0:
         cents = _extract_price_to_cents(app.get(key))
         if cents > 0:
             return cents
+
     return 0
-
-
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
     cents = _find_booth_price_cents_for_app(app)
     if cents > 0:
