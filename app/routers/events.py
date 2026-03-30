@@ -19,6 +19,7 @@ from app.store import (
     _PAYMENTS,
     _REQUIREMENTS,
     get_store_snapshot,
+    load_store,
     next_event_id,
     save_store,
 )
@@ -111,6 +112,11 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _refresh_store() -> None:
+    """Reload persisted JSON state so multi-worker requests see the latest data."""
+    load_store()
+
+
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -153,6 +159,7 @@ def _event_belongs_to_user(event: Dict[str, Any], user: Optional[Dict[str, Any]]
 
 
 def _owned_events_for_user(user: Dict[str, Any]) -> list[Dict[str, Any]]:
+    _refresh_store()
     return [
         e
         for e in _EVENTS.values()
@@ -161,6 +168,7 @@ def _owned_events_for_user(user: Dict[str, Any]) -> list[Dict[str, Any]]:
 
 
 def _get_event_or_404(event_id: int) -> Dict[str, Any]:
+    _refresh_store()
     ev = _EVENTS.get(int(event_id))
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -431,6 +439,7 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
 
 @router.get("/events")
 async def get_events():
+    _refresh_store()
     store = get_store_snapshot()
     events = store.get("events", {})
 
@@ -456,6 +465,7 @@ def organizer_list_events(user: dict = Depends(get_current_user)):
 
 @router.post("/organizer/events")
 def organizer_create_event(payload: EventCreate, user: dict = Depends(get_current_user)):
+    _refresh_store()
     organizer_email = _norm_email(user.get("email"))
     if not organizer_email:
         raise HTTPException(status_code=401, detail="Authenticated user email missing")
@@ -495,7 +505,8 @@ def organizer_create_event(payload: EventCreate, user: dict = Depends(get_curren
     }
     _EVENTS[eid] = e
     save_store()
-    return _as_event_dict(e)
+    _refresh_store()
+    return _as_event_dict(_EVENTS.get(eid, e))
 
 
 @router.get("/organizer/events/{event_id}")
@@ -817,6 +828,7 @@ def admin_mark_payout_paid(payment_id: int):
 
 @router.get("/public/events")
 def public_list_events():
+    _refresh_store()
     out = []
     for e in _EVENTS.values():
         if e.get("published") and not e.get("archived"):
@@ -866,6 +878,7 @@ def public_patch_event_alias(event_id: int, payload: Dict[str, Any] = Body(defau
 @router.get("/events/{event_id}/stats")
 def get_event_stats(event_id: int):
     expire_reservations_if_needed()
+    _refresh_store()
 
     event = _EVENTS.get(int(event_id))
     if not event:

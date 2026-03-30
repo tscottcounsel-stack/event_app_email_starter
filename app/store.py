@@ -260,6 +260,7 @@ load_store()
 def next_event_id() -> int:
     global _NEXT_EVENT_ID
     with _LOCK:
+        load_store()
         _NEXT_EVENT_ID = max(int(_NEXT_EVENT_ID or 1), _next_id_from_keys(_EVENTS, 1))
         val = _NEXT_EVENT_ID
         _NEXT_EVENT_ID += 1
@@ -270,6 +271,7 @@ def next_event_id() -> int:
 def next_booth_id() -> int:
     global _NEXT_BOOTH_ID
     with _LOCK:
+        load_store()
         _NEXT_BOOTH_ID = max(int(_NEXT_BOOTH_ID or 1), _next_id_from_keys(_BOOTHS, 1))
         val = _NEXT_BOOTH_ID
         _NEXT_BOOTH_ID += 1
@@ -280,6 +282,7 @@ def next_booth_id() -> int:
 def next_template_id() -> int:
     global _NEXT_TEMPLATE_ID
     with _LOCK:
+        load_store()
         _NEXT_TEMPLATE_ID = max(
             int(_NEXT_TEMPLATE_ID or 1),
             _next_id_from_keys(_TEMPLATES, 1),
@@ -293,6 +296,7 @@ def next_template_id() -> int:
 def next_application_id() -> int:
     global _NEXT_APPLICATION_ID
     with _LOCK:
+        load_store()
         _NEXT_APPLICATION_ID = max(
             int(_NEXT_APPLICATION_ID or 1),
             _next_id_from_keys(_APPLICATIONS, 1),
@@ -336,6 +340,7 @@ def find_existing_application(
 
 def get_store_snapshot() -> Dict[str, Any]:
     with _LOCK:
+        load_store()
         return {
             "events": _str_keyed(_EVENTS),
             "requirements": _str_keyed(_REQUIREMENTS),
