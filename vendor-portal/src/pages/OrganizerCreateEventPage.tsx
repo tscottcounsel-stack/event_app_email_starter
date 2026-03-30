@@ -278,14 +278,18 @@ if (!eventId) {
 }
 
 // 🔥 VERIFY backend actually has it
-const check = await fetch(`${API_BASE}/events/${eventId}`);
+const check = await fetch(`${API_BASE}/organizer/events/${eventId}`, {
+  headers: {
+    ...buildAuthHeaders(),
+    Accept: "application/json",
+  },
+});
 
 if (!check.ok) {
   alert("Event was not saved properly. Try again.");
   return;
 }
 
-navigate(`/organizer/events/${eventId}/layout`);
 
       const templateSelection =
         templateMode === "builtin" && selectedBuiltInTemplateId
