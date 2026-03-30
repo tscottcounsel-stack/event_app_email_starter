@@ -1,4 +1,4 @@
-﻿// src/figma/pages/BoothMapEditor.tsx
+// src/figma/pages/BoothMapEditor.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { readSession as readAuthSession } from "../../auth/authStorage";
@@ -953,7 +953,7 @@ useEffect(() => {
 
   function beginDrag(kind: "booth" | "element", id: string, e: React.MouseEvent) {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to move items.");
+      window.alert("Published (Locked) — unlock layout to move items.");
       return;
     }
     setDrag({ kind, id, cx: e.clientX, cy: e.clientY });
@@ -961,7 +961,7 @@ useEffect(() => {
 
   function beginResize(kind: "booth" | "element", id: string, e: React.MouseEvent) {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to resize items.");
+      window.alert("Published (Locked) — unlock layout to resize items.");
       return;
     }
     e.stopPropagation();
@@ -1000,7 +1000,7 @@ useEffect(() => {
     try {
       setIsSaving(true);
       setSaveError(null);
-      setStatusMsg("Savingâ€¦");
+      setStatusMsg("Saving…");
 
       const doc: DiagramDoc = {
         version: 2,
@@ -1062,7 +1062,7 @@ useEffect(() => {
 
   function addBooth() {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to add booths.");
+      window.alert("Published (Locked) — unlock layout to add booths.");
       return;
     }
 
@@ -1094,7 +1094,7 @@ useEffect(() => {
 
   function deleteSelected() {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to delete items.");
+      window.alert("Published (Locked) — unlock layout to delete items.");
       return;
     }
 
@@ -1177,11 +1177,11 @@ const rawOverlayName =
 
 const overlayName =
   effectiveStatus === "paid" && rawOverlayName
-    ? `${rawOverlayName} ðŸ”’`
+    ? `${rawOverlayName} 🔒`
     : rawOverlayName;
 
 const overlayDetail = overlayName
-  ? `${effectiveStatus.toUpperCase()} â€¢ ${overlayName}`
+  ? `${effectiveStatus.toUpperCase()} • ${overlayName}`
   : effectiveStatus.toUpperCase();
 
     return {
@@ -1312,7 +1312,7 @@ const savedBoothId = String(
 
   async function assignVendorToSelectedBooth(appId: number) {
     if (isLocked) {
-      window.alert("Paid â€” Booth selection is locked. Contact the organizer to make changes.");
+      window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
       return;
     }
 
@@ -1432,8 +1432,8 @@ const savedBoothId = String(
           }}
         >
           {layoutOverrideActive
-            ? "Published â€” Layout temporarily UNLOCKED for edits (auto-relocks)."
-            : "Published â€” Layout is LOCKED. Assignments/reassignments are still allowed."}
+            ? "Published — Layout temporarily UNLOCKED for edits (auto-relocks)."
+            : "Published — Layout is LOCKED. Assignments/reassignments are still allowed."}
         </div>
       ) : null}
 
@@ -1450,7 +1450,7 @@ const savedBoothId = String(
             fontWeight: 900,
           }}
         >
-          Paid â€” Booth selection is locked. Contact the organizer to make changes.
+          Paid — Booth selection is locked. Contact the organizer to make changes.
         </div>
       ) : null}
 
@@ -1469,7 +1469,7 @@ const savedBoothId = String(
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
             <button onClick={() => window.history.back()} style={pill(false)}>
-              â† <span>Back</span>
+              ← <span>Back</span>
             </button>
 
             <div style={{ minWidth: 0 }}>
@@ -1480,14 +1480,14 @@ const savedBoothId = String(
                 Event {eventId}
                 {pickerMode ? (
                   <>
-                    {" "}â€¢ <span style={{ color: "#0f172a" }}>Assign mode</span>
-                    {assignAppId ? <> â€¢ App #{assignAppId}</> : null}
+                    {" "}• <span style={{ color: "#0f172a" }}>Assign mode</span>
+                    {assignAppId ? <> • App #{assignAppId}</> : null}
                   </>
                 ) : vendorMode ? (
                   <>
-                    {" "}â€¢ <span style={{ color: "#0f172a" }}>Vendor view</span>
-                    {vendorAppId ? <> â€¢ App #{vendorAppId}</> : null}
-                    {vendorBoothId ? <> â€¢ Booth {vendorBoothId}</> : null}
+                    {" "}• <span style={{ color: "#0f172a" }}>Vendor view</span>
+                    {vendorAppId ? <> • App #{vendorAppId}</> : null}
+                    {vendorBoothId ? <> • Booth {vendorBoothId}</> : null}
                   </>
                 ) : null}
               </div>
@@ -1539,7 +1539,7 @@ const savedBoothId = String(
                       try {
                         await saveNow(false);
                         window.alert(
-                          "Layout unpublished (event remains published on vendor side â€” no unpublish endpoint yet)."
+                          "Layout unpublished (event remains published on vendor side — no unpublish endpoint yet)."
                         );
                       } catch (e: any) {
                         console.error(e);
@@ -1576,7 +1576,7 @@ const savedBoothId = String(
               onClick={() => setZoom((z) => +clamp(z - 0.1, 0.45, 2).toFixed(2))}
               style={pill(false)}
             >
-              âˆ’
+              −
             </button>
 
             <div
@@ -1599,8 +1599,8 @@ const savedBoothId = String(
             </button>
 
             {!pickerMode && !vendorMode ? (
-              <button onClick={() => { void saveNow(); }} style={pill(true)} disabled={isSaving}>
-                {isSaving ? "Savingâ€¦" : "Save"}
+              <button onClick={saveNow} style={pill(true)} disabled={isSaving}>
+                {isSaving ? "Saving…" : "Save"}
               </button>
             ) : null}
 
@@ -1805,7 +1805,7 @@ const savedBoothId = String(
 
                     if (isLocked) {
                       window.alert(
-                        "Paid â€” Booth selection is locked. Contact the organizer to make changes."
+                        "Paid — Booth selection is locked. Contact the organizer to make changes."
                       );
                       return;
                     }
@@ -1932,7 +1932,7 @@ const savedBoothId = String(
                     }}
                   >
                     <div style={{ fontSize: 11, fontWeight: 900, color: "#475569" }}>
-                      {category ? category : "â€”"}
+                      {category ? category : "—"}
                     </div>
                     <div style={{ fontSize: 12, fontWeight: 1000, color: "#0f172a" }}>
                       {price ? `$${price}` : ""}
@@ -1951,7 +1951,7 @@ const savedBoothId = String(
                         alignSelf: "flex-start",
                       }}
                     >
-                      Held â€¢ {holdCountdown}
+                      Held • {holdCountdown}
                     </div>
                   ) : null}
 
@@ -2215,7 +2215,7 @@ const savedBoothId = String(
                                   fontWeight: 900,
                                 }}
                               >
-                                <option value="">â€”</option>
+                                <option value="">—</option>
                                 {CATEGORY_OPTIONS.map((c) => (
                                   <option key={c} value={c}>
                                     {c}
@@ -2420,7 +2420,7 @@ const savedBoothId = String(
                               color: "#64748b",
                             }}
                           >
-                            App #{a.id} â€¢ {String(a.status || "").toUpperCase()} â€¢ {pay.toUpperCase()}
+                            App #{a.id} • {String(a.status || "").toUpperCase()} • {pay.toUpperCase()}
                           </div>
                           {boothId ? (
                             <div
@@ -2493,7 +2493,7 @@ const savedBoothId = String(
                             }}
                           >
                             <div style={{ fontWeight: 1000, fontSize: 13, color: "#0f172a" }}>
-                              {boothId} â€¢ {r.paymentStatus.toUpperCase()}
+                              {boothId} • {r.paymentStatus.toUpperCase()}
                             </div>
                             {who ? (
                               <div
@@ -2637,7 +2637,6 @@ const savedBoothId = String(
     </div>
   );
 }
-
 
 
 

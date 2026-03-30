@@ -1,0 +1,5 @@
+[33madde42a[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m fix: sanitize diagram save payload
+[33m8cdf2b6[m fix: sanitize diagram save payload
+[33m7c49f88[m fix: eliminate circular JSON in diagram save (hard sanitize)
+[33m7d74853[m fix: sanitize booth map payload + persist diagram to event for pricing
+[33me4a2bf0[m fix: persist organizer diagram onto event for booth pricing resolution

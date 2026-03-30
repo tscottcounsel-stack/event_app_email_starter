@@ -1,4 +1,4 @@
-﻿// src/pages/VendorEventRequirementsPage.tsx
+// src/pages/VendorEventRequirementsPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { readSession } from "../auth/authStorage";
@@ -147,7 +147,22 @@ export default function VendorEventRequirementsPage() {
       cancelled = true;
     };
   }, [eventId, appId]);
-  
+  useEffect(() => {
+    if (!appId || !boothIdFromUrl) return;
+
+    async function saveBoothFromUrl() {
+      try {
+        await ApplicationsAPI.vendorSaveProgress({
+          applicationId: Number(appId),
+          body: { booth_id: boothIdFromUrl },
+        });
+      } catch (e) {
+        console.error("Failed to save booth from URL", e);
+      }
+    }
+
+    saveBoothFromUrl();
+  }, [appId, boothIdFromUrl]);
 
 
   const reqRoot = useMemo(() => {
@@ -311,7 +326,7 @@ export default function VendorEventRequirementsPage() {
     return (
       <div className="space-y-5">
         <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <div className="text-2xl font-black text-slate-900">Loading requirementsâ€¦</div>
+          <div className="text-2xl font-black text-slate-900">Loading requirements…</div>
         </div>
       </div>
     );
@@ -342,7 +357,7 @@ export default function VendorEventRequirementsPage() {
           <div className="mt-2">Status: {application?.status || "draft"}</div>
           <div className="mt-1">Payment: {application?.payment_status || "unpaid"}</div>
           {saveMessage ? <div className="mt-3 text-emerald-600">{saveMessage}</div> : null}
-          {saving ? <div className="mt-2 text-violet-600">Savingâ€¦</div> : null}
+          {saving ? <div className="mt-2 text-violet-600">Saving…</div> : null}
         </div>
       </div>
 
@@ -624,7 +639,6 @@ export default function VendorEventRequirementsPage() {
     </div>
   );
 }
-
 
 
 
