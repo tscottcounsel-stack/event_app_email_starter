@@ -489,6 +489,22 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     visit(event)
     return found
 
+def _app_booth_candidates(app: dict) -> list[str]:
+    keys = []
+
+    for k in [
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "booth",
+        "booth_label",
+        "booth_number",
+    ]:
+        v = app.get(k)
+        if v:
+            keys.append(str(v).strip())
+
+    return list(dict.fromkeys(keys))
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     booth_keys = _app_booth_candidates(app)
