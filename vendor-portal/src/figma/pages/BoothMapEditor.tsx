@@ -320,11 +320,12 @@ export default function BoothMapEditor() {
   const assignAppId = assignAppIdRaw ? Number(assignAppIdRaw) : null;
   const pickerMode = Boolean(assignAppId);
 
-  const vendorAppIdRaw = (
-    searchParams.get("appId") ||
-    searchParams.get("applicationId") ||
-    ""
-  ).trim();
+ const vendorAppIdRaw = (
+  searchParams.get("appId") ||
+  searchParams.get("applicationId") ||
+  searchParams.get("appld") ||
+  ""
+).trim();
 
   const vendorAppId =
     vendorAppIdRaw && /^\d+$/.test(vendorAppIdRaw) ? Number(vendorAppIdRaw) : null;
