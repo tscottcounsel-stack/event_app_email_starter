@@ -490,35 +490,37 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     return found
 
 def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
-    values = set()
+    candidates = set()
 
-    raw_values = [
+    for value in [
         app.get("booth_id"),
+        app.get("boothId"),
         app.get("requested_booth_id"),
         app.get("booth"),
         app.get("booth_label"),
         app.get("booth_number"),
-    ]
-
-    for v in raw_values:
-        if v is None:
+    ]:
+        if value is None:
             continue
 
-        s = str(v).strip().lower()
-        if not s:
+        text = str(value).strip().lower()
+        if not text:
             continue
 
-        values.add(s)
+        candidates.add(text)
 
-        # normalize numbers
-        digits = "".join(c for c in s if c.isdigit())
-        if digits:
-            values.add(digits)
-            values.add(f"booth {digits}")
-            values.add(f"booth_{digits}")
-            values.add(f"booth-{digits}")
+        if text.isdigit():
+            candidates.add(f"booth {text}")
+            candidates.add(f"booth_{text}")
+            candidates.add(f"booth-{text}")
 
-    return values
+        if text.startswith("booth "):
+            num = text.replace("booth ", "").strip()
+            if num:
+                candidates.add(num)
+
+    return candidates
+
 
 def _booth_match_values(item: Dict[str, Any]) -> set[str]:
     values = set()
@@ -569,32 +571,24 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     if not isinstance(booths, list):
         return 0
 
-  booth_keys = _app_booth_candidates(app)
+    booth_keys = _app_booth_candidates(app)
 
-for booth in booths:
-    if not isinstance(booth, dict):
-        continue
+    for booth in booths:
+        if not isinstance(booth, dict):
+            continue
 
-    booth_values = set()
+        label = str(booth.get("label", "")).strip().lower()
+        booth_id = str(booth.get("id", "")).strip().lower()
 
-    for field in ["id", "label", "name", "number", "booth_id"]:
-        val = booth.get(field)
-        if val:
-            s = str(val).strip().lower()
-            booth_values.add(s)
-
-            digits = "".join(c for c in s if c.isdigit())
-            if digits:
-                booth_values.add(digits)
-
-    if booth_keys & booth_values:
-        return _extract_price_to_cents(
-            booth.get("price_cents")
-            or booth.get("price")
-            or booth.get("amount")
-            or booth.get("booth_price")
-            or 0
-        )
+        if booth_id and booth_id in booth_keys:
+            return _extract_price_to_cents(
+                booth.get("price_cents")
+                or booth.get("price")
+                or booth.get("amount_cents")
+                or booth.get("amount")
+                or booth.get("booth_price")
+                or 0
+            )
 
         if label and label in booth_keys:
             return _extract_price_to_cents(
