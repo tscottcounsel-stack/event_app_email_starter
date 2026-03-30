@@ -462,26 +462,15 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     def visit(node: Any):
         if isinstance(node, dict):
             if any(
-                k in node for k in ("booth_id", "id", "label", "name", "number", "boothId")
-            ) and any(
                 k in node
-                for k in (
-                    "price",
-                    "price_cents",
-                    "priceCents",
-                    "amount",
-                    "amount_cents",
-                    "amountCents",
-                    "booth_price",
-                    "boothPrice",
-                    "cost",
-                    "fee",
-                )
+                for k in ("booth_id", "id", "label", "name", "number", "boothId", "booth_number")
             ):
                 found.append(node)
-            for _, value in node.items():
+
+            for value in node.values():
                 if isinstance(value, (dict, list)):
                     visit(value)
+
         elif isinstance(node, list):
             for item in node:
                 visit(item)
@@ -557,17 +546,7 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     except Exception:
         return 0
 
-    diagram = event.get("diagram") or {}
-    if isinstance(diagram, str):
-        try:
-            diagram = json.loads(diagram)
-        except Exception:
-            return 0
-
-    if not isinstance(diagram, dict):
-        return 0
-
-    booths = diagram.get("booths") or []
+    booths = _extract_booths_from_event(event)
     if not isinstance(booths, list):
         return 0
 
@@ -577,40 +556,39 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
         if not isinstance(booth, dict):
             continue
 
-        label = str(booth.get("label", "")).strip().lower()
-        booth_id = str(booth.get("id", "")).strip().lower()
+        booth_values = set()
 
-        if booth_id and booth_id in booth_keys:
-            return _extract_price_to_cents(
-                booth.get("price_cents")
-                or booth.get("price")
-                or booth.get("amount_cents")
-                or booth.get("amount")
-                or booth.get("booth_price")
-                or 0
-            )
+        for field in ["id", "label", "name", "number", "booth_id", "boothId", "booth_number"]:
+            val = booth.get(field)
+            if not val:
+                continue
 
-        if label and label in booth_keys:
-            return _extract_price_to_cents(
-                booth.get("price_cents")
-                or booth.get("price")
-                or booth.get("amount_cents")
-                or booth.get("amount")
-                or booth.get("booth_price")
-                or 0
-            )
+            s = str(val).strip().lower()
+            booth_values.add(s)
 
-        if label.startswith("booth"):
-            num = label.replace("booth", "").strip()
-            if num and num in booth_keys:
-                return _extract_price_to_cents(
-                    booth.get("price_cents")
-                    or booth.get("price")
-                    or booth.get("amount_cents")
-                    or booth.get("amount")
-                    or booth.get("booth_price")
-                    or 0
-                )
+            digits = "".join(c for c in s if c.isdigit())
+            if digits:
+                booth_values.add(digits)
+                booth_values.add(f"booth {digits}")
+                booth_values.add(f"booth_{digits}")
+                booth_values.add(f"booth-{digits}")
+
+        if not (booth_keys & booth_values):
+            continue
+
+        price_cents = _extract_price_to_cents(
+            booth.get("price_cents")
+            or booth.get("price")
+            or booth.get("amount_cents")
+            or booth.get("amount")
+            or booth.get("booth_price")
+            or booth.get("boothPrice")
+            or booth.get("cost")
+            or booth.get("fee")
+            or 0
+        )
+        if price_cents > 0:
+            return price_cents
 
     return 0
 
