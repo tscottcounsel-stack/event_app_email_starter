@@ -387,12 +387,9 @@ export default function VendorApplicationsPage() {
       !!(headers as any)["x-user-id"];
 
     if (!hasIdentity) {
-      console.warn("Auth not ready, retrying applications load...");
-      setTimeout(() => {
-        loadApplications().catch(() => {});
-      }, 500);
-      setLoading(false);
-      return;
+      throw new Error(
+        "Missing login identity headers (Authorization / x-user-email / x-user-id). Log in again so applications can load."
+      );
     }
 
     const res = await fetch(`${API_BASE}/vendor/applications`, {
@@ -462,8 +459,10 @@ export default function VendorApplicationsPage() {
 
     const params = new URLSearchParams(window.location.search);
     const payment = String(params.get("payment") || "").trim().toLowerCase();
+    const appId = String(params.get("appId") || "").trim();
+    const sessionId = String(params.get("session_id") || "").trim();
 
-    if (payment !== "success") return;
+    if (payment !== "success" || !appId || !sessionId) return;
 
     paymentHandledRef.current = true;
 
@@ -471,34 +470,32 @@ export default function VendorApplicationsPage() {
       try {
         setPaymentMessage(null);
 
-        const appId =
-          resolveNumericApplicationId(params.get("appId")) ||
-          resolveNumericApplicationId(params.get("application_id"));
-        const sessionId = String(params.get("session_id") || "").trim();
+        const res = await fetch(`${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`, {
+          method: "POST",
+          headers: {
+            ...buildAuthHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
 
-        if (!appId) {
-          throw new Error("Missing application ID after payment return.");
-        }
+        const data = await res.json().catch(() => null);
 
-        if (sessionId) {
-          const res = await fetch(`${API_BASE}/vendor/applications/${appId}/confirm-payment`, {
-            method: "POST",
-            headers: {
-              ...buildAuthHeaders(),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ session_id: sessionId }),
-          });
+if (!res.ok) {
+  const detail =
+    (typeof data?.detail === "string" && data.detail) ||
+    (typeof data?.message === "string" && data.message) ||
+    `Unable to confirm payment (${res.status}).`;
 
-          const data = await res.json().catch(() => null);
-          if (!res.ok) {
-            throw new Error(
-              (typeof data?.detail === "string" && data.detail) ||
-                (typeof data?.message === "string" && data.message) ||
-                `Unable to confirm payment (${res.status}).`
-            );
-          }
-        }
+  const normalized = detail.toLowerCase();
+  const webhookOnly =
+    res.status === 403 &&
+    normalized.includes("disabled outside development");
+
+  if (!webhookOnly) {
+    throw new Error(detail);
+  }
+}
 
         await loadApplications();
         setPaymentMessage("Payment confirmed.");
@@ -506,20 +503,10 @@ export default function VendorApplicationsPage() {
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete("payment");
         cleanUrl.searchParams.delete("appId");
-        cleanUrl.searchParams.delete("application_id");
         cleanUrl.searchParams.delete("session_id");
-        window.history.replaceState(
-          {},
-          "",
-          `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`
-        );
+        window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
       } catch (e: any) {
-        setPaymentMessage(e?.message || "Payment confirmation could not be verified.");
-        try {
-          await loadApplications();
-        } catch {
-          // keep original error message
-        }
+        setPaymentMessage(e?.message || "Unable to confirm payment.");
       } finally {
         setLoading(false);
       }
@@ -603,7 +590,7 @@ export default function VendorApplicationsPage() {
               const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
               const local = localByKey[localKey] ?? null;
 
-              const effectiveChecked = it.checked ?? local?.checked ?? {};
+              const effectiveChecked = local?.checked ?? it.checked ?? {};
 
               const serverDocs =
                 it.documents && typeof it.documents === "object"
@@ -612,7 +599,7 @@ export default function VendorApplicationsPage() {
                   ? it.docs
                   : {};
 
-              const effectiveDocs = serverDocs ?? local?.docs ?? {};
+              const effectiveDocs = local?.docs ?? serverDocs ?? {};
               const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
 
               const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
@@ -629,12 +616,7 @@ export default function VendorApplicationsPage() {
                 req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
 
               const progressSource = local ? "progress: local" : "progress: server";
-              const isPaidNow =
-                it.paymentStatus === "paid" ||
-                (paymentMessage === "Payment confirmed." &&
-                  resolvedApplicationId === resolveNumericApplicationId(it.applicationId ?? it.appId));
-
-              const showPayButton = status === "approved" && !isPaidNow;
+              const showPayButton = status === "approved" && it.paymentStatus !== "paid";
 
               return (
                 <div key={`${it.eventId}:${it.appId}`} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -685,7 +667,7 @@ export default function VendorApplicationsPage() {
                             : "bg-amber-50 text-amber-700")
                         }
                       >
-                        {isPaidNow ? "Paid" : "Unpaid"}
+                        {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
                       </span>
 
                       <div className="text-sm font-extrabold text-slate-700">
@@ -741,9 +723,3 @@ export default function VendorApplicationsPage() {
     </div>
   );
 }
-
-
-
-
-
-

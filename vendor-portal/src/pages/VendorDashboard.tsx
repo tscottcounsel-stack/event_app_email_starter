@@ -1473,8 +1473,3 @@ function resolveNumericApplicationId(value: any): string {
     </div>
   );
 }
-
-
-
-
-
