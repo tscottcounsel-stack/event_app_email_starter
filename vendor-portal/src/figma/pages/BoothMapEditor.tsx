@@ -1598,9 +1598,15 @@ const overlayDetail = overlayName
             </button>
 
             {!pickerMode && !vendorMode ? (
-              <button onClick={saveNow} style={pill(true)} disabled={isSaving}>
-                {isSaving ? "Saving…" : "Save"}
-              </button>
+             <button
+  onClick={() => {
+    void saveNow();
+  }}
+  style={pill(true)}
+  disabled={isSaving}
+>
+  {isSaving ? "Saving…" : "Save"}
+</button>
             ) : null}
 
             {vendorMode ? (
