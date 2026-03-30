@@ -1214,11 +1214,29 @@ def list_vendor_applications(user: dict = Depends(get_current_user)):
     apps = [
         a for a in _APPLICATIONS.values() if _norm_email(a.get("vendor_email")) == email
     ]
+
+    dirty = False
+
     for a in apps:
         d = a.get("documents") or a.get("docs") or {}
         a["documents"] = d
         a["docs"] = d
-        _persist_resolved_booth_price(a)
+
+        try:
+            before = a.get("amount_cents")
+            _persist_resolved_booth_price(a)
+            after = a.get("amount_cents")
+            if before != after:
+                dirty = True
+        except Exception as e:
+            print(f"⚠️ Price resolution failed for app {a.get('id')}: {e}")
+
+    if dirty:
+        try:
+            save_store()
+        except Exception as e:
+            print(f"⚠️ Failed to save resolved prices: {e}")
+
     return {"applications": apps}
 
 
