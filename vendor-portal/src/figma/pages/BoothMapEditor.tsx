@@ -1226,30 +1226,6 @@ const overlayDetail = overlayName
   async function vendorSelectBooth(boothId: string) {
     if (!vendorMode) return;
 
-    const chosenBooth =
-      activeLevel.booths.find((b: any) => String(b?.id || "").trim() === String(boothId || "").trim()) ||
-      activeLevel.booths.find((b: any) => String(b?.label || "").trim() === String(boothId || "").trim()) ||
-      (selectedBooth &&
-      (
-        String((selectedBooth as any)?.id || "").trim() === String(boothId || "").trim() ||
-        String((selectedBooth as any)?.label || "").trim() === String(boothId || "").trim()
-      )
-        ? (selectedBooth as any)
-        : null);
-
-    const boothInternalId = String(chosenBooth?.id || boothId || "").trim();
-    const boothLabel = String(chosenBooth?.label || "").trim();
-
-    // Persist the vendor-facing booth label when available so backend pricing can
-    // match applications against diagram booths like "Booth 1" and avoid the
-    // stale $100 fallback that came from older booth values.
-    const boothRequestValue = boothLabel || boothInternalId;
-
-    if (!boothRequestValue) {
-      window.alert("Invalid booth selection.");
-      return;
-    }
-
     let effectiveAppId = vendorAppId;
 
     try {
@@ -1281,29 +1257,22 @@ const overlayDetail = overlayName
       }
 
       const boothObj = activeLevel.booths.find(
-  (b: any) => String(b.id) === String(boothInternalId)
-);
+        (b: any) => String(b.id) === String(boothId)
+      );
 
-const boothLabelSafe = boothObj?.label
-  ? String(boothObj.label)
-  : String(boothRequestValue);
+      const boothLabelSafe = boothObj?.label
+        ? String(boothObj.label).trim()
+        : String(boothId).trim();
 
-const boothObj = activeLevel.booths.find(
-  (b: any) => String(b.id) === String(boothId)
-);
+      const updated = await vendorUpdateApplication({
+        applicationId: effectiveAppId,
+        booth_id: boothLabelSafe,
+      } as any);
 
-const boothLabelSafe = boothObj?.label
-  ? String(boothObj.label).trim()
-  : String(boothId).trim();
-
-const updated = await vendorUpdateApplication({
-  applicationId: effectiveAppId,
-  booth_id: boothLabelSafe,
-} as any);
-
-const savedBoothId = String(
-  updated?.requested_booth_id || updated?.booth_id || boothLabelSafe
-).trim();
+      const savedBoothId = String(
+        updated?.requested_booth_id || updated?.booth_id || boothLabelSafe
+      ).trim();
+      setVendorBoothId(savedBoothId);
 
       try {
         const result = await evaluateVendorSubmissionReadiness(effectiveAppId);
@@ -1317,9 +1286,6 @@ const savedBoothId = String(
       const params = new URLSearchParams();
       params.set("appId", String(effectiveAppId));
       params.set("boothId", savedBoothId);
-      if (boothLabel) {
-        params.set("boothLabel", boothLabel);
-      }
 
       navigate(
         `/vendor/events/${encodeURIComponent(String(eventId))}/requirements?${params.toString()}`
@@ -1330,7 +1296,6 @@ const savedBoothId = String(
   }
 
   async function assignVendorToSelectedBooth(appId: number) {
-
     if (isLocked) {
       window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
       return;
@@ -1619,15 +1584,9 @@ const savedBoothId = String(
             </button>
 
             {!pickerMode && !vendorMode ? (
-             <button
-  onClick={() => {
-    void saveNow();
-  }}
-  style={pill(true)}
-  disabled={isSaving}
->
-  {isSaving ? "Saving…" : "Save"}
-</button>
+              <button onClick={saveNow} style={pill(true)} disabled={isSaving}>
+                {isSaving ? "Saving…" : "Save"}
+              </button>
             ) : null}
 
             {vendorMode ? (
