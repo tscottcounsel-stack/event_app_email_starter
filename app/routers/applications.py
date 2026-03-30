@@ -2489,3 +2489,18 @@ def create_organizer_review(
         "rating": summary["rating"],
         "review_count": summary["review_count"],
     }
+
+@router.get("/debug/application-event/{app_id}")
+def debug_application_event(app_id: int, user: dict = Depends(get_current_user)):
+    app = _APPLICATIONS.get(int(app_id))
+    event = None
+    if isinstance(app, dict):
+        try:
+            event = _EVENTS.get(int(app.get("event_id") or 0))
+        except Exception:
+            event = None
+
+    return {
+        "application": app,
+        "event": event,
+    }
