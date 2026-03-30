@@ -502,9 +502,22 @@ def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
     ]:
         if value is None:
             continue
+
         text = str(value).strip().lower()
-        if text:
-            candidates.add(text)
+        if not text:
+            continue
+
+        candidates.add(text)
+
+        if text.isdigit():
+            candidates.add(f"booth {text}")
+            candidates.add(f"booth_{text}")
+            candidates.add(f"booth-{text}")
+
+        if text.startswith("booth "):
+            num = text.replace("booth ", "").strip()
+            if num:
+                candidates.add(num)
 
     return candidates
 
@@ -1085,6 +1098,7 @@ def apply_to_event(
         app["requested_booth_id"] = requested_booth_id or None
 
     app["updated_at"] = utc_now_iso()
+    _persist_resolved_booth_price(app)
     save_store()
     return {"ok": True, "application": app}
 
@@ -1165,6 +1179,7 @@ def update_application_progress(
     if payload.booth_category_id is not None:
         app["booth_category_id"] = str(payload.booth_category_id).strip() or None
 
+    _persist_resolved_booth_price(app)
     app["updated_at"] = utc_now_iso()
     save_store()
     return {"ok": True, "application": app}
