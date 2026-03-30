@@ -1,4 +1,4 @@
-﻿// src/figma/pages/BoothMapEditor.tsx
+// src/figma/pages/BoothMapEditor.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { readSession as readAuthSession } from "../../auth/authStorage";
@@ -203,6 +203,9 @@ function isEmptyDiagramDoc(doc: DiagramDoc | null | undefined) {
   return legacyBooths.length === 0;
 }
 
+function lsDiagramKey(eventId: string) {
+  return `event:${String(eventId)}:diagram`;
+}
 
 function pill(active: boolean): React.CSSProperties {
   return {
@@ -320,12 +323,12 @@ export default function BoothMapEditor() {
   const assignAppId = assignAppIdRaw ? Number(assignAppIdRaw) : null;
   const pickerMode = Boolean(assignAppId);
 
- const vendorAppIdRaw = (
-  searchParams.get("appId") ||
-  searchParams.get("applicationId") ||
-  searchParams.get("appld") ||
-  ""
-).trim();
+  const vendorAppIdRaw = (
+    searchParams.get("appId") ||
+    searchParams.get("applicationId") ||
+    searchParams.get("appld") ||
+    ""
+  ).trim();
 
   const vendorAppId =
     vendorAppIdRaw && /^\d+$/.test(vendorAppIdRaw) ? Number(vendorAppIdRaw) : null;
@@ -333,73 +336,74 @@ export default function BoothMapEditor() {
   const isVendorRoute = location.pathname.startsWith("/vendor/");
   const vendorMode = Boolean(isVendorRoute && !pickerMode);
 
-useEffect(() => {
-  if (!vendorMode) return;
-  if (!eventId) return;
+  useEffect(() => {
+    if (!vendorMode) return;
+    if (!eventId) return;
 
-  let cancelled = false;
+    let cancelled = false;
 
-  async function fixAppId() {
-    try {
-      let needsRepair = false;
+    async function fixAppId() {
+      try {
+        let needsRepair = false;
 
-      if (!vendorAppId) {
-        needsRepair = true;
-      } else {
-        try {
-          const existing = await vendorGetApplication({ applicationId: vendorAppId });
+        if (!vendorAppId) {
+          needsRepair = true;
+        } else {
+          try {
+            const existing = await vendorGetApplication({ applicationId: vendorAppId });
+            const existingEventId = String(
+              (existing as any)?.event_id ??
+                (existing as any)?.eventId ??
+                (existing as any)?.event?.id ??
+                ""
+            ).trim();
 
-          const existingEventId = String(
-            (existing as any)?.event_id ??
-            (existing as any)?.eventId ??
-            (existing as any)?.event?.id ??
-            ""
-          ).trim();
-
-          if (!existingEventId || existingEventId !== String(eventId)) {
+            if (!existingEventId || existingEventId !== String(eventId)) {
+              needsRepair = true;
+            }
+          } catch {
             needsRepair = true;
           }
-        } catch {
-          needsRepair = true;
         }
+
+        if (!needsRepair) return;
+
+        const draft = await vendorGetOrCreateDraftApplication(Number(eventId));
+
+        const resolvedDraftId =
+          (draft as any)?.id ??
+          (draft as any)?.application?.id ??
+          (draft as any)?.applicationId ??
+          (draft as any)?.application_id ??
+          (draft as any)?.data?.id ??
+          (draft as any)?.data?.application?.id ??
+          (draft as any)?.data?.applicationId ??
+          (draft as any)?.data?.application_id;
+
+        const numericId = Number(resolvedDraftId);
+        if (!numericId || Number.isNaN(numericId)) return;
+        if (cancelled) return;
+
+        const params = new URLSearchParams(location.search);
+        params.delete("appld");
+        params.delete("applicationId");
+        params.set("appId", String(numericId));
+
+        navigate(
+          `/vendor/events/${encodeURIComponent(String(eventId))}/map?${params.toString()}`,
+          { replace: true }
+        );
+      } catch (e) {
+        console.error("Failed to fix appId", e);
       }
-
-      if (!needsRepair) return;
-
-      const draft = await vendorGetOrCreateDraftApplication(Number(eventId));
-
-      const resolvedDraftId =
-        (draft as any)?.id ??
-        (draft as any)?.application?.id ??
-        (draft as any)?.applicationId ??
-        (draft as any)?.application_id ??
-        (draft as any)?.data?.id ??
-        (draft as any)?.data?.application?.id ??
-        (draft as any)?.data?.applicationId ??
-        (draft as any)?.data?.application_id;
-
-      const numericId = Number(resolvedDraftId);
-      if (!numericId || Number.isNaN(numericId)) return;
-      if (cancelled) return;
-
-      const params = new URLSearchParams(location.search);
-      params.set("appId", String(numericId));
-
-      navigate(
-        `/vendor/events/${encodeURIComponent(String(eventId))}/map?${params.toString()}`,
-        { replace: true }
-      );
-    } catch (e) {
-      console.error("Failed to fix appId", e);
     }
-  }
 
-  fixAppId();
+    void fixAppId();
 
-  return () => {
-    cancelled = true;
-  };
-}, [vendorMode, eventId, vendorAppId, location.search, navigate]);
+    return () => {
+      cancelled = true;
+    };
+  }, [vendorMode, eventId, vendorAppId, location.search, navigate]);
 
   const [isPublished, setIsPublished] = useState<boolean>(false);
   const [layoutOverrideUntil, setLayoutOverrideUntil] = useState<number | null>(null);
@@ -790,9 +794,6 @@ useEffect(() => {
         if (!apiHasLayout) {
           setLevels([{ id: "level-1", name: "Level 1", booths: [], elements: [] }]);
           setActiveLevelId("level-1");
-          setCanvasW(1200);
-          setCanvasH(800);
-          setGridSize(20);
           setStatusMsg("New diagram initialized");
           return;
         }
@@ -823,6 +824,8 @@ useEffect(() => {
           ]);
           setActiveLevelId("level-1");
         }
+
+        localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: d }));
         setStatusMsg("Loaded");
       } catch (e: any) {
         setDiagramBoothStateById({});
@@ -938,7 +941,7 @@ useEffect(() => {
 
   function beginDrag(kind: "booth" | "element", id: string, e: React.MouseEvent) {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to move items.");
+      window.alert("Published (Locked) — unlock layout to move items.");
       return;
     }
     setDrag({ kind, id, cx: e.clientX, cy: e.clientY });
@@ -946,7 +949,7 @@ useEffect(() => {
 
   function beginResize(kind: "booth" | "element", id: string, e: React.MouseEvent) {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to resize items.");
+      window.alert("Published (Locked) — unlock layout to resize items.");
       return;
     }
     e.stopPropagation();
@@ -985,7 +988,7 @@ useEffect(() => {
     try {
       setIsSaving(true);
       setSaveError(null);
-      setStatusMsg("Savingâ€¦");
+      setStatusMsg("Saving…");
 
       const doc: DiagramDoc = {
         version: 2,
@@ -1002,6 +1005,7 @@ useEffect(() => {
 
       const safeDoc = JSON.parse(JSON.stringify(doc)) as DiagramDoc;
       await saveEventDiagram(eventId, safeDoc);
+      localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: safeDoc }));
       setIsPublished(nextPublished);
       setStatusMsg("Saved");
     } catch (e: any) {
@@ -1047,7 +1051,7 @@ useEffect(() => {
 
   function addBooth() {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to add booths.");
+      window.alert("Published (Locked) — unlock layout to add booths.");
       return;
     }
 
@@ -1079,7 +1083,7 @@ useEffect(() => {
 
   function deleteSelected() {
     if (layoutLocked) {
-      window.alert("Published (Locked) â€” unlock layout to delete items.");
+      window.alert("Published (Locked) — unlock layout to delete items.");
       return;
     }
 
@@ -1162,11 +1166,11 @@ const rawOverlayName =
 
 const overlayName =
   effectiveStatus === "paid" && rawOverlayName
-    ? `${rawOverlayName} ðŸ”’`
+    ? `${rawOverlayName} 🔒`
     : rawOverlayName;
 
 const overlayDetail = overlayName
-  ? `${effectiveStatus.toUpperCase()} â€¢ ${overlayName}`
+  ? `${effectiveStatus.toUpperCase()} • ${overlayName}`
   : effectiveStatus.toUpperCase();
 
     return {
@@ -1282,7 +1286,7 @@ const overlayDetail = overlayName
 
   async function assignVendorToSelectedBooth(appId: number) {
     if (isLocked) {
-      window.alert("Paid â€” Booth selection is locked. Contact the organizer to make changes.");
+      window.alert("Paid — Booth selection is locked. Contact the organizer to make changes.");
       return;
     }
 
@@ -1402,8 +1406,8 @@ const overlayDetail = overlayName
           }}
         >
           {layoutOverrideActive
-            ? "Published â€” Layout temporarily UNLOCKED for edits (auto-relocks)."
-            : "Published â€” Layout is LOCKED. Assignments/reassignments are still allowed."}
+            ? "Published — Layout temporarily UNLOCKED for edits (auto-relocks)."
+            : "Published — Layout is LOCKED. Assignments/reassignments are still allowed."}
         </div>
       ) : null}
 
@@ -1420,7 +1424,7 @@ const overlayDetail = overlayName
             fontWeight: 900,
           }}
         >
-          Paid â€” Booth selection is locked. Contact the organizer to make changes.
+          Paid — Booth selection is locked. Contact the organizer to make changes.
         </div>
       ) : null}
 
@@ -1439,7 +1443,7 @@ const overlayDetail = overlayName
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
             <button onClick={() => window.history.back()} style={pill(false)}>
-              â† <span>Back</span>
+              ← <span>Back</span>
             </button>
 
             <div style={{ minWidth: 0 }}>
@@ -1450,14 +1454,14 @@ const overlayDetail = overlayName
                 Event {eventId}
                 {pickerMode ? (
                   <>
-                    {" "}â€¢ <span style={{ color: "#0f172a" }}>Assign mode</span>
-                    {assignAppId ? <> â€¢ App #{assignAppId}</> : null}
+                    {" "}• <span style={{ color: "#0f172a" }}>Assign mode</span>
+                    {assignAppId ? <> • App #{assignAppId}</> : null}
                   </>
                 ) : vendorMode ? (
                   <>
-                    {" "}â€¢ <span style={{ color: "#0f172a" }}>Vendor view</span>
-                    {vendorAppId ? <> â€¢ App #{vendorAppId}</> : null}
-                    {vendorBoothId ? <> â€¢ Booth {vendorBoothId}</> : null}
+                    {" "}• <span style={{ color: "#0f172a" }}>Vendor view</span>
+                    {vendorAppId ? <> • App #{vendorAppId}</> : null}
+                    {vendorBoothId ? <> • Booth {vendorBoothId}</> : null}
                   </>
                 ) : null}
               </div>
@@ -1509,7 +1513,7 @@ const overlayDetail = overlayName
                       try {
                         await saveNow(false);
                         window.alert(
-                          "Layout unpublished (event remains published on vendor side â€” no unpublish endpoint yet)."
+                          "Layout unpublished (event remains published on vendor side — no unpublish endpoint yet)."
                         );
                       } catch (e: any) {
                         console.error(e);
@@ -1546,7 +1550,7 @@ const overlayDetail = overlayName
               onClick={() => setZoom((z) => +clamp(z - 0.1, 0.45, 2).toFixed(2))}
               style={pill(false)}
             >
-              âˆ’
+              −
             </button>
 
             <div
@@ -1570,7 +1574,7 @@ const overlayDetail = overlayName
 
             {!pickerMode && !vendorMode ? (
               <button onClick={() => { void saveNow(); }} style={pill(true)} disabled={isSaving}>
-                {isSaving ? "Savingâ€¦" : "Save"}
+                {isSaving ? "Saving…" : "Save"}
               </button>
             ) : null}
 
@@ -1704,7 +1708,10 @@ const overlayDetail = overlayName
                     setSelectedId(el.id);
                     setDrawerOpen(true);
                     setTab("elements");
-                  if (!pickerMode && !vendorMode && !isLocked) beginDrag("element", el.id, e);                  }}
+                    if (!pickerMode && !vendorMode && !isLocked) {
+                      beginDrag("element", el.id, e);
+                    }
+                  }}
                   style={{
                     position: "absolute",
                     left: el.x * zoom,
@@ -1727,7 +1734,8 @@ const overlayDetail = overlayName
                     {el.label || elementLabel(el.type)}
                   </div>
 
-                                                           {selected && !pickerMode && !vendorMode ? (                                  <div
+                  {selected && !pickerMode && !vendorMode ? (
+                    <div
                       onMouseDown={(e) => beginResize("element", el.id, e)}
                       style={{
                         position: "absolute",
@@ -1775,7 +1783,7 @@ const overlayDetail = overlayName
 
                     if (isLocked) {
                       window.alert(
-                        "Paid â€” Booth selection is locked. Contact the organizer to make changes."
+                        "Paid — Booth selection is locked. Contact the organizer to make changes."
                       );
                       return;
                     }
@@ -1902,7 +1910,7 @@ const overlayDetail = overlayName
                     }}
                   >
                     <div style={{ fontSize: 11, fontWeight: 900, color: "#475569" }}>
-                      {category ? category : "â€”"}
+                      {category ? category : "—"}
                     </div>
                     <div style={{ fontSize: 12, fontWeight: 1000, color: "#0f172a" }}>
                       {price ? `$${price}` : ""}
@@ -1921,7 +1929,7 @@ const overlayDetail = overlayName
                         alignSelf: "flex-start",
                       }}
                     >
-                      Held â€¢ {holdCountdown}
+                      Held • {holdCountdown}
                     </div>
                   ) : null}
 
@@ -2185,7 +2193,7 @@ const overlayDetail = overlayName
                                   fontWeight: 900,
                                 }}
                               >
-                                <option value="">â€”</option>
+                                <option value="">—</option>
                                 {CATEGORY_OPTIONS.map((c) => (
                                   <option key={c} value={c}>
                                     {c}
@@ -2390,7 +2398,7 @@ const overlayDetail = overlayName
                               color: "#64748b",
                             }}
                           >
-                            App #{a.id} â€¢ {String(a.status || "").toUpperCase()} â€¢ {pay.toUpperCase()}
+                            App #{a.id} • {String(a.status || "").toUpperCase()} • {pay.toUpperCase()}
                           </div>
                           {boothId ? (
                             <div
@@ -2463,7 +2471,7 @@ const overlayDetail = overlayName
                             }}
                           >
                             <div style={{ fontWeight: 1000, fontSize: 13, color: "#0f172a" }}>
-                              {boothId} â€¢ {r.paymentStatus.toUpperCase()}
+                              {boothId} • {r.paymentStatus.toUpperCase()}
                             </div>
                             {who ? (
                               <div
