@@ -1280,13 +1280,19 @@ const overlayDetail = overlayName
         return;
       }
 
-      const updated = await vendorUpdateApplication({
-        applicationId: effectiveAppId,
-        booth_id: boothRequestValue,
-        booth_label: boothLabel || undefined,
-        booth_internal_id: boothInternalId || undefined,
-      } as any);
+      const boothObj = activeLevel.booths.find(
+  (b: any) => String(b.id) === String(boothInternalId)
+);
 
+const boothLabelSafe = boothObj?.label
+  ? String(boothObj.label)
+  : String(boothRequestValue);
+
+const updated = await vendorUpdateApplication({
+  applicationId: effectiveAppId,
+  booth_id: boothLabelSafe,
+} as any);
+       
       const savedBoothId = String(
         updated?.requested_booth_id || updated?.booth_id || boothRequestValue
       ).trim();
