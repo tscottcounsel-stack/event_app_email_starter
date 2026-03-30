@@ -994,7 +994,7 @@ useEffect(() => {
 
 
 
- async function saveNow(nextPublished: boolean = isPublished) {
+async function saveNow(nextPublished: boolean = isPublished) {
   if (!eventId) return;
 
   try {
@@ -1002,48 +1002,46 @@ useEffect(() => {
     setSaveError(null);
     setStatusMsg("Saving…");
 
-    const sanitizedLevels = levels.map((lvl) => ({
-      id: String(lvl.id),
-      name: String(lvl.name),
-      booths: (Array.isArray(lvl.booths) ? lvl.booths : []).map((b: any) => ({
-        id: String(b?.id ?? ""),
-        label: String(b?.label ?? ""),
-        x: Number(b?.x ?? 0),
-        y: Number(b?.y ?? 0),
-        width: Number(b?.width ?? 140),
-        height: Number(b?.height ?? 110),
-        category: String(b?.category ?? ""),
-        price: Number(b?.price ?? 0),
-        status: String(b?.status ?? "available"),
-        companyName: String(b?.companyName ?? ""),
-      })),
-      elements: (Array.isArray(lvl.elements) ? lvl.elements : []).map((el: any) => ({
-        id: String(el?.id ?? ""),
-        type: String(el?.type ?? "shape"),
-        x: Number(el?.x ?? 0),
-        y: Number(el?.y ?? 0),
-        width: Number(el?.width ?? 100),
-        height: Number(el?.height ?? 60),
-        label: el?.label == null ? undefined : String(el.label),
-      })),
+    // 🔥 HARD CLEAN — strips ANY non-serializable garbage
+    const safeLevels = JSON.parse(JSON.stringify(levels, (key, value) => {
+      // ❌ kill DOM / React internals
+      if (
+        value instanceof HTMLElement ||
+        key === "__reactFiber" ||
+        key === "__reactProps" ||
+        key === "_owner" ||
+        key === "stateNode"
+      ) {
+        return undefined;
+      }
+      return value;
     }));
 
     const doc: DiagramDoc = {
       version: 2,
       published: nextPublished,
       meta: { published: nextPublished },
-      canvas: { width: Number(canvasW), height: Number(canvasH), gridSize: Number(gridSize) },
-      levels: sanitizedLevels,
+      canvas: {
+        width: Number(canvasW),
+        height: Number(canvasH),
+        gridSize: Number(gridSize),
+      },
+      levels: safeLevels,
     };
 
     await saveEventDiagram(eventId, doc);
-    localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: doc }));
+
+    localStorage.setItem(
+      lsDiagramKey(eventId),
+      JSON.stringify({ diagram: doc })
+    );
+
     setIsPublished(nextPublished);
-    setStatusMsg("Saved");
+    setStatusMsg("Saved ✅");
   } catch (e: any) {
-    setSaveError(e?.message ? String(e.message) : "Save failed");
-    setStatusMsg("Save failed");
-    throw e;
+    console.error("SAVE ERROR:", e);
+    setSaveError(e?.message || "Save failed");
+    setStatusMsg("Save failed ❌");
   } finally {
     setIsSaving(false);
   }
