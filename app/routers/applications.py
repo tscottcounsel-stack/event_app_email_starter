@@ -544,7 +544,7 @@ def _booth_match_values(item: Dict[str, Any]) -> set[str]:
 
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    event = _get_event_for_app(app)
+    event = get_event_or_404(app.event_id)
     diagram = event.get("diagram") or {}
     booths = diagram.get("booths") or []
 
