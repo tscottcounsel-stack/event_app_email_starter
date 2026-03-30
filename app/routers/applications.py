@@ -515,6 +515,23 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
     if not isinstance(event, dict):
         return 0
 
+def _booth_match_values(booth: dict) -> list[str]:
+    vals = []
+
+    for k in [
+        "id",
+        "booth_id",
+        "boothId",
+        "label",
+        "name",
+        "number",
+        "booth_number",
+    ]:
+        v = booth.get(k)
+        if v:
+            vals.append(str(v).strip())
+
+    return list(dict.fromkeys(vals))
     def maybe_price_from_booth(booth: Any, extra_keys: Optional[List[Any]] = None) -> int:
         if not isinstance(booth, dict):
             return 0
