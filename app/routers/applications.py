@@ -544,48 +544,32 @@ def _booth_match_values(item: Dict[str, Any]) -> set[str]:
 
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
-    event = _EVENTS.get(int(app.get("event_id") or 0), {})
-    if not isinstance(event, dict):
-        return 0
+    event = _get_event_for_app(app)
+    diagram = event.get("diagram") or {}
+    booths = diagram.get("booths") or []
 
     booth_keys = _app_booth_candidates(app)
 
-    # ✅ NEW: support levels[].booths[] (YOUR ACTUAL DATA STRUCTURE)
-    levels = event.get("diagram", {}).get("levels") or []
-    for level in levels:
-        booths = level.get("booths") or []
-        for booth in booths:
-            if not isinstance(booth, dict):
-                continue
+    for booth in booths:
+        label = str(booth.get("label", "")).strip().lower()
+        booth_id = str(booth.get("id", "")).strip().lower()
 
-            values = _booth_match_values(booth)
+        # 🔥 MATCH 1: direct ID match
+        if booth_id and booth_id in booth_keys:
+            price = booth.get("price") or booth.get("price_cents") or 0
+            return int(price)
 
-            if booth_keys & values:
-                cents = _extract_price_to_cents(
-                    booth.get("price")
-                    or booth.get("price_cents")
-                    or booth.get("priceCents")
-                )
-                if cents > 0:
-                    return cents
+        # 🔥 MATCH 2: label match
+        if label and label in booth_keys:
+            price = booth.get("price") or booth.get("price_cents") or 0
+            return int(price)
 
-    # ✅ fallback (keep existing support)
-    booth_map = event.get("diagram", {}).get("boothMap") or []
-    if isinstance(booth_map, list):
-        for item in booth_map:
-            if not isinstance(item, dict):
-                continue
-
-            values = _booth_match_values(item)
-
-            if booth_keys & values:
-                cents = _extract_price_to_cents(
-                    item.get("price")
-                    or item.get("price_cents")
-                    or item.get("priceCents")
-                )
-                if cents > 0:
-                    return cents
+        # 🔥 MATCH 3: extract number from label (Booth 2 → "2")
+        if label.startswith("booth"):
+            num = label.replace("booth", "").strip()
+            if num and num in booth_keys:
+                price = booth.get("price") or booth.get("price_cents") or 0
+                return int(price)
 
     return 0
 
