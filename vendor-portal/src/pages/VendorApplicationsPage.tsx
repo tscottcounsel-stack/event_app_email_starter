@@ -74,6 +74,7 @@ type LoadedRequirements = {
 /* ---------------- localStorage keys ---------------- */
 
 const LS_VENDOR_APPLY_PROGRESS_PREFIX = "vendor_apply_progress_v1";
+
 function makeProgressKeyStable(eventId: string) {
   return `${LS_VENDOR_APPLY_PROGRESS_PREFIX}:event:${eventId}`;
 }
@@ -114,7 +115,6 @@ function buildLocalAuthHeaders() {
 
   return headers;
 }
-
 
 function formatDate(iso?: string) {
   if (!iso) return "—";
@@ -324,6 +324,14 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
   return primary;
 }
 
+function resolveNumericApplicationId(id: any): number | null {
+  if (!id) return null;
+
+  const n = Number(id);
+  if (Number.isFinite(n)) return n;
+
+  return null;
+}
 
 async function handlePayNow(app: VendorProgressCard) {
   const appId = resolveNumericApplicationId(app.applicationId ?? app.appId);
@@ -386,9 +394,9 @@ export default function VendorApplicationsPage() {
     const headers = buildLocalAuthHeaders();
 
     const hasIdentity =
-      !!(headers as any).Authorization ||
-      !!(headers as any)["x-user-email"] ||
-      !!(headers as any)["x-user-id"];
+      !!headers.Authorization ||
+      !!headers["x-user-email"] ||
+      !!headers["x-user-id"];
 
     if (!hasIdentity) {
       throw new Error(
@@ -412,7 +420,9 @@ export default function VendorApplicationsPage() {
 
     setServerAppsRaw(normalized);
 
-    const uniqueEventIds = Array.from(new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean)));
+    const uniqueEventIds = Array.from(
+      new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean))
+    );
     const nextReq: Record<string, LoadedRequirements | null> = {};
 
     await Promise.all(
@@ -474,32 +484,35 @@ export default function VendorApplicationsPage() {
       try {
         setPaymentMessage(null);
 
-        const res = await fetch(`${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`, {
-          method: "POST",
-          headers: {
-            ...buildLocalAuthHeaders(),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ session_id: sessionId }),
-        });
+        const res = await fetch(
+          `${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`,
+          {
+            method: "POST",
+            headers: {
+              ...buildLocalAuthHeaders(),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ session_id: sessionId }),
+          }
+        );
 
         const data = await res.json().catch(() => null);
 
-if (!res.ok) {
-  const detail =
-    (typeof data?.detail === "string" && data.detail) ||
-    (typeof data?.message === "string" && data.message) ||
-    `Unable to confirm payment (${res.status}).`;
+        if (!res.ok) {
+          const detail =
+            (typeof data?.detail === "string" && data.detail) ||
+            (typeof data?.message === "string" && data.message) ||
+            `Unable to confirm payment (${res.status}).`;
 
-  const normalized = detail.toLowerCase();
-  const webhookOnly =
-    res.status === 403 &&
-    normalized.includes("disabled outside development");
+          const normalized = detail.toLowerCase();
+          const webhookOnly =
+            res.status === 403 &&
+            normalized.includes("disabled outside development");
 
-  if (!webhookOnly) {
-    throw new Error(detail);
-  }
-}
+          if (!webhookOnly) {
+            throw new Error(detail);
+          }
+        }
 
         await loadApplications();
         setPaymentMessage("Payment confirmed.");
@@ -517,213 +530,243 @@ if (!res.ok) {
     })();
   }, [loadApplications]);
 
-  const cards = useMemo(() => pickPrimaryPerEvent(serverAppsRaw), [serverAppsRaw]);
+  const cards = useMemo(() => {
+    try {
+      return pickPrimaryPerEvent(serverAppsRaw || []);
+    } catch (e) {
+      console.error("Card processing crash:", e);
+      return [];
+    }
+  }, [serverAppsRaw]);
 
-  return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
-            <p className="mt-2 text-sm font-semibold text-slate-600">
-              One card per event (most recent application). Draft progress shown from your browser.
-            </p>
-          </div>
+  if (!Array.isArray(serverAppsRaw)) {
+    return (
+      <div style={{ padding: 40, fontWeight: "bold" }}>
+        ⚠️ Applications data is invalid or failed to load.
+      </div>
+    );
+  }
 
-          <div className="flex gap-2">
-            <button
-              onClick={() => nav("/vendor/events")}
-              className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
-              type="button"
-            >
-              Browse Events
-            </button>
-          </div>
-        </div>
-
-        {paymentMessage ? (
-          <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm font-semibold text-indigo-900">
-            {paymentMessage}
-          </div>
-        ) : null}
-
-        <div className="mt-6">
-          {loading ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-700 shadow-sm">
-              Loading applications…
-            </div>
-          ) : serverError ? (
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
-              <div className="font-black">Server applications unavailable</div>
-              <div className="mt-1 opacity-90">{serverError}</div>
-              <div className="mt-2 text-xs font-bold text-amber-800">
-                If this is unexpected, confirm you are logged in and that the request includes identity headers.
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
-              Loaded server applications: <span className="font-black">{serverAppsRaw.length}</span>{" "}
-              <span className="ml-2 text-emerald-800/80">(showing {cards.length} event cards)</span>
-            </div>
-          )}
-        </div>
-
-        {cards.length === 0 ? (
-          <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-            <div className="text-xl font-black text-slate-900">No applications yet</div>
-            <div className="mt-2 text-sm font-semibold text-slate-600">
-              When you submit an application, it will show up here.
+  try {
+    return (
+      <div className="min-h-screen bg-slate-50">
+        <div className="mx-auto max-w-6xl px-6 py-10">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
+              <p className="mt-2 text-sm font-semibold text-slate-600">
+                One card per event (most recent application). Draft progress shown from your browser.
+              </p>
             </div>
 
-            <div className="mt-6 flex gap-3">
+            <div className="flex gap-2">
               <button
                 onClick={() => nav("/vendor/events")}
                 className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
                 type="button"
               >
-                Find Events
+                Browse Events
               </button>
             </div>
           </div>
-        ) : (
-          <div className="mt-10 grid gap-4">
-            {cards.map((it) => {
-              const eid = normalizeId(it.eventId);
-              const req = reqByEventId[eid] ?? null;
 
-              const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
-              const local = localByKey[localKey] ?? null;
+          {paymentMessage ? (
+            <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm font-semibold text-indigo-900">
+              {paymentMessage}
+            </div>
+          ) : null}
 
-              const effectiveChecked = local?.checked ?? it.checked ?? {};
+          <div className="mt-6">
+            {loading ? (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-700 shadow-sm">
+                Loading applications…
+              </div>
+            ) : serverError ? (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+                <div className="font-black">Server applications unavailable</div>
+                <div className="mt-1 opacity-90">{serverError}</div>
+                <div className="mt-2 text-xs font-bold text-amber-800">
+                  If this is unexpected, confirm you are logged in and that the request includes identity headers.
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
+                Loaded server applications: <span className="font-black">{serverAppsRaw.length}</span>{" "}
+                <span className="ml-2 text-emerald-800/80">(showing {cards.length} event cards)</span>
+              </div>
+            )}
+          </div>
 
-              const serverDocs =
-                it.documents && typeof it.documents === "object"
-                  ? it.documents
-                  : it.docs && typeof it.docs === "object"
-                  ? it.docs
-                  : {};
+          {!cards || cards.length === 0 ? (
+            <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+              <div className="text-xl font-black text-slate-900">No applications yet</div>
+              <div className="mt-2 text-sm font-semibold text-slate-600">
+                When you submit an application, it will show up here.
+              </div>
 
-              const effectiveDocs = local?.docs ?? serverDocs ?? {};
-              const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
+              <div className="mt-6 flex gap-3">
+                <button
+                  onClick={() => nav("/vendor/events")}
+                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
+                  type="button"
+                >
+                  Find Events
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-10 grid gap-4">
+              {cards.map((it) => {
+                const eid = normalizeId(it.eventId);
+                const req = reqByEventId[eid] ?? null;
 
-              const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
-              const status = it.status || "draft";
+                const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
+                const local = localByKey[localKey] ?? null;
 
-              const resolvedApplicationId = String(it.applicationId || "").trim();
-              const params = new URLSearchParams();
-              if (resolvedApplicationId) params.set("appId", resolvedApplicationId);
-              if (it.boothId) params.set("boothId", it.boothId);
+                const effectiveChecked = local?.checked ?? it.checked ?? {};
 
-              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(resolvedApplicationId)}`;
+                const serverDocs =
+                  it.documents && typeof it.documents === "object"
+                    ? it.documents
+                    : it.docs && typeof it.docs === "object"
+                    ? it.docs
+                    : {};
 
-              const reqSource =
-                req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
+                const effectiveDocs = local?.docs ?? serverDocs ?? {};
+                const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
 
-              const progressSource = local ? "progress: local" : "progress: server";
-              const showPayButton = status === "approved" && it.paymentStatus !== "paid";
+                const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
+                const status = it.status || "draft";
 
-              return (
-                <div key={`${it.eventId}:${it.appId}`} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="min-w-[240px]">
-                      <div className="text-lg font-black text-slate-900">
-                        Event #{it.eventId}
-                        {it.boothId ? (
-                          <span className="ml-2 text-sm font-extrabold text-slate-500">• Requested Booth {it.boothId}</span>
-                        ) : null}
+                const resolvedApplicationId = String(it.applicationId || "").trim();
+                const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(
+                  resolvedApplicationId
+                )}`;
+
+                const reqSource =
+                  req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
+
+                const progressSource = local ? "progress: local" : "progress: server";
+                const showPayButton = status === "approved" && it.paymentStatus !== "paid";
+
+                return (
+                  <div
+                    key={`${it.eventId}:${it.appId}`}
+                    className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="min-w-[240px]">
+                        <div className="text-lg font-black text-slate-900">
+                          Event #{it.eventId}
+                          {it.boothId ? (
+                            <span className="ml-2 text-sm font-extrabold text-slate-500">
+                              • Requested Booth {it.boothId}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <div className="mt-1 text-xs font-semibold text-slate-500">
+                          Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
+                          {it.submittedAt ? (
+                            <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
+                          ) : null}
+                          <span className="ml-2">• {reqSource}</span>
+                          <span className="ml-2">• {progressSource}</span>
+                        </div>
                       </div>
 
-                      <div className="mt-1 text-xs font-semibold text-slate-500">
-                        Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
-                        {it.submittedAt ? <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span> : null}
-                        <span className="ml-2">• {reqSource}</span>
-                        <span className="ml-2">• {progressSource}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={
-                          "rounded-full px-3 py-1 text-xs font-extrabold " +
-                          (status === "approved"
-                            ? "bg-emerald-50 text-emerald-700"
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={
+                            "rounded-full px-3 py-1 text-xs font-extrabold " +
+                            (status === "approved"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : status === "rejected"
+                              ? "bg-rose-50 text-rose-700"
+                              : status === "submitted"
+                              ? "bg-indigo-50 text-indigo-700"
+                              : "bg-slate-100 text-slate-700")
+                          }
+                        >
+                          {status === "approved"
+                            ? "Approved"
                             : status === "rejected"
-                            ? "bg-rose-50 text-rose-700"
+                            ? "Rejected"
                             : status === "submitted"
-                            ? "bg-indigo-50 text-indigo-700"
-                            : "bg-slate-100 text-slate-700")
-                        }
-                      >
-                        {status === "approved"
-                          ? "Approved"
-                          : status === "rejected"
-                          ? "Rejected"
-                          : status === "submitted"
-                          ? "Submitted"
-                          : "Draft"}
-                      </span>
+                            ? "Submitted"
+                            : "Draft"}
+                        </span>
 
-                      <span
-                        className={
-                          "rounded-full px-3 py-1 text-xs font-extrabold " +
-                          (it.paymentStatus === "paid"
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-amber-50 text-amber-700")
-                        }
-                      >
-                        {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
-                      </span>
+                        <span
+                          className={
+                            "rounded-full px-3 py-1 text-xs font-extrabold " +
+                            (it.paymentStatus === "paid"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-amber-50 text-amber-700")
+                          }
+                        >
+                          {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
+                        </span>
 
-                      <div className="text-sm font-extrabold text-slate-700">
-                        {pct}% <span className="font-semibold text-slate-500">({done}/{total})</span>
+                        <div className="text-sm font-extrabold text-slate-700">
+                          {pct}% <span className="font-semibold text-slate-500">({done}/{total})</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="mt-4">
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                      <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
+                    <div className="mt-4">
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="mt-5 flex flex-wrap gap-3">
-                    <Link
-                      to={viewUrl}
-                      className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700"
-                    >
-                      View
-                    </Link>
-
-                    <Link
-                      to={`/vendor/events/${encodeURIComponent(it.eventId)}`}
-                      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
-                    >
-                      View Event
-                    </Link>
-
-                    {showPayButton ? (
-                      <button
-                        onClick={() => handlePayNow(it)}
-                        className="rounded-full bg-green-600 px-5 py-2 text-sm font-extrabold text-white shadow-md hover:bg-green-700"
-                        type="button"
+                    <div className="mt-5 flex flex-wrap gap-3">
+                      <Link
+                        to={viewUrl}
+                        className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700"
                       >
-                        Pay Booth Fee
-                      </button>
+                        View
+                      </Link>
+
+                      <Link
+                        to={`/vendor/events/${encodeURIComponent(it.eventId)}`}
+                        className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
+                      >
+                        View Event
+                      </Link>
+
+                      {showPayButton ? (
+                        <button
+                          onClick={() => handlePayNow(it)}
+                          className="rounded-full bg-green-600 px-5 py-2 text-sm font-extrabold text-white shadow-md hover:bg-green-700"
+                          type="button"
+                        >
+                          Pay Booth Fee
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {effectiveNotes ? (
+                      <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                        <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
+                        <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
+                      </div>
                     ) : null}
                   </div>
-
-                  {effectiveNotes ? (
-                    <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-                      <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
-                      <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  } catch (err) {
+    console.error("VendorApplicationsPage render crash:", err);
+    return (
+      <div style={{ padding: 40 }}>
+        <div style={{ fontWeight: 800, fontSize: 20 }}>Applications page crashed.</div>
+        <div style={{ marginTop: 8 }}>Open the browser console for the specific error.</div>
+      </div>
+    );
+  }
 }
