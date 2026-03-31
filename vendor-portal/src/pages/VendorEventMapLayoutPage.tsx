@@ -739,10 +739,20 @@ const createdOrUpdated = await vendorUpdateApplication({
     loadVendorProfileSnapshot();
 
     try {
-      const applied = await persistBoothSelection({
-        booth_id: String(selectedBooth.id),
-        booth_price: Number(selectedBooth.price || 0),
-      });
+      const boothAny = selectedBooth as any;
+
+console.log("🔥 SELECTED BOOTH:", boothAny);
+
+const applied = await persistBoothSelection({
+  booth_id: String(boothAny.id),
+  booth_price: Number(
+    boothAny.price ??
+    boothAny.meta?.price ??
+    boothAny.cost ??
+    boothAny.amount ??
+    0
+  ),
+});
       await submitApplication({ applicationId: (applied as any).id });
 
       navigate(
