@@ -207,6 +207,7 @@ export default function App() {
           <Route path="contacts" element={<OrganizerContactsPage />} />
         </Route>
       </Route>
+      <Route path="/vendor/payment-success" element={<VendorPaymentSuccessPage />} />
 
       {/* ---------- VENDOR PROTECTED ---------- */}
      <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
@@ -214,7 +215,7 @@ export default function App() {
     <Route index element={<Navigate to="dashboard" replace />} />
     <Route path="dashboard" element={<VendorDashboard />} />
     <Route path="events" element={<VendorAvailableEventsPage />} />
-    <Route path="/vendor/payment-success" element={<VendorPaymentSuccessPage />} />    
+       
     <Route path="payment-cancel" element={<Navigate to="/vendor/applications" replace />} />
     <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
     <Route
