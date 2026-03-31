@@ -1924,8 +1924,9 @@ def vendor_pay_now(
         f"{frontend_base}/vendor/applications"
         f"?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
     )
-    success_url = "https://event-app-frontend.vercel.app/vendor/payment-success"
-    cancel_url = "https://event-app-frontend.vercel.app/vendor/payment-cancel"
+    success_url = "https://event-app-frontend-xi.vercel.app/vendor/payment-success"
+    cancel_url = "https://event-app-frontend-xi.vercel.app/vendor/payment-cancel"
+
     desc = (body_description or f"Booth payment for application #{app_id}").strip()
     currency = (body_currency or "usd").strip().lower()
 
