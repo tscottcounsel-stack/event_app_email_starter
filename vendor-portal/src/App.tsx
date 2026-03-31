@@ -61,7 +61,6 @@ import VendorEventRequirementsPage from "./pages/VendorEventRequirementsPage";
 import VendorEventApplyPage from "./pages/VendorEventApplyPage";
 import VendorInviteApplyPage from "./pages/VendorInviteApplyPage";
 import VendorApplicationDetailPage from "./pages/VendorApplicationDetailPage";
-import VendorPaymentSuccessPage from "./pages/VendorPaymentSuccessPage";
 
 /* ---------------- ADMIN ROLE HELPERS ---------------- */
 
@@ -105,6 +104,76 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function PaymentSuccessStandalone() {
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const token = localStorage.getItem("accessToken");
+
+        if (!token) {
+          window.location.replace("/login?returnTo=/vendor/dashboard");
+          return;
+        }
+
+        window.location.replace("/vendor/dashboard?payment=success");
+      } catch {
+        window.location.replace("/vendor/dashboard");
+      }
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#f8fafc",
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 560,
+          background: "#ffffff",
+          border: "1px solid rgba(15,23,42,0.08)",
+          borderRadius: 24,
+          boxShadow: "0 12px 30px rgba(2,6,23,0.08)",
+          padding: 32,
+          textAlign: "center",
+        }}
+      >
+        <div style={{ fontSize: 44, marginBottom: 12 }}>✅</div>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: 32,
+            fontWeight: 800,
+            color: "#0f172a",
+          }}
+        >
+          Payment Successful
+        </h1>
+        <p
+          style={{
+            marginTop: 12,
+            fontSize: 16,
+            color: "#475569",
+          }}
+        >
+          Your booth has been secured.
+          <br />
+          Redirecting you now…
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <Routes>
@@ -126,7 +195,6 @@ export default function App() {
       <Route path="/create-account" element={<CreateAccountPage />} />
       <Route path="/venues" element={<PublicFindVenuesPage />} />
       <Route path="/apply/invite/:inviteId" element={<VendorInviteApplyPage />} />
-
 
       {/* ---------- ADMIN ---------- */}
       <Route
@@ -199,7 +267,6 @@ export default function App() {
             path="events/:eventId/applications/:appId"
             element={<OrganizerApplicationViewPage />}
           />
-         
           <Route
             path="vendor-preview/:applicationId"
             element={<OrganizerVendorPreviewPage />}
@@ -207,47 +274,43 @@ export default function App() {
           <Route path="contacts" element={<OrganizerContactsPage />} />
         </Route>
       </Route>
-      <Route path="/vendor/payment-success" element={<VendorPaymentSuccessPage />} />
+
+      {/* ---------- VENDOR PUBLIC (payment return) ---------- */}
+      <Route path="/vendor/payment-success" element={<PaymentSuccessStandalone />} />
 
       {/* ---------- VENDOR PROTECTED ---------- */}
-     <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
-  <Route path="/vendor" element={<VendorLayout />}>
-    <Route index element={<Navigate to="dashboard" replace />} />
-    <Route path="dashboard" element={<VendorDashboard />} />
-    <Route path="events" element={<VendorAvailableEventsPage />} />
-       
-    <Route path="payment-cancel" element={<Navigate to="/vendor/applications" replace />} />
-    <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
-    <Route
-      path="events/:eventId/requirements"
-      element={<VendorEventRequirementsPage />}
-    />
-    <Route path="events/:eventId/map" element={<BoothMapEditor />} />
-    <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
-    <Route
-      path="events/:eventId/application/:appId"
-      element={<VendorApplicationDetailPage />}
-    />
-    <Route path="applications" element={<VendorApplicationsPage />} />
-    <Route path="verify" element={<VendorGetVerifiedPage />} />
-    <Route
-      path="profile/setup"
-      element={<VendorBusinessProfileSetupPage />}
-    />
-    <Route path="profile" element={<VendorPublicProfilePage />} />
-    <Route path="profile/public" element={<VendorPublicProfilePage />} />
-    <Route path="messages" element={<VendorMessagesPage />} />
-    <Route path="settings" element={<VendorSettingsPage />} />
-  </Route>
-</Route>
+      <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
+        <Route path="/vendor" element={<VendorLayout />}>
+          <Route index element={<Navigate to="dashboard" replace />} />
+          <Route path="dashboard" element={<VendorDashboard />} />
+          <Route path="events" element={<VendorAvailableEventsPage />} />
+          <Route path="payment-cancel" element={<Navigate to="/vendor/applications" replace />} />
+          <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
+          <Route
+            path="events/:eventId/requirements"
+            element={<VendorEventRequirementsPage />}
+          />
+          <Route path="events/:eventId/map" element={<BoothMapEditor />} />
+          <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
+          <Route
+            path="events/:eventId/application/:appId"
+            element={<VendorApplicationDetailPage />}
+          />
+          <Route path="applications" element={<VendorApplicationsPage />} />
+          <Route path="verify" element={<VendorGetVerifiedPage />} />
+          <Route
+            path="profile/setup"
+            element={<VendorBusinessProfileSetupPage />}
+          />
+          <Route path="profile" element={<VendorPublicProfilePage />} />
+          <Route path="profile/public" element={<VendorPublicProfilePage />} />
+          <Route path="messages" element={<VendorMessagesPage />} />
+          <Route path="settings" element={<VendorSettingsPage />} />
+        </Route>
+      </Route>
 
       {/* ---------- FALLBACK ---------- */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
-
-
-
-
-
