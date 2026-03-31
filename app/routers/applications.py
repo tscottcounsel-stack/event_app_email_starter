@@ -1046,7 +1046,7 @@ class ApplicationProgressUpdate(BaseModel):
     booth_id: Optional[str] = None
     booth_price: Optional[float] = None
     booth_category_id: Optional[str] = None
-    notes: Optional[str] = None
+
 
 class CheckoutCreateBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1169,25 +1169,6 @@ def update_application_progress(
     email = _norm_email(user.get("email"))
     if _norm_email(app.get("vendor_email")) != email:
         raise HTTPException(status_code=403, detail="Forbidden")
-
-    pay = _coerce_payment_status(app.get("payment_status"))
-    attempted_mutation = any(
-        value is not None
-        for value in (
-            payload.checked,
-            payload.documents,
-            payload.docs,
-            payload.notes,
-            payload.booth_id,
-            payload.booth_price,
-            payload.booth_category_id,
-        )
-    )
-    if pay == "paid" and attempted_mutation:
-        raise HTTPException(
-            status_code=400,
-            detail="Application is already paid and can no longer be edited.",
-        )
 
     if payload.checked is not None:
         if not isinstance(payload.checked, dict):
@@ -1912,21 +1893,24 @@ def vendor_pay_now(
 
     amount_cents = _get_amount_cents_from_app(app)
 
+    body_success_url = body.success_url if body else None
+    body_cancel_url = body.cancel_url if body else None
     body_description = body.description if body else None
     body_currency = body.currency if body and body.currency else "usd"
 
     frontend_base = (
         os.getenv("FRONTEND_BASE_URL")
-        or "https://event-app-frontend-7xlfphwaf-tscottcounsel-stacks-projects.vercel.app"
+        or "https://event-app-frontend-xi.vercel.app"
     ).rstrip("/")
 
     default_success = (
         f"{frontend_base}/vendor/applications"
         f"?payment=success&appId={app_id}&session_id={{CHECKOUT_SESSION_ID}}"
     )
-    success_url = "https://event-app-frontend-xi.vercel.app/vendor/dashboard?payment=success"
-    cancel_url = "https://event-app-frontend-xi.vercel.app/vendor/applications?payment=cancel""
-
+    success_url = (body_success_url or default_success).strip()
+    cancel_url = (
+        body_cancel_url or f"{frontend_base}/vendor/applications?payment=cancel"
+    ).strip()
     desc = (body_description or f"Booth payment for application #{app_id}").strip()
     currency = (body_currency or "usd").strip().lower()
 
@@ -2010,8 +1994,6 @@ def vendor_confirm_payment(
     app = get_application_or_404(app_id)
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
-
-    _ensure_can_pay_now(app)
 
     if _payment_exists_for_application(app_id):
         return {"ok": True, "already_paid": True}
@@ -2549,10 +2531,3 @@ def debug_application_event(app_id: int):
         "application": app,
         "event": event,
     }
-
-@router.post("/debug/reset-applications")
-def reset_applications():
-    _APPLICATIONS.clear()
-    _PAYMENTS.clear()
-    save_store()
-    return {"status": "applications reset"}
