@@ -61,6 +61,7 @@ import VendorEventRequirementsPage from "./pages/VendorEventRequirementsPage";
 import VendorEventApplyPage from "./pages/VendorEventApplyPage";
 import VendorInviteApplyPage from "./pages/VendorInviteApplyPage";
 import VendorApplicationDetailPage from "./pages/VendorApplicationDetailPage";
+import VendorPaymentSuccessPage from "./pages/VendorPaymentSuccessPage";
 
 /* ---------------- ADMIN ROLE HELPERS ---------------- */
 
@@ -213,6 +214,7 @@ export default function App() {
           <Route index element={<Navigate to="dashboard" replace />} />
           <Route path="dashboard" element={<VendorDashboard />} />
           <Route path="events" element={<VendorAvailableEventsPage />} />
+          <Route path="/vendor/payment-success" element={<VendorPaymentSuccessPage />} />
           <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
           <Route
             path="events/:eventId/requirements"
