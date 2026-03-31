@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/",
+  base: "./", // ✅ FIX
   server: {
     proxy: {
       "/api": "http://localhost:8002",
@@ -16,6 +16,3 @@ export default defineConfig({
     allowedHosts: true,
   },
 });
-
-
-
