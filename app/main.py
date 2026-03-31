@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# 🔥 CRITICAL FIX — USE RAILWAY PERSISTENT VOLUME
+# Use Railway persistent volume for uploads
 UPLOADS_DIR = Path("/data/uploads")
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -64,18 +64,20 @@ def _env_csv(name: str) -> list[str]:
     raw = os.getenv(name, "")
     if not raw.strip():
         return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
 
 
 app = FastAPI(title="Vendor Connect API")
 
-frontend_origin = os.getenv("FRONTEND_URL", "").strip()
+frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 allowed_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
+    "https://event-app-frontend.vercel.app",
+    "https://event-app-frontend-xi.vercel.app",
 ]
 
 allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
@@ -85,17 +87,21 @@ if frontend_origin:
 
 allowed_origins = list(dict.fromkeys([o for o in allowed_origins if o]))
 
-# 🔥 FIXED CORS — REMOVE CUSTOM OPTIONS HANDLER CONFLICT
+# Allow production + preview Vercel frontends.
+# This keeps credentials support while matching changing preview URLs.
+vercel_preview_regex = r"^https://[a-zA-Z0-9-]+\.vercel\.app$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=vercel_preview_regex,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-logger.info("CORS configured")
+logger.info("CORS configured. allow_origins=%s allow_origin_regex=%s", allowed_origins, vercel_preview_regex)
 
 _load_store_if_available()
 
