@@ -1699,9 +1699,10 @@ def organizer_reserve_booth(
 
     pay = _coerce_payment_status(app.get("payment_status"))
     if pay == "paid":
-        raise HTTPException(
-            status_code=400, detail="Cannot reserve: already paid/occupied."
-        )
+    raise HTTPException(
+        status_code=400,
+        detail="Cannot change booth after payment."
+    )
     if pay == "pending":
         raise HTTPException(
             status_code=400, detail="Cannot reserve while payment is pending."
