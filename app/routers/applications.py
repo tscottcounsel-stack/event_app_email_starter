@@ -1046,7 +1046,7 @@ class ApplicationProgressUpdate(BaseModel):
     booth_id: Optional[str] = None
     booth_price: Optional[float] = None
     booth_category_id: Optional[str] = None
-
+    notes: Optional[str] = None
 
 class CheckoutCreateBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
