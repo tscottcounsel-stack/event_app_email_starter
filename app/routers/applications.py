@@ -475,6 +475,8 @@ def _extract_price_deep(booth: Dict[str, Any]) -> int:
         return 0
 
     return walk(booth)
+
+
 def _candidate_booth_keys(booth_id: Any) -> set[str]:
     raw = str(booth_id or "").strip()
     out = {raw}
@@ -625,6 +627,8 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> int:
             return price_cents
 
     return 0
+
+
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
     direct_amount = _extract_price_to_cents(app.get("amount_cents"))
     if direct_amount > 0:
@@ -640,6 +644,8 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> int:
         return event_cents
 
     return 0
+
+
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> int:
     cents = _find_booth_price_cents_for_app(app)
     if cents > 0:
@@ -1088,6 +1094,7 @@ def apply_to_event(
     body: ApplyBody = Body(...),
     user: dict = Depends(get_current_user),
 ):
+
     expire_reservations_if_needed()
     get_event_or_404(event_id)
 
@@ -1157,6 +1164,7 @@ def update_application_progress(
 ):
     expire_reservations_if_needed()
     app = get_application_or_404(app_id)
+
 
     email = _norm_email(user.get("email"))
     if _norm_email(app.get("vendor_email")) != email:
