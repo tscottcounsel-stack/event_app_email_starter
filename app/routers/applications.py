@@ -2552,3 +2552,10 @@ def debug_application_event(app_id: int):
         "application": app,
         "event": event,
     }
+
+@router.post("/debug/reset-applications")
+def reset_applications():
+    _APPLICATIONS.clear()
+    _PAYMENTS.clear()
+    save_store()
+    return {"status": "applications reset"}
