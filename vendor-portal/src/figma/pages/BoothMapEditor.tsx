@@ -1253,10 +1253,22 @@ const overlayDetail = overlayName
         ? String(boothObj.label).trim()
         : String(boothId).trim();
 
-      const updated = await vendorUpdateApplication({
-        applicationId: effectiveAppId,
-        booth_id: boothLabelSafe,
-      } as any);
+      const boothPrice = Number(
+  boothObj?.price ??
+  boothObj?.meta?.price ??
+  boothObj?.cost ??
+  boothObj?.amount ??
+  0
+);
+
+console.log("🔥 SELECTED BOOTH:", boothObj);
+console.log("💰 BOOTH PRICE:", boothPrice);
+
+const updated = await vendorUpdateApplication({
+  applicationId: effectiveAppId,
+  booth_id: boothLabelSafe,
+  booth_price: boothPrice,
+} as any);
 
       const savedBoothId = String(
         updated?.requested_booth_id || updated?.booth_id || boothLabelSafe
