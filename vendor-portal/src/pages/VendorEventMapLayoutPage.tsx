@@ -5,6 +5,7 @@ import {
   listVendorApplications,
   vendorApplyToEvent,
   submitApplication,
+  vendorUpdateApplication,
   type ServerApplication,
 } from "../components/api/applications";
 
@@ -670,15 +671,19 @@ export default function VendorEventMapLayoutPage() {
     const checked = normalizeCheckedForSubmit(progress?.checked);
     const notes = String(progress?.notes || "").trim();
 
-    const createdOrUpdated = await vendorApplyToEvent({
-      eventId: Number(eventId),
-      body: {
-        booth_id: payload.booth_id,
-        booth_price: payload.booth_price,
-        checked,
-        notes,
-      } as any,
-    });
+    if (!appId) {
+  throw new Error("Missing application ID.");
+}
+
+const createdOrUpdated = await vendorUpdateApplication({
+  appId: Number(appId),
+  body: {
+    booth_id: payload.booth_id,
+    booth_price: payload.booth_price,
+    checked,
+    notes,
+  } as any,
+});
 
     return ((createdOrUpdated as any)?.application ?? createdOrUpdated ?? null) as any;
   },
