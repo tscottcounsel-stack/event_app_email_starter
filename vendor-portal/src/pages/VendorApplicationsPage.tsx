@@ -1,6 +1,6 @@
 // src/pages/VendorApplicationsPage.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
@@ -100,14 +100,39 @@ function safeJsonParse<T = any>(value: string | null): T | null {
   }
 }
 
+function getStoredToken() {
+  return (
+    localStorage.getItem("accessToken") ||
+    localStorage.getItem("token") ||
+    sessionStorage.getItem("accessToken") ||
+    ""
+  );
+}
+
+function getStoredEmail() {
+  return (
+    localStorage.getItem("userEmail") ||
+    sessionStorage.getItem("userEmail") ||
+    ""
+  );
+}
+
+function getStoredRole() {
+  return (
+    localStorage.getItem("userRole") ||
+    sessionStorage.getItem("userRole") ||
+    ""
+  );
+}
+
 function buildLocalAuthHeaders() {
   const headers: Record<string, string> = {
     Accept: "application/json",
   };
 
-  const token = localStorage.getItem("accessToken");
-  const email = localStorage.getItem("userEmail");
-  const role = localStorage.getItem("userRole");
+  const token = getStoredToken();
+  const email = getStoredEmail();
+  const role = getStoredRole();
 
   if (token) headers.Authorization = `Bearer ${token}`;
   if (email) headers["x-user-email"] = email;
@@ -326,11 +351,8 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
 
 function resolveNumericApplicationId(id: any): number | null {
   if (!id) return null;
-
   const n = Number(id);
-  if (Number.isFinite(n)) return n;
-
-  return null;
+  return Number.isFinite(n) ? n : null;
 }
 
 async function handlePayNow(app: VendorProgressCard) {
@@ -373,10 +395,9 @@ async function handlePayNow(app: VendorProgressCard) {
   }
 }
 
-/* ---------------- Page ---------------- */
-
 export default function VendorApplicationsPage() {
   const nav = useNavigate();
+  const location = useLocation();
   const paymentHandledRef = useRef(false);
 
   const [loading, setLoading] = useState(true);
@@ -388,75 +409,76 @@ export default function VendorApplicationsPage() {
   const [localByKey, setLocalByKey] = useState<Record<string, VendorApplyProgress | null>>({});
 
   const loadApplications = useCallback(async () => {
-    setLoading(true);
     setServerError(null);
 
     const headers = buildLocalAuthHeaders();
-
     const hasIdentity =
-      !!headers.Authorization ||
-      !!headers["x-user-email"] ||
-      !!headers["x-user-id"];
+      !!headers.Authorization || !!headers["x-user-email"] || !!headers["x-user-id"];
 
     if (!hasIdentity) {
-      throw new Error(
-        "Missing login identity headers (Authorization / x-user-email / x-user-id). Log in again so applications can load."
+      setServerAppsRaw([]);
+      setReqByEventId({});
+      setLocalByKey({});
+      setServerError("Missing login identity. Please log in again.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/vendor/applications`, {
+        method: "GET",
+        headers,
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`API ${res.status}: ${text || "Failed to load server applications"}`);
+      }
+
+      const data = (await res.json().catch(() => null)) as { applications?: ServerApplication[] } | null;
+      const apps = Array.isArray(data?.applications) ? data!.applications : [];
+      const normalized = apps.map(normalizeServerToCard);
+
+      setServerAppsRaw(normalized);
+
+      const uniqueEventIds = Array.from(
+        new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean))
       );
+      const nextReq: Record<string, LoadedRequirements | null> = {};
+
+      await Promise.all(
+        uniqueEventIds.map(async (eid) => {
+          try {
+            nextReq[eid] = await loadRequirementsForEvent(eid);
+          } catch {
+            nextReq[eid] = null;
+          }
+        })
+      );
+
+      const nextLocal: Record<string, VendorApplyProgress | null> = {};
+      for (const a of normalized) {
+        const key = `${normalizeId(a.eventId)}:${normalizeId(a.appId)}:${normalizeId(a.boothId || "")}`;
+        nextLocal[key] = readLocalProgress(a.eventId, a.appId, a.boothId);
+      }
+
+      setReqByEventId(nextReq);
+      setLocalByKey(nextLocal);
+    } catch (e: any) {
+      setServerError(e?.message || "Failed to load applications from server.");
+      setServerAppsRaw([]);
+      setReqByEventId({});
+      setLocalByKey({});
     }
-
-    const res = await fetch(`${API_BASE}/vendor/applications`, {
-      method: "GET",
-      headers,
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`API ${res.status}: ${text || "Failed to load server applications"}`);
-    }
-
-    const data = (await res.json().catch(() => null)) as { applications?: ServerApplication[] } | null;
-    const apps = Array.isArray(data?.applications) ? data!.applications : [];
-    const normalized = apps.map(normalizeServerToCard);
-
-    setServerAppsRaw(normalized);
-
-    const uniqueEventIds = Array.from(
-      new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean))
-    );
-    const nextReq: Record<string, LoadedRequirements | null> = {};
-
-    await Promise.all(
-      uniqueEventIds.map(async (eid) => {
-        try {
-          nextReq[eid] = await loadRequirementsForEvent(eid);
-        } catch {
-          nextReq[eid] = null;
-        }
-      })
-    );
-
-    const nextLocal: Record<string, VendorApplyProgress | null> = {};
-    for (const a of normalized) {
-      const key = `${normalizeId(a.eventId)}:${normalizeId(a.appId)}:${normalizeId(a.boothId || "")}`;
-      nextLocal[key] = readLocalProgress(a.eventId, a.appId, a.boothId);
-    }
-
-    setReqByEventId(nextReq);
-    setLocalByKey(nextLocal);
   }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      setLoading(true);
       try {
-        await loadApplications();
-      } catch (e: any) {
         if (!cancelled) {
-          setServerError(e?.message || "Failed to load applications from server.");
-          setServerAppsRaw([]);
-          setReqByEventId({});
-          setLocalByKey({});
+          await loadApplications();
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -471,7 +493,7 @@ export default function VendorApplicationsPage() {
   useEffect(() => {
     if (paymentHandledRef.current) return;
 
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(location.search);
     const payment = String(params.get("payment") || "").trim().toLowerCase();
     const appId = String(params.get("appId") || "").trim();
     const sessionId = String(params.get("session_id") || "").trim();
@@ -482,7 +504,8 @@ export default function VendorApplicationsPage() {
 
     (async () => {
       try {
-        setPaymentMessage(null);
+        setLoading(true);
+        setPaymentMessage("Confirming payment…");
 
         const res = await fetch(
           `${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`,
@@ -515,20 +538,24 @@ export default function VendorApplicationsPage() {
         }
 
         await loadApplications();
-        setPaymentMessage("Payment confirmed.");
+        setPaymentMessage("Payment confirmed. Redirecting to dashboard…");
 
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete("payment");
         cleanUrl.searchParams.delete("appId");
         cleanUrl.searchParams.delete("session_id");
         window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+
+        window.setTimeout(() => {
+          nav("/vendor/dashboard?payment=success", { replace: true });
+        }, 900);
       } catch (e: any) {
         setPaymentMessage(e?.message || "Unable to confirm payment.");
       } finally {
         setLoading(false);
       }
     })();
-  }, [loadApplications]);
+  }, [loadApplications, location.search, nav]);
 
   const cards = useMemo(() => {
     try {
@@ -539,234 +566,216 @@ export default function VendorApplicationsPage() {
     }
   }, [serverAppsRaw]);
 
-  if (!Array.isArray(serverAppsRaw)) {
-    return (
-      <div style={{ padding: 40, fontWeight: "bold" }}>
-        ⚠️ Applications data is invalid or failed to load.
-      </div>
-    );
-  }
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
+            <p className="mt-2 text-sm font-semibold text-slate-600">
+              One card per event (most recent application). Draft progress shown from your browser.
+            </p>
+          </div>
 
-  try {
-    return (
-      <div className="min-h-screen bg-slate-50">
-        <div className="mx-auto max-w-6xl px-6 py-10">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
-              <p className="mt-2 text-sm font-semibold text-slate-600">
-                One card per event (most recent application). Draft progress shown from your browser.
-              </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => nav("/vendor/events")}
+              className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
+              type="button"
+            >
+              Browse Events
+            </button>
+          </div>
+        </div>
+
+        {paymentMessage ? (
+          <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm font-semibold text-indigo-900">
+            {paymentMessage}
+          </div>
+        ) : null}
+
+        <div className="mt-6">
+          {loading ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-700 shadow-sm">
+              Loading applications…
+            </div>
+          ) : serverError ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              <div className="font-black">Server applications unavailable</div>
+              <div className="mt-1 opacity-90">{serverError}</div>
+              <div className="mt-2 text-xs font-bold text-amber-800">
+                If payment already completed, refresh after logging back in and the paid state should appear once confirmation succeeds.
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
+              Loaded server applications: <span className="font-black">{serverAppsRaw.length}</span>{" "}
+              <span className="ml-2 text-emerald-800/80">(showing {cards.length} event cards)</span>
+            </div>
+          )}
+        </div>
+
+        {!cards || cards.length === 0 ? (
+          <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+            <div className="text-xl font-black text-slate-900">No applications yet</div>
+            <div className="mt-2 text-sm font-semibold text-slate-600">
+              When you submit an application, it will show up here.
             </div>
 
-            <div className="flex gap-2">
+            <div className="mt-6 flex gap-3">
               <button
                 onClick={() => nav("/vendor/events")}
                 className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
                 type="button"
               >
-                Browse Events
+                Find Events
               </button>
             </div>
           </div>
+        ) : (
+          <div className="mt-10 grid gap-4">
+            {cards.map((it) => {
+              const eid = normalizeId(it.eventId);
+              const req = reqByEventId[eid] ?? null;
 
-          {paymentMessage ? (
-            <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm font-semibold text-indigo-900">
-              {paymentMessage}
-            </div>
-          ) : null}
+              const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
+              const local = localByKey[localKey] ?? null;
 
-          <div className="mt-6">
-            {loading ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-700 shadow-sm">
-                Loading applications…
-              </div>
-            ) : serverError ? (
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
-                <div className="font-black">Server applications unavailable</div>
-                <div className="mt-1 opacity-90">{serverError}</div>
-                <div className="mt-2 text-xs font-bold text-amber-800">
-                  If this is unexpected, confirm you are logged in and that the request includes identity headers.
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-900">
-                Loaded server applications: <span className="font-black">{serverAppsRaw.length}</span>{" "}
-                <span className="ml-2 text-emerald-800/80">(showing {cards.length} event cards)</span>
-              </div>
-            )}
-          </div>
+              const effectiveChecked = local?.checked ?? it.checked ?? {};
 
-          {!cards || cards.length === 0 ? (
-            <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-              <div className="text-xl font-black text-slate-900">No applications yet</div>
-              <div className="mt-2 text-sm font-semibold text-slate-600">
-                When you submit an application, it will show up here.
-              </div>
+              const serverDocs =
+                it.documents && typeof it.documents === "object"
+                  ? it.documents
+                  : it.docs && typeof it.docs === "object"
+                  ? it.docs
+                  : {};
 
-              <div className="mt-6 flex gap-3">
-                <button
-                  onClick={() => nav("/vendor/events")}
-                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-extrabold text-white hover:bg-slate-800"
-                  type="button"
+              const effectiveDocs = local?.docs ?? serverDocs ?? {};
+              const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
+
+              const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
+              const status = it.status || "draft";
+
+              const resolvedApplicationId = String(it.applicationId || "").trim();
+              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(
+                resolvedApplicationId
+              )}`;
+
+              const reqSource =
+                req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
+
+              const progressSource = local ? "progress: local" : "progress: server";
+              const showPayButton = status === "approved" && it.paymentStatus !== "paid";
+
+              return (
+                <div
+                  key={`${it.eventId}:${it.appId}`}
+                  className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
                 >
-                  Find Events
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-10 grid gap-4">
-              {cards.map((it) => {
-                const eid = normalizeId(it.eventId);
-                const req = reqByEventId[eid] ?? null;
-
-                const localKey = `${normalizeId(it.eventId)}:${normalizeId(it.appId)}:${normalizeId(it.boothId || "")}`;
-                const local = localByKey[localKey] ?? null;
-
-                const effectiveChecked = local?.checked ?? it.checked ?? {};
-
-                const serverDocs =
-                  it.documents && typeof it.documents === "object"
-                    ? it.documents
-                    : it.docs && typeof it.docs === "object"
-                    ? it.docs
-                    : {};
-
-                const effectiveDocs = local?.docs ?? serverDocs ?? {};
-                const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
-
-                const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
-                const status = it.status || "draft";
-
-                const resolvedApplicationId = String(it.applicationId || "").trim();
-                const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(
-                  resolvedApplicationId
-                )}`;
-
-                const reqSource =
-                  req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
-
-                const progressSource = local ? "progress: local" : "progress: server";
-                const showPayButton = status === "approved" && it.paymentStatus !== "paid";
-
-                return (
-                  <div
-                    key={`${it.eventId}:${it.appId}`}
-                    className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="min-w-[240px]">
-                        <div className="text-lg font-black text-slate-900">
-                          Event #{it.eventId}
-                          {it.boothId ? (
-                            <span className="ml-2 text-sm font-extrabold text-slate-500">
-                              • Requested Booth {it.boothId}
-                            </span>
-                          ) : null}
-                        </div>
-
-                        <div className="mt-1 text-xs font-semibold text-slate-500">
-                          Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
-                          {it.submittedAt ? (
-                            <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
-                          ) : null}
-                          <span className="ml-2">• {reqSource}</span>
-                          <span className="ml-2">• {progressSource}</span>
-                        </div>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-[240px]">
+                      <div className="text-lg font-black text-slate-900">
+                        Event #{it.eventId}
+                        {it.boothId ? (
+                          <span className="ml-2 text-sm font-extrabold text-slate-500">
+                            • Requested Booth {it.boothId}
+                          </span>
+                        ) : null}
                       </div>
 
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={
-                            "rounded-full px-3 py-1 text-xs font-extrabold " +
-                            (status === "approved"
-                              ? "bg-emerald-50 text-emerald-700"
-                              : status === "rejected"
-                              ? "bg-rose-50 text-rose-700"
-                              : status === "submitted"
-                              ? "bg-indigo-50 text-indigo-700"
-                              : "bg-slate-100 text-slate-700")
-                          }
-                        >
-                          {status === "approved"
-                            ? "Approved"
+                      <div className="mt-1 text-xs font-semibold text-slate-500">
+                        Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
+                        {it.submittedAt ? (
+                          <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
+                        ) : null}
+                        <span className="ml-2">• {reqSource}</span>
+                        <span className="ml-2">• {progressSource}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={
+                          "rounded-full px-3 py-1 text-xs font-extrabold " +
+                          (status === "approved"
+                            ? "bg-emerald-50 text-emerald-700"
                             : status === "rejected"
-                            ? "Rejected"
+                            ? "bg-rose-50 text-rose-700"
                             : status === "submitted"
-                            ? "Submitted"
-                            : "Draft"}
-                        </span>
-
-                        <span
-                          className={
-                            "rounded-full px-3 py-1 text-xs font-extrabold " +
-                            (it.paymentStatus === "paid"
-                              ? "bg-emerald-50 text-emerald-700"
-                              : "bg-amber-50 text-amber-700")
-                          }
-                        >
-                          {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
-                        </span>
-
-                        <div className="text-sm font-extrabold text-slate-700">
-                          {pct}% <span className="font-semibold text-slate-500">({done}/{total})</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4">
-                      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                        <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
-                      </div>
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      <Link
-                        to={viewUrl}
-                        className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700"
+                            ? "bg-indigo-50 text-indigo-700"
+                            : "bg-slate-100 text-slate-700")
+                        }
                       >
-                        View
-                      </Link>
+                        {status === "approved"
+                          ? "Approved"
+                          : status === "rejected"
+                          ? "Rejected"
+                          : status === "submitted"
+                          ? "Submitted"
+                          : "Draft"}
+                      </span>
 
-                      <Link
-                        to={`/vendor/events/${encodeURIComponent(it.eventId)}`}
-                        className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
+                      <span
+                        className={
+                          "rounded-full px-3 py-1 text-xs font-extrabold " +
+                          (it.paymentStatus === "paid"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : "bg-amber-50 text-amber-700")
+                        }
                       >
-                        View Event
-                      </Link>
+                        {it.paymentStatus === "paid" ? "Paid" : "Unpaid"}
+                      </span>
 
-                      {showPayButton ? (
-                        <button
-                          onClick={() => handlePayNow(it)}
-                          className="rounded-full bg-green-600 px-5 py-2 text-sm font-extrabold text-white shadow-md hover:bg-green-700"
-                          type="button"
-                        >
-                          Pay Booth Fee
-                        </button>
-                      ) : null}
-                    </div>
-
-                    {effectiveNotes ? (
-                      <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-                        <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
-                        <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
+                      <div className="text-sm font-extrabold text-slate-700">
+                        {pct}% <span className="font-semibold text-slate-500">({done}/{total})</span>
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                      <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    <Link
+                      to={viewUrl}
+                      className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-indigo-700"
+                    >
+                      View
+                    </Link>
+
+                    <Link
+                      to={`/vendor/events/${encodeURIComponent(it.eventId)}`}
+                      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-900 hover:bg-slate-50"
+                    >
+                      View Event
+                    </Link>
+
+                    {showPayButton ? (
+                      <button
+                        onClick={() => handlePayNow(it)}
+                        className="rounded-full bg-green-600 px-5 py-2 text-sm font-extrabold text-white shadow-md hover:bg-green-700"
+                        type="button"
+                      >
+                        Pay Booth Fee
+                      </button>
                     ) : null}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+
+                  {effectiveNotes ? (
+                    <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
+                      <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
+                      <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
-    );
-  } catch (err) {
-    console.error("VendorApplicationsPage render crash:", err);
-    return (
-      <div style={{ padding: 40 }}>
-        <div style={{ fontWeight: 800, fontSize: 20 }}>Applications page crashed.</div>
-        <div style={{ marginTop: 8 }}>Open the browser console for the specific error.</div>
-      </div>
-    );
-  }
+    </div>
+  );
 }
