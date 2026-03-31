@@ -308,6 +308,14 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
   return primary;
 }
 
+function resolveNumericApplicationId(id: any): number | null {
+  if (!id) return null;
+
+  const n = Number(id);
+  if (Number.isFinite(n)) return n;
+
+  return null;
+}
 
 async function handlePayNow(app: VendorProgressCard) {
   const appId = resolveNumericApplicationId(app.applicationId ?? app.appId);
