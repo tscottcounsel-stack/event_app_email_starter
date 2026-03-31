@@ -30,6 +30,7 @@ export type ServerApplication = {
 
 export type ApplyBody = {
   booth_id?: string | null;
+  booth_price?: number | null;
   booth_category_id?: string | null;
   checked?: Record<string, boolean>;
   notes?: string;
@@ -192,6 +193,7 @@ function buildProgressPayload(body: any) {
 
   if (body?.booth_id !== undefined) payload.booth_id = body.booth_id;
   if (body?.boothId !== undefined) payload.booth_id = body.boothId;
+  if (body?.booth_price !== undefined) payload.booth_price = body.booth_price;
 
   if (body?.booth_category_id !== undefined) payload.booth_category_id = body.booth_category_id;
   if (body?.boothCategoryId !== undefined) payload.booth_category_id = body.boothCategoryId;
@@ -391,10 +393,12 @@ export async function organizerGetApplication(args: {
 export async function vendorUpdateApplication(args: {
   applicationId: string | number;
   booth_id?: string | null;
+  booth_price?: number | null;
   checked?: Record<string, boolean>;
   docs?: Record<string, any>;
   documents?: Record<string, any>;
   booth_category_id?: string | null;
+  notes?: string;
 }): Promise<ServerApplication> {
   const applicationId = idPath("applicationId", args.applicationId);
   const payload = buildProgressPayload(args);

@@ -676,13 +676,11 @@ export default function VendorEventMapLayoutPage() {
 }
 
 const createdOrUpdated = await vendorUpdateApplication({
-  appId: Number(appId),
-  body: {
-    booth_id: payload.booth_id,
-    booth_price: payload.booth_price,
-    checked,
-    notes,
-  } as any,
+  applicationId: Number(appId),
+  booth_id: payload.booth_id,
+  booth_price: payload.booth_price,
+  checked,
+  notes,
 });
 
     return ((createdOrUpdated as any)?.application ?? createdOrUpdated ?? null) as any;
