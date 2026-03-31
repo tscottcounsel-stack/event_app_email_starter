@@ -195,6 +195,8 @@ export default function VendorEventRequirementsPage() {
     paymentStatus !== "paid" &&
     paymentStatus !== "pending";
 
+  const isLockedAfterPayment = paymentStatus === "paid";
+
   const selectedBoothId = useMemo(() => {
     const requested = normalizeId(application?.requested_booth_id || "");
     const assigned = normalizeId(application?.booth_id || "");
@@ -234,6 +236,10 @@ export default function VendorEventRequirementsPage() {
 
   const saveProgress = async (nextChecked = checkedMap, nextDocs = docsMap, message = "Requirements saved.") => {
     if (!appId) return;
+    if (isLockedAfterPayment) {
+      setError("This application is already paid and can no longer be edited.");
+      return;
+    }
     setSaving(true);
     setSaveMessage(null);
     setError(null);
@@ -299,7 +305,7 @@ export default function VendorEventRequirementsPage() {
   };
 
   const changeBooth = () => {
-    if (!appId) return;
+    if (!appId || isLockedAfterPayment) return;
     nav(`/vendor/events/${encodeURIComponent(eventId)}/map?appId=${encodeURIComponent(appId)}`);
   };
 
@@ -341,6 +347,9 @@ export default function VendorEventRequirementsPage() {
           <div className="text-base font-black text-slate-900">Application Status</div>
           <div className="mt-2">Status: {application?.status || "draft"}</div>
           <div className="mt-1">Payment: {application?.payment_status || "unpaid"}</div>
+          {isLockedAfterPayment ? (
+            <div className="mt-2 text-emerald-600">Payment complete. Booth selection and requirements are locked.</div>
+          ) : null}
           {saveMessage ? <div className="mt-3 text-emerald-600">{saveMessage}</div> : null}
           {saving ? <div className="mt-2 text-violet-600">Savingâ€¦</div> : null}
         </div>
@@ -479,8 +488,9 @@ export default function VendorEventRequirementsPage() {
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={isLockedAfterPayment || saving}
                         onChange={() => onToggleCompliance(item, idx)}
-                        className="mt-1 h-5 w-5 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                        className="mt-1 h-5 w-5 rounded border-slate-300 text-violet-600 focus:ring-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
                       />
                       <div className="min-w-0">
                         <div className="text-lg font-black text-slate-900">
@@ -519,11 +529,18 @@ export default function VendorEventRequirementsPage() {
                         {item?.description || "No description provided."}
                       </div>
                       <div className="mt-4 flex flex-wrap items-center gap-3">
-                        <label className="inline-flex cursor-pointer items-center rounded-xl bg-violet-600 px-4 py-2 text-sm font-extrabold text-white hover:bg-violet-700">
+                        <label
+                          className={`inline-flex items-center rounded-xl px-4 py-2 text-sm font-extrabold text-white ${
+                            isLockedAfterPayment || saving
+                              ? "cursor-not-allowed bg-violet-300"
+                              : "cursor-pointer bg-violet-600 hover:bg-violet-700"
+                          }`}
+                        >
                           Upload file
                           <input
                             type="file"
                             className="hidden"
+                            disabled={isLockedAfterPayment || saving}
                             onChange={(e) => onSelectDocument(item, idx, e.target.files?.[0] || null)}
                           />
                         </label>
@@ -531,7 +548,8 @@ export default function VendorEventRequirementsPage() {
                           <button
                             type="button"
                             onClick={() => onSelectDocument(item, idx, null)}
-                            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
+                            disabled={isLockedAfterPayment || saving}
+                            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             Remove file
                           </button>
@@ -591,7 +609,7 @@ export default function VendorEventRequirementsPage() {
               <button
                 type="button"
                 onClick={changeBooth}
-                disabled={!appId || saving}
+                disabled={!appId || saving || isLockedAfterPayment}
                 className="w-full rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-extrabold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
               >
                 Change Booth

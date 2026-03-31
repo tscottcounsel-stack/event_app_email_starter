@@ -265,9 +265,14 @@ function isPaid(app: any) {
 }
 
 function isPaymentAvailable(app: any) {
-  if (typeof app?.payment_enabled === "boolean") return app.payment_enabled;
-  if (typeof app?.payment_link === "string" && app.payment_link.trim()) return true;
-  return true;
+  const status = String(app?.status || "").toLowerCase().trim();
+  const paymentStatus = String(app?.payment_status || "").toLowerCase().trim();
+
+  return (
+    status === "approved" &&
+    paymentStatus !== "paid" &&
+    paymentStatus !== "pending"
+  );
 }
 
 function safeHoldMs(app: any): number | null {

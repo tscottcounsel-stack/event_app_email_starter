@@ -1170,6 +1170,25 @@ def update_application_progress(
     if _norm_email(app.get("vendor_email")) != email:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    pay = _coerce_payment_status(app.get("payment_status"))
+    attempted_mutation = any(
+        value is not None
+        for value in (
+            payload.checked,
+            payload.documents,
+            payload.docs,
+            payload.notes,
+            payload.booth_id,
+            payload.booth_price,
+            payload.booth_category_id,
+        )
+    )
+    if pay == "paid" and attempted_mutation:
+        raise HTTPException(
+            status_code=400,
+            detail="Application is already paid and can no longer be edited.",
+        )
+
     if payload.checked is not None:
         if not isinstance(payload.checked, dict):
             raise HTTPException(status_code=400, detail="checked must be an object")
@@ -1994,6 +2013,8 @@ def vendor_confirm_payment(
     app = get_application_or_404(app_id)
     if _norm_email(app.get("vendor_email")) != _norm_email(user.get("email")):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    _ensure_can_pay_now(app)
 
     if _payment_exists_for_application(app_id):
         return {"ok": True, "already_paid": True}
