@@ -209,35 +209,36 @@ export default function App() {
       </Route>
 
       {/* ---------- VENDOR PROTECTED ---------- */}
-      <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
-        <Route path="/vendor" element={<VendorLayout />}>
-          <Route index element={<Navigate to="dashboard" replace />} />
-          <Route path="dashboard" element={<VendorDashboard />} />
-          <Route path="events" element={<VendorAvailableEventsPage />} />
-          <Route path="/vendor/payment-success" element={<VendorPaymentSuccessPage />} />
-          <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
-          <Route
-            path="events/:eventId/requirements"
-            element={<VendorEventRequirementsPage />}
-          />
-          <Route path="events/:eventId/map" element={<BoothMapEditor />} />
-          <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
-          <Route
-            path="events/:eventId/application/:appId"
-            element={<VendorApplicationDetailPage />}
-          />
-          <Route path="applications" element={<VendorApplicationsPage />} />
-          <Route path="verify" element={<VendorGetVerifiedPage />} />
-          <Route
-            path="profile/setup"
-            element={<VendorBusinessProfileSetupPage />}
-          />
-          <Route path="profile" element={<VendorPublicProfilePage />} />
-          <Route path="profile/public" element={<VendorPublicProfilePage />} />
-          <Route path="messages" element={<VendorMessagesPage />} />
-          <Route path="settings" element={<VendorSettingsPage />} />
-        </Route>
-      </Route>
+     <Route element={<RequireAuth allow={["vendor", "admin"]} />}>
+  <Route path="/vendor" element={<VendorLayout />}>
+    <Route index element={<Navigate to="dashboard" replace />} />
+    <Route path="dashboard" element={<VendorDashboard />} />
+    <Route path="events" element={<VendorAvailableEventsPage />} />
+    <Route path="payment-success" element={<VendorPaymentSuccessPage />} />
+    <Route path="payment-cancel" element={<Navigate to="/vendor/applications" replace />} />
+    <Route path="events/:eventId" element={<VendorEventDetailsPage />} />
+    <Route
+      path="events/:eventId/requirements"
+      element={<VendorEventRequirementsPage />}
+    />
+    <Route path="events/:eventId/map" element={<BoothMapEditor />} />
+    <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
+    <Route
+      path="events/:eventId/application/:appId"
+      element={<VendorApplicationDetailPage />}
+    />
+    <Route path="applications" element={<VendorApplicationsPage />} />
+    <Route path="verify" element={<VendorGetVerifiedPage />} />
+    <Route
+      path="profile/setup"
+      element={<VendorBusinessProfileSetupPage />}
+    />
+    <Route path="profile" element={<VendorPublicProfilePage />} />
+    <Route path="profile/public" element={<VendorPublicProfilePage />} />
+    <Route path="messages" element={<VendorMessagesPage />} />
+    <Route path="settings" element={<VendorSettingsPage />} />
+  </Route>
+</Route>
 
       {/* ---------- FALLBACK ---------- */}
       <Route path="*" element={<Navigate to="/" replace />} />
