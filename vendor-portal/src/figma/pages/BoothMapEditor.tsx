@@ -232,6 +232,80 @@ function softCard(): React.CSSProperties {
   };
 }
 
+function isBrowserEventLike(value: any) {
+  if (!value || typeof value !== "object") return false;
+  const keys = Object.keys(value);
+  return (
+    typeof value.preventDefault === "function" ||
+    typeof value.stopPropagation === "function" ||
+    "nativeEvent" in value ||
+    "currentTarget" in value ||
+    "target" in value ||
+    keys.includes("_reactName")
+  );
+}
+
+function isDomNodeLike(value: any) {
+  if (!value || typeof value !== "object") return false;
+  if (typeof HTMLElement !== "undefined" && value instanceof HTMLElement) return true;
+  if (typeof Event !== "undefined" && value instanceof Event) return true;
+  return (
+    typeof (value as any).nodeType === "number" ||
+    typeof (value as any).tagName === "string" ||
+    typeof (value as any).ownerDocument === "object"
+  );
+}
+
+function sanitizeForJson<T>(input: T): T {
+  const seen = new WeakSet();
+
+  const walk = (value: any): any => {
+    if (value == null) return value;
+    const t = typeof value;
+
+    if (t === "string" || t === "number" || t === "boolean") return value;
+    if (t === "bigint") return Number(value);
+    if (t === "function" || t === "symbol") return undefined;
+
+    if (Array.isArray(value)) {
+      return value.map((item) => walk(item)).filter((item) => item !== undefined);
+    }
+
+    if (t === "object") {
+      if (isDomNodeLike(value) || isBrowserEventLike(value)) return undefined;
+      if (seen.has(value)) return undefined;
+      seen.add(value);
+
+      const out: Record<string, any> = {};
+      for (const [key, child] of Object.entries(value)) {
+        if (
+          key === "target" ||
+          key === "currentTarget" ||
+          key === "nativeEvent" ||
+          key === "view" ||
+          key === "path" ||
+          key === "srcElement" ||
+          key === "__reactFiber$" ||
+          key === "__reactProps$" ||
+          key === "_owner" ||
+          key === "stateNode"
+        ) {
+          continue;
+        }
+
+        const next = walk(child);
+        if (next !== undefined) out[key] = next;
+      }
+      return out;
+    }
+
+    return undefined;
+  };
+
+  return walk(input) as T;
+}
+
+
 async function readJson(res: Response) {
   const text = await res.text();
   try {
@@ -825,7 +899,10 @@ useEffect(() => {
           setActiveLevelId("level-1");
         }
 
-        localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: d }));
+        localStorage.setItem(
+          lsDiagramKey(eventId),
+          JSON.stringify(sanitizeForJson({ diagram: d }))
+        );
         setStatusMsg("Loaded");
       } catch (e: any) {
         setDiagramBoothStateById({});
@@ -1003,9 +1080,12 @@ useEffect(() => {
         })),
       };
 
-      const safeDoc = JSON.parse(JSON.stringify(doc)) as DiagramDoc;
+      const safeDoc = sanitizeForJson(doc) as DiagramDoc;
       await saveEventDiagram(eventId, safeDoc);
-      localStorage.setItem(lsDiagramKey(eventId), JSON.stringify({ diagram: safeDoc }));
+      localStorage.setItem(
+        lsDiagramKey(eventId),
+        JSON.stringify(sanitizeForJson({ diagram: safeDoc }))
+      );
       setIsPublished(nextPublished);
       setStatusMsg("Saved");
     } catch (e: any) {
