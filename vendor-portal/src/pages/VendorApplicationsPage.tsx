@@ -1,7 +1,6 @@
 // src/pages/VendorApplicationsPage.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { buildAuthHeaders } from "../auth/authHeaders";
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
@@ -99,6 +98,23 @@ function safeJsonParse<T = any>(value: string | null): T | null {
     return null;
   }
 }
+
+function buildLocalAuthHeaders() {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+
+  const token = localStorage.getItem("accessToken");
+  const email = localStorage.getItem("userEmail");
+  const role = localStorage.getItem("userRole");
+
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (email) headers["x-user-email"] = email;
+  if (role) headers["x-user-role"] = role;
+
+  return headers;
+}
+
 
 function formatDate(iso?: string) {
   if (!iso) return "—";
@@ -308,14 +324,6 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
   return primary;
 }
 
-function resolveNumericApplicationId(id: any): number | null {
-  if (!id) return null;
-
-  const n = Number(id);
-  if (Number.isFinite(n)) return n;
-
-  return null;
-}
 
 async function handlePayNow(app: VendorProgressCard) {
   const appId = resolveNumericApplicationId(app.applicationId ?? app.appId);
@@ -329,7 +337,7 @@ async function handlePayNow(app: VendorProgressCard) {
     const res = await fetch(`${API_BASE}/vendor/applications/${appId}/pay-now`, {
       method: "POST",
       headers: {
-        ...buildAuthHeaders(),
+        ...buildLocalAuthHeaders(),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({}),
@@ -375,7 +383,7 @@ export default function VendorApplicationsPage() {
     setLoading(true);
     setServerError(null);
 
-    const headers = buildAuthHeaders();
+    const headers = buildLocalAuthHeaders();
 
     const hasIdentity =
       !!(headers as any).Authorization ||
@@ -469,7 +477,7 @@ export default function VendorApplicationsPage() {
         const res = await fetch(`${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`, {
           method: "POST",
           headers: {
-            ...buildAuthHeaders(),
+            ...buildLocalAuthHeaders(),
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ session_id: sessionId }),
