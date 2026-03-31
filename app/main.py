@@ -78,6 +78,7 @@ allowed_origins = [
     "http://127.0.0.1:5173",
     "https://event-app-frontend.vercel.app",
     "https://event-app-frontend-xi.vercel.app",
+    "https://event-app-frontend-7dhxwkwbm-tscottcounsel-stacks-projects.vercel.app",
 ]
 
 allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
@@ -87,21 +88,16 @@ if frontend_origin:
 
 allowed_origins = list(dict.fromkeys([o for o in allowed_origins if o]))
 
-# Allow production + preview Vercel frontends.
-# This keeps credentials support while matching changing preview URLs.
-vercel_preview_regex = r"^https://[a-zA-Z0-9-]+\.vercel\.app$"
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=vercel_preview_regex,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
 
-logger.info("CORS configured. allow_origins=%s allow_origin_regex=%s", allowed_origins, vercel_preview_regex)
+logger.info("CORS configured. allow_origins=%s", allowed_origins)
 
 _load_store_if_available()
 
