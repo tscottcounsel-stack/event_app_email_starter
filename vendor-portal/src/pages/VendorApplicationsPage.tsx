@@ -41,6 +41,8 @@ type VendorProgressCard = {
   documents?: Record<string, any>;
   docs?: Record<string, any>;
   paymentStatus?: string;
+  boothPrice?: number;
+  amountCents?: number;
 };
 
 type ServerApplication = {
@@ -48,7 +50,6 @@ type ServerApplication = {
   event_id: number;
   booth_id?: string | null;
   requested_booth_id?: string | null;
-  app_ref?: string | null;
   notes?: string | null;
   checked?: Record<string, boolean> | null;
   documents?: Record<string, any> | null;
@@ -56,9 +57,9 @@ type ServerApplication = {
   status?: string | null;
   submitted_at?: string | null;
   updated_at?: string | null;
-  vendor_email?: string | null;
-  vendor_id?: string | null;
   payment_status?: string | null;
+  booth_price?: number | null;
+  amount_cents?: number | null;
 };
 
 type RequirementItem = { id: string; text: string; required?: boolean };
@@ -125,9 +126,10 @@ function getStoredRole() {
   );
 }
 
-function buildLocalAuthHeaders() {
+function buildLocalAuthHeaders(extra?: Record<string, string>) {
   const headers: Record<string, string> = {
     Accept: "application/json",
+    ...(extra || {}),
   };
 
   const token = getStoredToken();
@@ -146,6 +148,16 @@ function formatDate(iso?: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
   return d.toLocaleString();
+}
+
+function formatMoney(cents?: number, boothPrice?: number) {
+  if (Number.isFinite(Number(cents)) && Number(cents) > 0) {
+    return `$${(Number(cents) / 100).toFixed(2)}`;
+  }
+  if (Number.isFinite(Number(boothPrice)) && Number(boothPrice) > 0) {
+    return `$${Number(boothPrice).toFixed(2)}`;
+  }
+  return "TBD";
 }
 
 function parseStatus(raw: any): "draft" | "submitted" | "approved" | "rejected" {
@@ -167,18 +179,16 @@ function normalizeRequirements(raw: any): { compliance: RequirementItem[]; docum
     (parsed as any)?.compliance ??
     (parsed as any)?.complianceItems ??
     (parsed as any)?.compliance_items ??
-    (parsed as any)?.compliance_items_list ??
     [];
 
   const documentsRaw =
     (parsed as any)?.documents ??
     (parsed as any)?.documentRequirements ??
     (parsed as any)?.document_requirements ??
-    (parsed as any)?.document_requirements_list ??
     [];
 
   const compliance: RequirementItem[] = Array.isArray(complianceRaw)
-    ? (complianceRaw as any[])
+    ? complianceRaw
         .map((c: any) => {
           const id = normalizeId(c?.id || c?.text || c?.label);
           const text = String(c?.text || c?.label || "").trim();
@@ -189,7 +199,7 @@ function normalizeRequirements(raw: any): { compliance: RequirementItem[]; docum
     : [];
 
   const documents: DocumentItem[] = Array.isArray(documentsRaw)
-    ? (documentsRaw as any[])
+    ? documentsRaw
         .map((d: any) => {
           const id = normalizeId(d?.id || d?.name);
           const name = String(d?.name || "").trim();
@@ -218,24 +228,19 @@ async function loadRequirementsForEvent(eventId: string): Promise<LoadedRequirem
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
       const norm = normalizeRequirements(data);
-      if ((norm.compliance?.length || 0) > 0 || (norm.documents?.length || 0) > 0) {
-        return { compliance: norm.compliance, documents: norm.documents, source: "api", sourceKey: url };
+      if (norm.compliance.length > 0 || norm.documents.length > 0) {
+        return { ...norm, source: "api", sourceKey: url };
       }
     } catch {
-      // try next
+      // ignore
     }
   }
 
   const organizerKey = `organizer:event:${id}:requirements`;
   const organizerParsed = safeJsonParse(localStorage.getItem(organizerKey));
   const normOrg = normalizeRequirements(organizerParsed);
-  if ((normOrg.compliance?.length || 0) > 0 || (normOrg.documents?.length || 0) > 0) {
-    return {
-      compliance: normOrg.compliance,
-      documents: normOrg.documents,
-      source: "localStorage",
-      sourceKey: organizerKey,
-    };
+  if (normOrg.compliance.length > 0 || normOrg.documents.length > 0) {
+    return { ...normOrg, source: "localStorage", sourceKey: organizerKey };
   }
 
   return null;
@@ -312,6 +317,8 @@ function normalizeServerToCard(a: ServerApplication): VendorProgressCard {
     documents: a.documents && typeof a.documents === "object" ? a.documents : {},
     docs: a.docs && typeof a.docs === "object" ? a.docs : {},
     paymentStatus: normalizePaymentStatus(a.payment_status),
+    boothPrice: Number(a.booth_price || 0) || undefined,
+    amountCents: Number(a.amount_cents || 0) || undefined,
   };
 }
 
@@ -332,10 +339,8 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
       const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
       if (tb !== ta) return tb - ta;
 
-      const sa = a.status || "draft";
-      const sb = b.status || "draft";
-      const score = (s: string) => (s === "draft" ? 0 : 1);
-      return score(sb) - score(sa);
+      const score = (s: string) => (s === "approved" ? 3 : s === "submitted" ? 2 : s === "draft" ? 1 : 0);
+      return score(b.status || "draft") - score(a.status || "draft");
     });
     primary.push(list[0]);
   }
@@ -366,10 +371,7 @@ async function handlePayNow(app: VendorProgressCard) {
   try {
     const res = await fetch(`${API_BASE}/vendor/applications/${appId}/pay-now`, {
       method: "POST",
-      headers: {
-        ...buildLocalAuthHeaders(),
-        "Content-Type": "application/json",
-      },
+      headers: buildLocalAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({}),
     });
 
@@ -391,9 +393,12 @@ async function handlePayNow(app: VendorProgressCard) {
 
     alert((typeof data?.detail === "string" && data.detail) || "Unable to start payment.");
   } catch (err: any) {
+    console.error("pay-now error", err);
     alert(err?.message || "Unable to start payment.");
   }
 }
+
+/* ---------------- Page ---------------- */
 
 export default function VendorApplicationsPage() {
   const nav = useNavigate();
@@ -412,8 +417,7 @@ export default function VendorApplicationsPage() {
     setServerError(null);
 
     const headers = buildLocalAuthHeaders();
-    const hasIdentity =
-      !!headers.Authorization || !!headers["x-user-email"] || !!headers["x-user-id"];
+    const hasIdentity = !!headers.Authorization || !!headers["x-user-email"];
 
     if (!hasIdentity) {
       setServerAppsRaw([]);
@@ -429,20 +433,30 @@ export default function VendorApplicationsPage() {
         headers,
       });
 
+      const data = await res.json().catch(() => null);
+
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`API ${res.status}: ${text || "Failed to load server applications"}`);
+        const detail =
+          (typeof data?.detail === "string" && data.detail) ||
+          `API ${res.status}: Failed to load server applications`;
+        throw new Error(detail);
       }
 
-      const data = (await res.json().catch(() => null)) as { applications?: ServerApplication[] } | null;
-      const apps = Array.isArray(data?.applications) ? data!.applications : [];
-      const normalized = apps.map(normalizeServerToCard);
+      const rawApps = Array.isArray(data?.applications) ? data.applications : [];
+      const normalized = rawApps
+        .map((a: any) => {
+          try {
+            return normalizeServerToCard(a as ServerApplication);
+          } catch (e) {
+            console.error("Bad app record:", a, e);
+            return null;
+          }
+        })
+        .filter(Boolean) as VendorProgressCard[];
 
       setServerAppsRaw(normalized);
 
-      const uniqueEventIds = Array.from(
-        new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean))
-      );
+      const uniqueEventIds = Array.from(new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean)));
       const nextReq: Record<string, LoadedRequirements | null> = {};
 
       await Promise.all(
@@ -464,6 +478,7 @@ export default function VendorApplicationsPage() {
       setReqByEventId(nextReq);
       setLocalByKey(nextLocal);
     } catch (e: any) {
+      console.error("loadApplications error", e);
       setServerError(e?.message || "Failed to load applications from server.");
       setServerAppsRaw([]);
       setReqByEventId({});
@@ -480,6 +495,8 @@ export default function VendorApplicationsPage() {
         if (!cancelled) {
           await loadApplications();
         }
+      } catch (e) {
+        console.error("initial load effect error", e);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -499,7 +516,6 @@ export default function VendorApplicationsPage() {
     const sessionId = String(params.get("session_id") || "").trim();
 
     if (payment !== "success" || !appId || !sessionId) return;
-
     paymentHandledRef.current = true;
 
     (async () => {
@@ -511,10 +527,7 @@ export default function VendorApplicationsPage() {
           `${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`,
           {
             method: "POST",
-            headers: {
-              ...buildLocalAuthHeaders(),
-              "Content-Type": "application/json",
-            },
+            headers: buildLocalAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({ session_id: sessionId }),
           }
         );
@@ -526,15 +539,7 @@ export default function VendorApplicationsPage() {
             (typeof data?.detail === "string" && data.detail) ||
             (typeof data?.message === "string" && data.message) ||
             `Unable to confirm payment (${res.status}).`;
-
-          const normalized = detail.toLowerCase();
-          const webhookOnly =
-            res.status === 403 &&
-            normalized.includes("disabled outside development");
-
-          if (!webhookOnly) {
-            throw new Error(detail);
-          }
+          throw new Error(detail);
         }
 
         await loadApplications();
@@ -550,6 +555,7 @@ export default function VendorApplicationsPage() {
           nav("/vendor/dashboard?payment=success", { replace: true });
         }, 900);
       } catch (e: any) {
+        console.error("confirm-payment error", e);
         setPaymentMessage(e?.message || "Unable to confirm payment.");
       } finally {
         setLoading(false);
@@ -559,7 +565,8 @@ export default function VendorApplicationsPage() {
 
   const cards = useMemo(() => {
     try {
-      return pickPrimaryPerEvent(serverAppsRaw || []);
+      if (!Array.isArray(serverAppsRaw)) return [];
+      return pickPrimaryPerEvent(serverAppsRaw);
     } catch (e) {
       console.error("Card processing crash:", e);
       return [];
@@ -572,10 +579,8 @@ export default function VendorApplicationsPage() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
-<div style={{ color: "red", fontWeight: 800 }}>PAYMENT RETURN TEST</div>
-
             <p className="mt-2 text-sm font-semibold text-slate-600">
-              One card per event (most recent application). Draft progress shown from your browser.
+              One card per event. Approved applications can pay after organizer approval.
             </p>
           </div>
 
@@ -606,7 +611,7 @@ export default function VendorApplicationsPage() {
               <div className="font-black">Server applications unavailable</div>
               <div className="mt-1 opacity-90">{serverError}</div>
               <div className="mt-2 text-xs font-bold text-amber-800">
-                If payment already completed, refresh after logging back in and the paid state should appear once confirmation succeeds.
+                If payment already completed, refresh after logging back in. Once confirmation succeeds, paid status will appear.
               </div>
             </div>
           ) : (
@@ -617,7 +622,7 @@ export default function VendorApplicationsPage() {
           )}
         </div>
 
-        {!cards || cards.length === 0 ? (
+        {!loading && !serverError && cards.length === 0 ? (
           <div className="mt-10 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
             <div className="text-xl font-black text-slate-900">No applications yet</div>
             <div className="mt-2 text-sm font-semibold text-slate-600">
@@ -634,7 +639,9 @@ export default function VendorApplicationsPage() {
               </button>
             </div>
           </div>
-        ) : (
+        ) : null}
+
+        {cards.length > 0 ? (
           <div className="mt-10 grid gap-4">
             {cards.map((it) => {
               const eid = normalizeId(it.eventId);
@@ -644,7 +651,6 @@ export default function VendorApplicationsPage() {
               const local = localByKey[localKey] ?? null;
 
               const effectiveChecked = local?.checked ?? it.checked ?? {};
-
               const serverDocs =
                 it.documents && typeof it.documents === "object"
                   ? it.documents
@@ -652,10 +658,14 @@ export default function VendorApplicationsPage() {
                   ? it.docs
                   : {};
 
-              const effectiveDocs = local?.docs ?? serverDocs ?? {};
+              const effectiveDocs = (local?.docs as Record<string, UploadedDocMeta | null> | undefined) ?? serverDocs;
               const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
 
-              const { done, total, pct } = calcCompletion(effectiveChecked, effectiveDocs, req);
+              const { done, total, pct } = calcCompletion(
+                effectiveChecked,
+                effectiveDocs as Record<string, UploadedDocMeta | null>,
+                req
+              );
               const status = it.status || "draft";
 
               const resolvedApplicationId = String(it.applicationId || "").trim();
@@ -663,10 +673,6 @@ export default function VendorApplicationsPage() {
                 resolvedApplicationId
               )}`;
 
-              const reqSource =
-                req?.source === "api" ? "reqs: api" : req?.source === "localStorage" ? "reqs: localStorage" : "reqs: —";
-
-              const progressSource = local ? "progress: local" : "progress: server";
               const showPayButton = status === "approved" && it.paymentStatus !== "paid";
 
               return (
@@ -687,11 +693,8 @@ export default function VendorApplicationsPage() {
 
                       <div className="mt-1 text-xs font-semibold text-slate-500">
                         Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
-                        {it.submittedAt ? (
-                          <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
-                        ) : null}
-                        <span className="ml-2">• {reqSource}</span>
-                        <span className="ml-2">• {progressSource}</span>
+                        {it.submittedAt ? <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span> : null}
+                        <span className="ml-2">• Amount: {formatMoney(it.amountCents, it.boothPrice)}</span>
                       </div>
                     </div>
 
@@ -776,7 +779,7 @@ export default function VendorApplicationsPage() {
               );
             })}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
