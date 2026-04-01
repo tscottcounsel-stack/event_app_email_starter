@@ -2111,8 +2111,8 @@ async def stripe_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
-    etype = str(event.get("type") or "").strip()
-    data_obj = (event.get("data") or {}).get("object") or {}
+    etype = str(event["type"]).strip()
+    data_obj = event["data"]["object"]
 
     _audit(
         action="stripe_webhook_received",
