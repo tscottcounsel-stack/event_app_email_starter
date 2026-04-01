@@ -2123,39 +2123,58 @@ async def stripe_webhook(request: Request):
     )
 
     if etype == "checkout.session.completed":
+        print("🔥 Stripe checkout.session.completed received")
+
         meta = data_obj.get("metadata") or {}
         try:
             app_id = int(meta.get("application_id") or 0)
         except Exception:
             app_id = 0
 
-        app = _APPLICATIONS.get(app_id)
-        if app and not _payment_exists_for_application(app_id):
-            expected_amount_cents = _get_amount_cents_from_app(app)
-            amount_total = data_obj.get("amount_total")
-            if amount_total is not None:
-                try:
-                    if int(amount_total) != int(expected_amount_cents):
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Stripe amount does not match application total",
-                        )
-                except HTTPException:
-                    raise
-                except Exception:
-                    raise HTTPException(
-                        status_code=400, detail="Invalid Stripe amount_total"
-                    )
+        print("➡️ application_id from metadata:", app_id)
 
-            amount = (
-                round((int(amount_total) / 100.0), 2)
-                if amount_total is not None
-                else round(expected_amount_cents / 100.0, 2)
-            )
-            _mark_application_paid(app, amount, user=None, source="stripe_webhook")
+        if not app_id:
+            print("❌ No application_id in metadata")
+            return {"ok": True}
+
+        app = _APPLICATIONS.get(app_id)
+
+        if not app:
+            print("❌ Application not found:", app_id)
+            return {"ok": True}
+
+        if _payment_exists_for_application(app_id):
+            print("⚠️ Payment already exists for application:", app_id)
+            return {"ok": True}
+
+        expected_amount_cents = _get_amount_cents_from_app(app)
+        amount_total = data_obj.get("amount_total")
+
+        if amount_total is not None:
+            try:
+                if int(amount_total) != int(expected_amount_cents):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Stripe amount does not match application total",
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(
+                    status_code=400, detail="Invalid Stripe amount_total"
+                )
+
+        amount = (
+            round((int(amount_total) / 100.0), 2)
+            if amount_total is not None
+            else round(expected_amount_cents / 100.0, 2)
+        )
+
+        print("💰 Marking app as PAID:", app_id, "Amount:", amount)
+        _mark_application_paid(app, amount, user=None, source="stripe_webhook")
+        print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
 
     return {"ok": True}
-
 
 @router.get("/admin/revenue-summary")
 def admin_revenue_summary(user=Depends(get_current_user)):
