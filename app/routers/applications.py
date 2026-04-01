@@ -682,3 +682,35 @@ def organizer_activity() -> Dict[str, Any]:
 @router.get("/health/applications-router")
 def applications_router_health() -> Dict[str, Any]:
     return {"ok": True, "router": "applications"}
+
+@router.get("/organizer/events/{event_id}/applications")
+def organizer_list_applications(event_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
+    event_id_str = str(event_id)
+
+    apps = []
+    for app in _iter_dict_values(_APPLICATIONS):
+        aid = _normalize_id(app.get("event_id") or app.get("eventId"))
+        if aid != event_id_str:
+            continue
+
+        # Ensure price is resolved
+        _persist_resolved_booth_price(app)
+
+        # Minimal normalization for frontend
+        enriched = {
+            **app,
+            "id": app.get("id"),
+            "event_id": event_id_str,
+            "status": app.get("status"),
+            "payment_status": app.get("payment_status"),
+            "booth_id": app.get("booth_id"),
+            "requested_booth_id": app.get("requested_booth_id"),
+            "vendor_email": app.get("vendor_email"),
+            "updated_at": app.get("updated_at") or app.get("submitted_at"),
+        }
+
+        apps.append(enriched)
+
+    return {"applications": apps}
