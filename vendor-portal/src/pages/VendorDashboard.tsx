@@ -498,7 +498,13 @@ export default function VendorDashboard() {
       }
 
       const data = JSON.parse(text || "{}");
-      const list = Array.isArray(data?.applications) ? data.applications : [];
+
+const list = Array.isArray(data)
+  ? data
+  : Array.isArray(data?.applications)
+  ? data.applications
+  : [];
+
       setApps(list);
     } catch (e: any) {
       setApps([]);
@@ -1326,7 +1332,7 @@ function resolveNumericApplicationId(value: any): string {
     Booth: {item.boothLabel ? shortBoothId(item.boothLabel) : "--"}
   </Badge>
 
-  {item.payment_status === "paid" ? (
+  {a.payment_status === "paid" ? (
   <Badge tone="emerald">Paid</Badge>
 ) : (
   <Badge tone="rose">Status: Awaiting payment</Badge>
