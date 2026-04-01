@@ -2152,24 +2152,32 @@ async def stripe_webhook(request: Request):
             print("❌ Failed retrieving Stripe session:", e)
             return {"ok": True}
 
-        meta = getattr(session, "metadata", None) or {}
-        app_id_raw = str(meta.get("application_id") or "").strip()
+       meta = getattr(session, "metadata", None)
 
-        if not app_id_raw:
-            try:
-                app_id_raw = str(getattr(session, "client_reference_id", "") or "").strip()
-            except Exception:
-                app_id_raw = ""
+app_id_raw = ""
+try:
+    if meta and "application_id" in meta:
+        app_id_raw = str(meta["application_id"] or "").strip()
+except Exception:
+    app_id_raw = ""
 
-        if not app_id_raw:
-            try:
-                payment_intent_id = str(getattr(session, "payment_intent", "") or "").strip()
-                if payment_intent_id:
-                    pi = stripe.PaymentIntent.retrieve(payment_intent_id)
-                    pi_meta = getattr(pi, "metadata", None) or {}
-                    app_id_raw = str(pi_meta.get("application_id") or "").strip()
-            except Exception as e:
-                print("⚠️ Failed retrieving payment intent metadata:", e)
+if not app_id_raw:
+    try:
+        app_id_raw = str(getattr(session, "client_reference_id", "") or "").strip()
+    except Exception:
+        app_id_raw = ""
+
+if not app_id_raw:
+    try:
+        payment_intent_id = str(getattr(session, "payment_intent", "") or "").strip()
+        if payment_intent_id:
+            pi = stripe.PaymentIntent.retrieve(payment_intent_id)
+            pi_meta = getattr(pi, "metadata", None)
+            if pi_meta and "application_id" in pi_meta:
+                app_id_raw = str(pi_meta["application_id"] or "").strip()
+    except Exception as e:
+        print("⚠️ Failed retrieving payment intent metadata:", e)
+
 
         try:
             app_id = int(app_id_raw or 0)
