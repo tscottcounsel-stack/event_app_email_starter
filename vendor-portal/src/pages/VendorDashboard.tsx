@@ -181,6 +181,10 @@ function shortBoothId(id?: string | null) {
   return tail.length > 18 ? tail.slice(-18) : tail;
 }
 
+function hasBoothSelected(app: VendorApplication) {
+  return !!String(app.booth_id || app.boothId || "").trim();
+}
+
 /* ------------------------ Notification read storage ------------------------ */
 
 const LS_VENDOR_NOTIF_READ_KEY = "vendor_notif_read_v1";
@@ -263,11 +267,11 @@ function pickActiveApp(apps: VendorApplication[]) {
 
   // 2. Approved + awaiting payment
   const awaitingPayment = sorted.find(
-    (a) =>
-      normalizeStatus(a.status) === "approved" &&
-      a.booth_id &&
-      String(a.payment_status || "").toLowerCase() !== "paid"
-  );
+  (a) =>
+    normalizeStatus(a.status) === "approved" &&
+    hasBoothSelected(a) &&
+    String(a.payment_status || "").toLowerCase() !== "paid"
+);
   if (awaitingPayment) return awaitingPayment;
 
   // 3. Approved (no booth yet)
