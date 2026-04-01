@@ -301,8 +301,16 @@ def _payment_exists_for_application(app_id: str) -> bool:
     target = _normalize_id(app_id)
     if not target:
         return False
+
     for payment in _iter_dict_values(_PAYMENTS):
         pid = _normalize_id(
+            payment.get("application_id") or payment.get("applicationId")
+        )
+        if pid == target and _as_str(payment.get("status")).lower() == "paid":
+            return True
+
+    return False
+
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
