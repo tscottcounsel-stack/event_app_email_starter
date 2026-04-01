@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 const API_BASE =
-  import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
+  import.meta.env.VITE_API_BASE ||
+  "https://event-app-api-production-ccce.up.railway.app";
 
 /* ---------------- Types ---------------- */
 
@@ -35,7 +36,7 @@ type VendorProgressCard = {
   checked: Record<string, boolean>;
   notes?: string;
   updatedAt: string;
-  status?: "draft" | "submitted" | "approved" | "rejected";
+  status?: "draft" | "submitted" | "approved" | "rejected" | "expired";
   submittedAt?: string;
   documents?: Record<string, any>;
   docs?: Record<string, any>;
@@ -151,9 +152,11 @@ function formatMoney(cents?: number, boothPrice?: number) {
   return "TBD";
 }
 
-function parseStatus(raw: any): "draft" | "submitted" | "approved" | "rejected" {
+function parseStatus(raw: any): "draft" | "submitted" | "approved" | "rejected" | "expired" {
   const s = String(raw ?? "").trim().toLowerCase();
-  if (s === "submitted" || s === "approved" || s === "rejected") return s as any;
+  if (s === "submitted" || s === "approved" || s === "rejected" || s === "expired") {
+    return s as any;
+  }
   return "draft";
 }
 
@@ -241,17 +244,18 @@ function readLocalProgress(eventId: string, appId?: string, boothId?: string): V
   const eid = normalizeId(eventId);
   if (!eid) return null;
 
-  const k1 = makeProgressKeyStable(eid);
-  const p1 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k1));
-  if (p1 && normalizeId(p1.eventId) === eid) return p1;
+  const stable = safeJsonParse<VendorApplyProgress>(localStorage.getItem(makeProgressKeyStable(eid)));
+  if (stable && normalizeId(stable.eventId) === eid) return stable;
 
-  const k2 = makeProgressKeyComposite(eid, appId, boothId);
-  const p2 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k2));
-  if (p2 && normalizeId(p2.eventId) === eid) return p2;
+  const composite = safeJsonParse<VendorApplyProgress>(
+    localStorage.getItem(makeProgressKeyComposite(eid, appId, boothId))
+  );
+  if (composite && normalizeId(composite.eventId) === eid) return composite;
 
-  const k3 = makeProgressKeyComposite(eid, appId, undefined);
-  const p3 = safeJsonParse<VendorApplyProgress>(localStorage.getItem(k3));
-  if (p3 && normalizeId(p3.eventId) === eid) return p3;
+  const appOnly = safeJsonParse<VendorApplyProgress>(
+    localStorage.getItem(makeProgressKeyComposite(eid, appId, undefined))
+  );
+  if (appOnly && normalizeId(appOnly.eventId) === eid) return appOnly;
 
   return null;
 }
@@ -332,7 +336,8 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
       }
 
       const statusScore = (s: string) =>
-        s === "approved" ? 3 : s === "submitted" ? 2 : s === "draft" ? 1 : 0;
+        s === "approved" ? 4 : s === "submitted" ? 3 : s === "draft" ? 2 : s === "expired" ? 1 : 0;
+
       if (statusScore(b.status || "draft") !== statusScore(a.status || "draft")) {
         return statusScore(b.status || "draft") - statusScore(a.status || "draft");
       }
@@ -390,12 +395,13 @@ async function handlePayNow(app: VendorProgressCard) {
       return;
     }
 
-    if (typeof data?.url === "string" && data.url) {
-      window.location.href = data.url;
+    const checkoutUrl = data?.checkout_url || data?.url || data?.checkoutUrl;
+    if (typeof checkoutUrl === "string" && checkoutUrl) {
+      window.location.href = checkoutUrl;
       return;
     }
 
-    alert((typeof data?.detail === "string" && data.detail) || "Unable to start payment.");
+    alert((typeof data?.detail === "string" && data.detail) || "No checkout URL returned.");
   } catch (err: any) {
     console.error("pay-now error", err);
     alert(err?.message || "Unable to start payment.");
@@ -446,7 +452,12 @@ export default function VendorApplicationsPage() {
         throw new Error(detail);
       }
 
-      const rawApps = Array.isArray(data?.applications) ? data.applications : [];
+      const rawApps = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.applications)
+        ? data.applications
+        : [];
+
       const normalized = rawApps
         .map((a: any) => {
           try {
@@ -460,9 +471,11 @@ export default function VendorApplicationsPage() {
 
       setServerAppsRaw(normalized);
 
-      const uniqueEventIds = Array.from(new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean)));
-      const nextReq: Record<string, LoadedRequirements | null> = {};
+      const uniqueEventIds = Array.from(
+        new Set(normalized.map((a) => normalizeId(a.eventId)).filter(Boolean))
+      );
 
+      const nextReq: Record<string, LoadedRequirements | null> = {};
       await Promise.all(
         uniqueEventIds.map(async (eid) => {
           try {
@@ -516,56 +529,30 @@ export default function VendorApplicationsPage() {
 
     const params = new URLSearchParams(location.search);
     const payment = String(params.get("payment") || "").trim().toLowerCase();
-    const appId = String(params.get("appId") || "").trim();
-    const sessionId = String(params.get("session_id") || "").trim();
 
-    if (payment !== "success" || !appId || !sessionId) return;
+    if (payment !== "success") return;
     paymentHandledRef.current = true;
 
     (async () => {
       try {
-        setLoading(true);
-        setPaymentMessage("Confirming payment…");
-
-        const res = await fetch(
-          `${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`,
-          {
-            method: "POST",
-            headers: buildLocalAuthHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ session_id: sessionId }),
-          }
-        );
-
-        const data = await res.json().catch(() => null);
-
-        if (!res.ok) {
-          const detail =
-            (typeof data?.detail === "string" && data.detail) ||
-            (typeof data?.message === "string" && data.message) ||
-            `Unable to confirm payment (${res.status}).`;
-          throw new Error(detail);
-        }
-
-        await loadApplications();
-        setPaymentMessage("Payment confirmed. Redirecting to dashboard…");
+        setPaymentMessage("Payment successful. Updating status...");
+        window.setTimeout(async () => {
+          await loadApplications();
+          setPaymentMessage(null);
+        }, 1200);
 
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete("payment");
         cleanUrl.searchParams.delete("appId");
+        cleanUrl.searchParams.delete("app_id");
         cleanUrl.searchParams.delete("session_id");
         window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
-
-        window.setTimeout(() => {
-          nav("/vendor/dashboard?payment=success", { replace: true });
-        }, 900);
       } catch (e: any) {
-        console.error("confirm-payment error", e);
-        setPaymentMessage(e?.message || "Unable to confirm payment.");
-      } finally {
-        setLoading(false);
+        console.error("payment refresh error", e);
+        setPaymentMessage(e?.message || "Payment completed. Refresh the page if status does not update.");
       }
     })();
-  }, [loadApplications, location.search, nav]);
+  }, [loadApplications, location.search]);
 
   const cards = useMemo(() => {
     try {
@@ -615,8 +602,7 @@ export default function VendorApplicationsPage() {
               <div className="font-black">Server applications unavailable</div>
               <div className="mt-1 opacity-90">{serverError}</div>
               <div className="mt-2 text-xs font-bold text-amber-800">
-                If payment already completed, refresh after logging back in. Once confirmation succeeds, paid status
-                will appear.
+                If payment already completed, refresh after logging back in. Paid status is updated by the Stripe webhook.
               </div>
             </div>
           ) : (
@@ -663,7 +649,8 @@ export default function VendorApplicationsPage() {
                   ? it.docs
                   : {};
 
-              const effectiveDocs = (local?.docs as Record<string, UploadedDocMeta | null> | undefined) ?? serverDocs;
+              const effectiveDocs =
+                (local?.docs as Record<string, UploadedDocMeta | null> | undefined) ?? serverDocs;
               const effectiveNotes = (local?.notes ?? it.notes ?? "").trim();
 
               const { done, total, pct } = calcCompletion(
@@ -671,12 +658,12 @@ export default function VendorApplicationsPage() {
                 effectiveDocs as Record<string, UploadedDocMeta | null>,
                 req
               );
-              const status = it.status || "draft";
 
+              const status = it.status || "draft";
               const resolvedApplicationId = String(it.applicationId || "").trim();
-              const viewUrl = `/vendor/events/${encodeURIComponent(it.eventId)}/requirements?appId=${encodeURIComponent(
-                resolvedApplicationId
-              )}`;
+              const viewUrl = `/vendor/events/${encodeURIComponent(
+                it.eventId
+              )}/requirements?appId=${encodeURIComponent(resolvedApplicationId)}`;
 
               const showPayButton = status === "approved" && it.paymentStatus !== "paid";
 
@@ -685,20 +672,16 @@ export default function VendorApplicationsPage() {
                   key={`${it.eventId}:${it.appId}`}
                   className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="min-w-[240px]">
-                      <div className="text-lg font-black text-slate-900">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xl font-black text-slate-900">
                         Event #{it.eventId}
-                        {it.boothId ? (
-                          <span className="ml-2 text-sm font-extrabold text-slate-500">
-                            • Requested Booth {it.boothId}
-                          </span>
-                        ) : null}
                       </div>
-
                       <div className="mt-1 text-xs font-semibold text-slate-500">
                         Last updated: {formatDate(local?.updatedAt || it.updatedAt)}
-                        {it.submittedAt ? <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span> : null}
+                        {it.submittedAt ? (
+                          <span className="ml-2">• Submitted: {formatDate(it.submittedAt)}</span>
+                        ) : null}
                         <span className="ml-2">• Amount: {formatMoney(it.amountCents, it.boothPrice)}</span>
                       </div>
                     </div>
@@ -713,6 +696,8 @@ export default function VendorApplicationsPage() {
                             ? "bg-rose-50 text-rose-700"
                             : status === "submitted"
                             ? "bg-indigo-50 text-indigo-700"
+                            : status === "expired"
+                            ? "bg-amber-50 text-amber-700"
                             : "bg-slate-100 text-slate-700")
                         }
                       >
@@ -722,6 +707,8 @@ export default function VendorApplicationsPage() {
                           ? "Rejected"
                           : status === "submitted"
                           ? "Submitted"
+                          : status === "expired"
+                          ? "Expired"
                           : "Draft"}
                       </span>
 
@@ -746,6 +733,15 @@ export default function VendorApplicationsPage() {
                     <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
                       <div className="h-2 rounded-full bg-slate-900" style={{ width: `${pct}%` }} />
                     </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-center gap-3 text-sm font-semibold text-slate-600">
+                    <span>
+                      Booth: <span className="font-black text-slate-900">{it.boothId || "Not selected"}</span>
+                    </span>
+                    <span>
+                      App ID: <span className="font-mono text-slate-900">{it.appId}</span>
+                    </span>
                   </div>
 
                   <div className="mt-5 flex flex-wrap gap-3">
@@ -776,7 +772,9 @@ export default function VendorApplicationsPage() {
 
                   {effectiveNotes ? (
                     <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-                      <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">Notes</div>
+                      <div className="text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                        Notes
+                      </div>
                       <div className="mt-1 whitespace-pre-wrap">{effectiveNotes}</div>
                     </div>
                   ) : null}
