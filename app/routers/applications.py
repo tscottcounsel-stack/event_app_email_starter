@@ -2117,7 +2117,7 @@ async def stripe_webhook(request: Request):
     _audit(
         action="stripe_webhook_received",
         entity_type="stripe_event",
-        entity_id=data_obj.get("id") or etype,
+        entity_id=data_obj["id"] if "id" in data_obj else etype,
         user=None,
         details={"event_type": etype},
     )
@@ -2125,7 +2125,7 @@ async def stripe_webhook(request: Request):
     if etype == "checkout.session.completed":
         print("🔥 Stripe checkout.session.completed received")
 
-        meta = data_obj.get("metadata") or {}
+        meta = data_obj["metadata"] if "metadata" in data_obj else {}
         try:
             app_id = int(meta.get("application_id") or 0)
         except Exception:
@@ -2138,7 +2138,6 @@ async def stripe_webhook(request: Request):
             return {"ok": True}
 
         app = _APPLICATIONS.get(app_id)
-
         if not app:
             print("❌ Application not found:", app_id)
             return {"ok": True}
@@ -2148,7 +2147,7 @@ async def stripe_webhook(request: Request):
             return {"ok": True}
 
         expected_amount_cents = _get_amount_cents_from_app(app)
-        amount_total = data_obj.get("amount_total")
+        amount_total = data_obj["amount_total"] if "amount_total" in data_obj else None
 
         if amount_total is not None:
             try:
@@ -2175,13 +2174,6 @@ async def stripe_webhook(request: Request):
         print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
 
     return {"ok": True}
-
-@router.get("/admin/revenue-summary")
-def admin_revenue_summary(user=Depends(get_current_user)):
-    _require_admin(user)
-    totals = get_payment_totals()
-    return {"ok": True, "summary": totals}
-
 
 @router.get("/admin/payments")
 def admin_list_payments(user: dict = Depends(get_current_user)):
