@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -7,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 router = APIRouter(tags=["applications"])
@@ -171,7 +169,14 @@ def _price_to_cents(value: Any) -> Optional[int]:
             return None
         return int(round(number * 100))
     if isinstance(value, dict):
-        for key in ("price_cents", "priceCents", "amount_cents", "amountCents", "price", "amount"):
+        for key in (
+            "price_cents",
+            "priceCents",
+            "amount_cents",
+            "amountCents",
+            "price",
+            "amount",
+        ):
             cents = _price_to_cents(value.get(key))
             if cents:
                 return cents
@@ -217,7 +222,14 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
     for booth in booths:
         match_values = _booth_match_values(booth)
         if booth_keys and match_values and booth_keys.intersection(match_values):
-            for key in ("price_cents", "priceCents", "amount_cents", "amountCents", "price", "amount"):
+            for key in (
+                "price_cents",
+                "priceCents",
+                "amount_cents",
+                "amountCents",
+                "price",
+                "amount",
+            ):
                 cents = _price_to_cents(booth.get(key))
                 if cents:
                     return cents
@@ -225,7 +237,14 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
     for root_key in ("payment_settings", "paymentSettings"):
         payment_settings = event.get(root_key)
         if isinstance(payment_settings, dict):
-            for key in ("booth_price_cents", "boothPriceCents", "default_booth_price_cents", "defaultBoothPriceCents", "booth_price", "boothPrice"):
+            for key in (
+                "booth_price_cents",
+                "boothPriceCents",
+                "default_booth_price_cents",
+                "defaultBoothPriceCents",
+                "booth_price",
+                "boothPrice",
+            ):
                 cents = _price_to_cents(payment_settings.get(key))
                 if cents:
                     return cents
@@ -234,7 +253,6 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
-    # prefer explicit app values first
     for key in (
         "locked_price_cents",
         "lockedPriceCents",
@@ -284,13 +302,20 @@ def _payment_exists_for_application(app_id: str) -> bool:
     if not target:
         return False
     for payment in _iter_dict_values(_PAYMENTS):
-        pid = _normalize_id(payment.get("application_id") or payment.get("applicationId"))
+        pid = _normalize_id(
+            payment.get("application_id") or payment.get("applicationId")
+        )
         if pid == target and _as_str(payment.get("status")).lower() == "paid":
             return True
     return False
 
 
-def _create_payment_record(app: Dict[str, Any], amount: int, source: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+def _create_payment_record(
+    app: Dict[str, Any],
+    amount: int,
+    source: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
     payment_id = str(int(time.time() * 1000))
     app_id = _normalize_id(app.get("id")) or payment_id
     record = {
@@ -307,12 +332,20 @@ def _create_payment_record(app: Dict[str, Any], amount: int, source: str, sessio
     return record
 
 
-def _mark_application_paid(app: Dict[str, Any], amount: int, user: Any = None, source: str = "manual", session_id: Optional[str] = None) -> Dict[str, Any]:
+def _mark_application_paid(
+    app: Dict[str, Any],
+    amount: int,
+    user: Any = None,
+    source: str = "manual",
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
     app["payment_status"] = "paid"
     app["status"] = app.get("status") or "approved"
     app["paid_at"] = _now_iso()
     app["amount_cents"] = int(amount)
     app["resolved_price_cents"] = int(amount)
+    if user is not None:
+        app["paid_by"] = user
     if source:
         app["payment_source"] = source
     if session_id:
@@ -340,12 +373,51 @@ def _get_frontend_base_url() -> str:
     return "http://localhost:5173"
 
 
+def expire_reservations_if_needed() -> int:
+    now_ts = time.time()
+    expired_count = 0
+
+    for app in _iter_dict_values(_APPLICATIONS):
+        expires_at = app.get("reservation_expires_at")
+        if not expires_at:
+            continue
+
+        try:
+            expires_ts = datetime.fromisoformat(
+                str(expires_at).replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            continue
+
+        if expires_ts > now_ts:
+            continue
+
+        app.pop("reservation_expires_at", None)
+
+        payment_status = _as_str(app.get("payment_status")).lower()
+        if payment_status != "paid":
+            app["payment_status"] = "expired"
+
+        status = _as_str(app.get("status")).lower()
+        if status in {"approved", "reserved", "pending_payment"}:
+            app["status"] = "expired"
+
+        expired_count += 1
+
+    if expired_count:
+        save_store()
+
+    return expired_count
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @router.get("/vendor/applications")
 def list_vendor_applications() -> List[Dict[str, Any]]:
+    expire_reservations_if_needed()
+
     apps: List[Dict[str, Any]] = []
     for app in _iter_dict_values(_APPLICATIONS):
         _persist_resolved_booth_price(app)
@@ -355,6 +427,8 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
 
 @router.get("/vendor/applications/{app_id}")
 def get_vendor_application(app_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
     app = _get_application_or_404(app_id)
     _persist_resolved_booth_price(app)
     return app
@@ -362,12 +436,17 @@ def get_vendor_application(app_id: str) -> Dict[str, Any]:
 
 @router.post("/vendor/applications/{app_id}/pay-now")
 def vendor_pay_now(app_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
     app = _get_application_or_404(app_id)
     amount_cents = _get_amount_cents_from_app(app)
 
     secret_key = _as_str(os.getenv("STRIPE_SECRET_KEY"))
     if not secret_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured: missing STRIPE_SECRET_KEY")
+        raise HTTPException(
+            status_code=500,
+            detail="Stripe not configured: missing STRIPE_SECRET_KEY",
+        )
 
     try:
         import stripe  # type: ignore
@@ -378,7 +457,10 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
-    success_url = f"{frontend}/vendor/applications?payment=success&app_id={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+    success_url = (
+        f"{frontend}/vendor/applications"
+        f"?payment=success&app_id={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+    )
     cancel_url = f"{frontend}/vendor/applications?payment=cancelled&app_id={app_id_str}"
 
     session = stripe.checkout.Session.create(
@@ -402,15 +484,18 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
         cancel_url=cancel_url,
     )
 
-    app["checkout_session_id"] = session["id"]
+    session_id = _as_str(getattr(session, "id", None) or session["id"])
+    session_url = _as_str(getattr(session, "url", None) or session["url"])
+
+    app["checkout_session_id"] = session_id
     app["checkout_created_at"] = _now_iso()
     app["checkout_amount_cents"] = int(amount_cents)
     save_store()
 
     return {
         "ok": True,
-        "checkout_url": session["url"],
-        "session_id": session["id"],
+        "checkout_url": session_url,
+        "session_id": session_id,
         "amount_cents": int(amount_cents),
     }
 
@@ -479,7 +564,10 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
         if app is None:
             return {"ok": True, "ignored": f"application {app_id} not found"}
 
-        if _as_str(app.get("payment_status")).lower() == "paid" or _payment_exists_for_application(app_id):
+        if (
+            _as_str(app.get("payment_status")).lower() == "paid"
+            or _payment_exists_for_application(app_id)
+        ):
             return {"ok": True, "already_paid": True}
 
         expected_amount = _get_amount_cents_from_app(app)
@@ -508,21 +596,30 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
 
 
 @router.post("/organizer/applications/{app_id}/reserve-booth")
-def organizer_reserve_booth(app_id: str, payload: BoothActionPayload = Body(default_factory=BoothActionPayload)) -> Dict[str, Any]:
+def organizer_reserve_booth(
+    app_id: str,
+    payload: BoothActionPayload = Body(default_factory=BoothActionPayload),
+) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
     if payload.booth_id:
         app["booth_id"] = payload.booth_id
     app["status"] = "approved"
     app["payment_status"] = app.get("payment_status") or "unpaid"
     minutes = payload.hold_minutes or 60 * 24
-    app["reservation_expires_at"] = datetime.fromtimestamp(time.time() + minutes * 60, tz=timezone.utc).isoformat()
+    app["reservation_expires_at"] = datetime.fromtimestamp(
+        time.time() + minutes * 60,
+        tz=timezone.utc,
+    ).isoformat()
     _persist_resolved_booth_price(app)
     save_store()
     return {"ok": True, "application": app}
 
 
 @router.post("/organizer/applications/{app_id}/change-booth")
-def organizer_change_booth(app_id: str, payload: BoothActionPayload = Body(default_factory=BoothActionPayload)) -> Dict[str, Any]:
+def organizer_change_booth(
+    app_id: str,
+    payload: BoothActionPayload = Body(default_factory=BoothActionPayload),
+) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
     if not payload.booth_id:
         raise HTTPException(status_code=400, detail="booth_id is required")
@@ -533,17 +630,28 @@ def organizer_change_booth(app_id: str, payload: BoothActionPayload = Body(defau
 
 
 @router.post("/organizer/applications/{app_id}/extend-reservation")
-def organizer_extend_reservation(app_id: str, payload: BoothActionPayload = Body(default_factory=BoothActionPayload)) -> Dict[str, Any]:
+def organizer_extend_reservation(
+    app_id: str,
+    payload: BoothActionPayload = Body(default_factory=BoothActionPayload),
+) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
     minutes = payload.hold_minutes or 60 * 24
     current_expires = app.get("reservation_expires_at")
     base_ts = time.time()
     if current_expires:
         try:
-            base_ts = max(base_ts, datetime.fromisoformat(str(current_expires).replace("Z", "+00:00")).timestamp())
+            base_ts = max(
+                base_ts,
+                datetime.fromisoformat(
+                    str(current_expires).replace("Z", "+00:00")
+                ).timestamp(),
+            )
         except Exception:
             pass
-    app["reservation_expires_at"] = datetime.fromtimestamp(base_ts + minutes * 60, tz=timezone.utc).isoformat()
+    app["reservation_expires_at"] = datetime.fromtimestamp(
+        base_ts + minutes * 60,
+        tz=timezone.utc,
+    ).isoformat()
     save_store()
     return {"ok": True, "application": app}
 
