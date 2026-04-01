@@ -1928,6 +1928,7 @@ def vendor_pay_now(
             mode="payment",
             success_url=success_url,
             cancel_url=cancel_url,
+            client_reference_id=str(app_id),
             line_items=[
                 {
                     "price_data": {
@@ -1945,6 +1946,16 @@ def vendor_pay_now(
                 "vendor_id": str(app.get("vendor_id") or ""),
                 "booth_id": str(app.get("booth_id") or ""),
                 "amount_cents": str(amount_cents),
+            },
+            payment_intent_data={
+                "metadata": {
+                    "application_id": str(app_id),
+                    "event_id": str(app.get("event_id") or ""),
+                    "vendor_email": str(app.get("vendor_email") or ""),
+                    "vendor_id": str(app.get("vendor_id") or ""),
+                    "booth_id": str(app.get("booth_id") or ""),
+                    "amount_cents": str(amount_cents),
+                }
             },
         )
 
@@ -2143,9 +2154,26 @@ async def stripe_webhook(request: Request):
             return {"ok": True}
 
         meta = getattr(session, "metadata", None) or {}
+        app_id_raw = str(meta.get("application_id") or "").strip()
+
+        if not app_id_raw:
+            try:
+                app_id_raw = str(getattr(session, "client_reference_id", "") or "").strip()
+            except Exception:
+                app_id_raw = ""
+
+        if not app_id_raw:
+            try:
+                payment_intent_id = str(getattr(session, "payment_intent", "") or "").strip()
+                if payment_intent_id:
+                    pi = stripe.PaymentIntent.retrieve(payment_intent_id)
+                    pi_meta = getattr(pi, "metadata", None) or {}
+                    app_id_raw = str(pi_meta.get("application_id") or "").strip()
+            except Exception as e:
+                print("⚠️ Failed retrieving payment intent metadata:", e)
 
         try:
-            app_id = int(str(meta.get("application_id") or "").strip() or 0)
+            app_id = int(app_id_raw or 0)
         except Exception:
             app_id = 0
 
@@ -2198,6 +2226,62 @@ async def stripe_webhook(request: Request):
         print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
 
     return {"ok": True}
+
+    app = _APPLICATIONS.get(app_id)
+
+    if not app:
+        print("❌ Application not found:", app_id)
+        return {"ok": True}
+
+    if str(app.get("payment_status")).lower() == "paid":
+        print("⚠️ Already marked paid:", app_id)
+        return {"ok": True}
+
+    amount_total = data_obj.get("amount_total")
+
+    try:
+        amount = round((int(amount_total or 0) / 100.0), 2)
+    except Exception:
+        amount = 0
+
+    print("💰 Marking app as PAID:", app_id, "Amount:", amount)
+
+    _mark_application_paid(app, amount, user=None, source="stripe_webhook")
+
+    print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
+        if app and not _payment_exists_for_application(app_id):
+            expected_amount_cents = _get_amount_cents_from_app(app)
+            amount_total = data_obj.get("amount_total")
+            if amount_total is not None:
+                try:
+                    if int(amount_total) != int(expected_amount_cents):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Stripe amount does not match application total",
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    raise HTTPException(
+                        status_code=400, detail="Invalid Stripe amount_total"
+                    )
+
+            amount = (
+                round((int(amount_total) / 100.0), 2)
+                if amount_total is not None
+                else round(expected_amount_cents / 100.0, 2)
+            )
+            _mark_application_paid(app, amount, user=None, source="stripe_webhook")
+
+    return {"ok": True}
+
+
+@router.get("/admin/revenue-summary")
+def admin_revenue_summary(user=Depends(get_current_user)):
+    _require_admin(user)
+    totals = get_payment_totals()
+    return {"ok": True, "summary": totals}
+
 
 @router.get("/admin/payments")
 def admin_list_payments(user: dict = Depends(get_current_user)):
