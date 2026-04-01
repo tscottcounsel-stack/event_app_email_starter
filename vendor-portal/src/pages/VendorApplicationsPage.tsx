@@ -572,6 +572,8 @@ export default function VendorApplicationsPage() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-4xl font-black tracking-tight text-slate-900">Applications</h1>
+<div style={{ color: "red", fontWeight: 800 }}>PAYMENT RETURN TEST</div>
+
             <p className="mt-2 text-sm font-semibold text-slate-600">
               One card per event (most recent application). Draft progress shown from your browser.
             </p>
