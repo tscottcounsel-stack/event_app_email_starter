@@ -53,8 +53,6 @@ const EMPTY_PROFILE: VendorProfile = {
   updatedAt: "",
 };
 
-const LS_KEY = "vendor_profile_v1";
-
 const CATEGORY_OPTIONS = [
   "Food & Beverage",
   "Coffee & Beverages",
@@ -94,6 +92,24 @@ function decodeJwtPayload(token: string): any | null {
   } catch {
     return null;
   }
+}
+
+function getVendorLSKey(): string {
+  const session: any =
+    typeof readSession === "function" ? (readSession() as any) : null;
+
+  const token: string = session?.accessToken || session?.token || "";
+  const email: string = session?.email || session?.user?.email || "";
+  const payload = token ? decodeJwtPayload(token) : null;
+
+  const rawId =
+    payload?.sub ??
+    session?.user?.id ??
+    session?.id ??
+    email ??
+    "anonymous";
+
+  return `vendor_profile_${String(rawId).trim() || "anonymous"}`;
 }
 
 function buildVendorHeaders(extra?: Record<string, string>) {
@@ -237,6 +253,8 @@ export default function VendorBusinessProfileSetupPage() {
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [uploadingGallery, setUploadingGallery] = useState(false);
 
+  const lsKey = useMemo(() => getVendorLSKey(), []);
+
   async function apiGetApplications() {
     const res = await fetch(`${API_BASE}/vendor/applications`, {
       method: "GET",
@@ -260,7 +278,7 @@ export default function VendorBusinessProfileSetupPage() {
       setLoading(true);
       setStatusMsg("");
 
-      const local = safeJsonParse<VendorProfile>(localStorage.getItem(LS_KEY));
+      const local = safeJsonParse<VendorProfile>(localStorage.getItem(lsKey));
       const localProfile = mergeProfiles(EMPTY_PROFILE, local);
 
       try {
@@ -272,7 +290,7 @@ export default function VendorBusinessProfileSetupPage() {
 
         setProfile(merged);
         try {
-          localStorage.setItem(LS_KEY, JSON.stringify(merged));
+          localStorage.setItem(lsKey, JSON.stringify(merged));
         } catch {
           // ignore storage failures
         }
@@ -309,7 +327,7 @@ export default function VendorBusinessProfileSetupPage() {
 
         if (hasApplicationData) {
           try {
-            localStorage.setItem(LS_KEY, JSON.stringify(merged));
+            localStorage.setItem(lsKey, JSON.stringify(merged));
           } catch {
             // ignore storage failures
           }
@@ -329,12 +347,12 @@ export default function VendorBusinessProfileSetupPage() {
       }
     }
 
-    load();
+    void load();
 
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [lsKey]);
 
   function setField<K extends keyof VendorProfile>(key: K, value: VendorProfile[K]) {
     setProfile((prev) => mergeProfiles(prev, { [key]: value } as Partial<VendorProfile>));
@@ -430,7 +448,7 @@ export default function VendorBusinessProfileSetupPage() {
       const mergedSaved = mergeProfiles(payload, normalizeFromSource(saved));
 
       try {
-        localStorage.setItem(LS_KEY, JSON.stringify(mergedSaved));
+        localStorage.setItem(lsKey, JSON.stringify(mergedSaved));
       } catch {
         // ignore storage failures
       }
