@@ -303,34 +303,126 @@ def _payment_exists_for_application(app_id: str) -> bool:
         return False
     for payment in _iter_dict_values(_PAYMENTS):
         pid = _normalize_id(
-            payment.get("application_id") or payment.get("applicationId")
-        )
-        if pid == target and _as_str(payment.get("status")).lower() == "paid":
-            return True
-    return False
-
-
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
     source: str,
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+
     payment_id = str(int(time.time() * 1000))
     app_id = _normalize_id(app.get("id")) or payment_id
+
+    # -------------------------
+    # LOAD RELATED DATA
+    # -------------------------
+    event = _get_event_for_app(app) or {}
+
+    event_id = _normalize_id(
+        event.get("id")
+        or app.get("event_id")
+        or app.get("eventId")
+    )
+
+    event_title = (
+        event.get("title")
+        or event.get("name")
+        or "Untitled event"
+    )
+
+    # Vendor info (comes from application)
+    vendor_name = (
+        app.get("vendor_name")
+        or app.get("business_name")
+        or app.get("company_name")
+        or app.get("name")
+        or app.get("vendor_email")
+        or "Unknown vendor"
+    )
+
+    vendor_email = app.get("vendor_email") or "unknown@email.com"
+
+    # Organizer info (comes from event)
+    organizer_name = (
+        event.get("organizer_name")
+        or event.get("company_name")
+        or event.get("host_name")
+        or event.get("email")
+        or "Unknown organizer"
+    )
+
+    organizer_email = (
+        event.get("organizer_email")
+        or event.get("email")
+        or "unknown@email.com"
+    )
+
+    # Booth info
+    booth_id = (
+        app.get("booth_id")
+        or app.get("selected_booth_id")
+        or app.get("requested_booth_id")
+    )
+
+    booth_label = (
+        app.get("booth_label")
+        or app.get("booth_number")
+        or booth_id
+    )
+
+    # -------------------------
+    # FINANCIALS
+    # -------------------------
+    amount_cents = int(amount)
+    amount_dollars = round(amount_cents / 100, 2)
+
+    # You can adjust this later
+    platform_fee_cents = int(amount_cents * 0.10)
+    platform_fee = round(platform_fee_cents / 100, 2)
+
+    organizer_payout = round((amount_cents - platform_fee_cents) / 100, 2)
+
+    # -------------------------
+    # FINAL RECORD
+    # -------------------------
     record = {
         "id": payment_id,
+
+        # Relationships
         "application_id": app_id,
-        "amount_cents": int(amount),
-        "status": "paid",
-        "source": source,
+        "event_id": event_id,
+        "event_title": event_title,
+
+        # Vendor
+        "vendor_name": vendor_name,
+        "vendor_email": vendor_email,
+
+        # Organizer
+        "organizer_name": organizer_name,
+        "organizer_email": organizer_email,
+
+        # Booth
+        "booth_id": booth_id,
+        "booth_label": booth_label,
+
+        # Financials
+        "amount_cents": amount_cents,
+        "amount": amount_dollars,
+        "platform_fee": platform_fee,
+        "organizer_payout": organizer_payout,
+
+        # Stripe
         "session_id": session_id,
+        "source": source,
+
+        # Status
+        "status": "paid",
         "created_at": _now_iso(),
         "paid_at": _now_iso(),
     }
+
     _PAYMENTS[payment_id] = record
     return record
-
 
 def _mark_application_paid(
     app: Dict[str, Any],
