@@ -310,73 +310,27 @@ def _payment_exists_for_application(app_id: str) -> bool:
     return False
 
 
-def _create_payment_record(app: Dict[str, Any], amount_cents: int, *, source: str, session_id: Optional[str] = None) -> Dict[str, Any]:
-    store = _load_store()
-    payments = store.setdefault("payments", [])
-
-    # 🔑 Resolve core data from application
-    event_id = _as_str(app.get("event_id") or app.get("eventId"))
-    vendor_email = _as_str(app.get("vendor_email"))
-    booth_id = _as_str(app.get("booth_id") or app.get("requested_booth_id"))
-
-    # Try to resolve event info
-    events = store.get("events", {})
-    event = None
-    if isinstance(events, dict):
-        event = events.get(event_id)
-
-    event_title = (event or {}).get("title") or "Untitled event"
-
-    # Organizer (fallback safe)
-    organizer_email = (event or {}).get("organizer_email") or "unknown@organizer"
-
-    # 💰 Convert amounts
-    amount = round(amount_cents / 100, 2)
-
-    # Simple fee model (adjust later if needed)
-    platform_fee = round(amount * 0.1, 2)   # 10%
-    organizer_payout = round(amount - platform_fee, 2)
-
-    rec = {
-        "id": str(uuid.uuid4()),
-
-        # Core relationships
-        "application_id": _as_str(app.get("id")),
-        "event_id": event_id,
-        "event_title": event_title,
-
-        "vendor_email": vendor_email,
-        "vendor_name": vendor_email.split("@")[0] if vendor_email else "Unknown vendor",
-
-        "organizer_email": organizer_email,
-        "organizer_name": organizer_email.split("@")[0] if organizer_email else "Unknown organizer",
-
-        "booth_id": booth_id,
-        "booth_label": f"Booth {booth_id}" if booth_id else None,
-
-        # 💰 Financials (THIS FIXES YOUR DASHBOARDS)
-        "amount": amount,
-        "platform_fee": platform_fee,
-        "organizer_payout": organizer_payout,
-
-        # Status
+def _create_payment_record(
+    app: Dict[str, Any],
+    amount: int,
+    source: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    payment_id = str(int(time.time() * 1000))
+    app_id = _normalize_id(app.get("id")) or payment_id
+    record = {
+        "id": payment_id,
+        "application_id": app_id,
+        "amount_cents": int(amount),
         "status": "paid",
-        "payout_status": "unpaid",
-
-        # Stripe reference
         "source": source,
         "session_id": session_id,
-
-        # Timestamps
-        "paid_at": _now_iso(),
         "created_at": _now_iso(),
-        "updated_at": _now_iso(),
+        "paid_at": _now_iso(),
     }
+    _PAYMENTS[payment_id] = record
+    return record
 
-    payments.append(rec)
-    _save_store(store)
-
-    return rec
 
 def _mark_application_paid(
     app: Dict[str, Any],
@@ -478,6 +432,49 @@ def get_vendor_application(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
     _persist_resolved_booth_price(app)
     return app
+
+
+
+@router.patch("/vendor/applications/{app_id}")
+def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
+    app = _get_application_or_404(app_id)
+
+    booth_id = _as_str(payload.get("booth_id"))
+    if booth_id:
+        app["requested_booth_id"] = booth_id
+
+    if "checked" in payload and isinstance(payload.get("checked"), dict):
+        app["checked"] = payload["checked"]
+
+    if "notes" in payload:
+        app["notes"] = payload.get("notes") or ""
+
+    if "documents" in payload and isinstance(payload.get("documents"), dict):
+        app["documents"] = payload["documents"]
+        app["docs"] = payload["documents"]
+
+    if "docs" in payload and isinstance(payload.get("docs"), dict):
+        app["documents"] = payload["docs"]
+        app["docs"] = payload["docs"]
+
+    booth_price = payload.get("booth_price")
+    if booth_price is not None:
+        cents = _price_to_cents(booth_price)
+        if cents:
+            app["booth_price_cents"] = cents
+            app["amount_cents"] = cents
+            app["resolved_price_cents"] = cents
+
+    app["updated_at"] = _now_iso()
+    save_store()
+    return {"ok": True, "application": app}
+
+
+@router.put("/vendor/applications/{app_id}/progress")
+def vendor_update_application_progress(app_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    return vendor_update_application(app_id, payload)
 
 
 @router.post("/vendor/applications/{app_id}/pay-now")
