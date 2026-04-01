@@ -2095,7 +2095,6 @@ def mark_application_paid(application_id: int, user: dict = Depends(get_current_
         "payment": payment,
     }
 
-
 @router.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
     import os
@@ -2226,55 +2225,6 @@ async def stripe_webhook(request: Request):
         print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
 
     return {"ok": True}
-
-    app = _APPLICATIONS.get(app_id)
-
-    if not app:
-        print("❌ Application not found:", app_id)
-        return {"ok": True}
-
-    if str(app.get("payment_status")).lower() == "paid":
-        print("⚠️ Already marked paid:", app_id)
-        return {"ok": True}
-
-    amount_total = data_obj.get("amount_total")
-
-    try:
-        amount = round((int(amount_total or 0) / 100.0), 2)
-    except Exception:
-        amount = 0
-
-    print("💰 Marking app as PAID:", app_id, "Amount:", amount)
-
-    _mark_application_paid(app, amount, user=None, source="stripe_webhook")
-
-    print("✅ PAYMENT SUCCESSFULLY RECORDED:", app_id)
-        if app and not _payment_exists_for_application(app_id):
-            expected_amount_cents = _get_amount_cents_from_app(app)
-            amount_total = data_obj.get("amount_total")
-            if amount_total is not None:
-                try:
-                    if int(amount_total) != int(expected_amount_cents):
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Stripe amount does not match application total",
-                        )
-                except HTTPException:
-                    raise
-                except Exception:
-                    raise HTTPException(
-                        status_code=400, detail="Invalid Stripe amount_total"
-                    )
-
-            amount = (
-                round((int(amount_total) / 100.0), 2)
-                if amount_total is not None
-                else round(expected_amount_cents / 100.0, 2)
-            )
-            _mark_application_paid(app, amount, user=None, source="stripe_webhook")
-
-    return {"ok": True}
-
 
 @router.get("/admin/revenue-summary")
 def admin_revenue_summary(user=Depends(get_current_user)):
