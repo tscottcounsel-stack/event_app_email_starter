@@ -2088,6 +2088,7 @@ def mark_application_paid(application_id: int, user: dict = Depends(get_current_
 @router.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
     import os
+    import stripe
 
     print("WEBHOOK SECRET PRESENT:", bool(os.getenv("STRIPE_WEBHOOK_SECRET")))
 
@@ -2100,9 +2101,8 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Missing Stripe signature")
 
     payload = await request.body()
-    try:
-        import stripe
 
+    try:
         event = stripe.Webhook.construct_event(
             payload=payload,
             sig_header=sig,
@@ -2125,9 +2125,27 @@ async def stripe_webhook(request: Request):
     if etype == "checkout.session.completed":
         print("🔥 Stripe checkout.session.completed received")
 
-        meta = data_obj["metadata"] if "metadata" in data_obj else {}
+        session_id = str(data_obj["id"]).strip() if "id" in data_obj else ""
+        if not session_id:
+            print("❌ No session id on webhook object")
+            return {"ok": True}
+
+        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if not secret:
+            raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY not set")
+
+        stripe.api_key = secret
+
         try:
-            app_id = int(meta.get("application_id") or 0)
+            session = stripe.checkout.Session.retrieve(session_id)
+        except Exception as e:
+            print("❌ Failed retrieving Stripe session:", e)
+            return {"ok": True}
+
+        meta = getattr(session, "metadata", None) or {}
+
+        try:
+            app_id = int(str(meta.get("application_id") or "").strip() or 0)
         except Exception:
             app_id = 0
 
@@ -2147,11 +2165,16 @@ async def stripe_webhook(request: Request):
             return {"ok": True}
 
         expected_amount_cents = _get_amount_cents_from_app(app)
-        amount_total = data_obj["amount_total"] if "amount_total" in data_obj else None
+        amount_total = getattr(session, "amount_total", None)
 
         if amount_total is not None:
             try:
                 if int(amount_total) != int(expected_amount_cents):
+                    print(
+                        "❌ Amount mismatch:",
+                        "stripe=", int(amount_total),
+                        "expected=", int(expected_amount_cents),
+                    )
                     raise HTTPException(
                         status_code=400,
                         detail="Stripe amount does not match application total",
@@ -2160,7 +2183,8 @@ async def stripe_webhook(request: Request):
                 raise
             except Exception:
                 raise HTTPException(
-                    status_code=400, detail="Invalid Stripe amount_total"
+                    status_code=400,
+                    detail="Invalid Stripe amount_total",
                 )
 
         amount = (
