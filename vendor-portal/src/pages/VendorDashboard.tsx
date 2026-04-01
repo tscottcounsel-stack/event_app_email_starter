@@ -185,6 +185,25 @@ function hasBoothSelected(app: VendorApplication) {
   return !!String(app.booth_id || app.boothId || "").trim();
 }
 
+function isPaymentAvailable(app: VendorApplication) {
+  if (typeof app.payment_enabled === "boolean") return app.payment_enabled;
+  if (typeof app.payment_link === "string" && app.payment_link.trim()) return true;
+  return normalizeStatus(app.status) === "approved";
+}
+
+function isPaid(app: VendorApplication) {
+  return String(app.payment_status || "").toLowerCase().trim() === "paid";
+}
+
+function msUntilHoldExpires(app: VendorApplication, nowMs: number) {
+  const raw = String(app.booth_reserved_until || "").trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  const t = d.getTime();
+  if (Number.isNaN(t)) return null;
+  return t - nowMs;
+}
+
 /* ------------------------ Notification read storage ------------------------ */
 
 const LS_VENDOR_NOTIF_READ_KEY = "vendor_notif_read_v1";
