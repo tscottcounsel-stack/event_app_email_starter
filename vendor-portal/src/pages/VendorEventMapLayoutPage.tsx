@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   listVendorApplications,
-  vendorApplyToEvent,
   submitApplication,
   vendorUpdateApplication,
   type ServerApplication,
@@ -12,8 +11,6 @@ import {
 function cx(...classes: Array<string | false | undefined | null>) {
   return classes.filter(Boolean).join(" ");
 }
-
-/* ---------------- Vendor Requirements Progress (localStorage) ---------------- */
 
 type UploadMeta = {
   name: string;
@@ -88,8 +85,6 @@ function summarizeUploads(uploads: Record<string, UploadMeta[]>) {
   return { docsWithFiles: docsWithFiles.length, totalDocs: docIds.length, totalFiles };
 }
 
-/* ---------------- Types ---------------- */
-
 type BoothStatus =
   | "available"
   | "requested"
@@ -147,18 +142,16 @@ type DiagramResponse = {
 const API_BASE =
   import.meta.env.VITE_API_BASE || "https://event-app-api-production-ccce.up.railway.app";
 
-/* ---------------- Visual helpers (match Organizer tile feel) ---------------- */
-
 function statusColor(status: BoothStatus) {
   const s = String(status || "").toLowerCase();
-  if (s === "available") return "#10b981"; // emerald
-  if (s === "requested") return "#f59e0b"; // amber
-  if (s === "assigned") return "#3b82f6"; // blue
-  if (s === "booked" || s === "paid") return "#ef4444"; // red
-  if (s === "reserved") return "#fb923c"; // orange
-  if (s === "blocked") return "#111827"; // slate-900
-  if (s === "pending") return "#a855f7"; // violet
-  return "#6b7280"; // slate-500
+  if (s === "available") return "#10b981";
+  if (s === "requested") return "#f59e0b";
+  if (s === "assigned") return "#3b82f6";
+  if (s === "booked" || s === "paid") return "#ef4444";
+  if (s === "reserved") return "#fb923c";
+  if (s === "blocked") return "#111827";
+  if (s === "pending") return "#a855f7";
+  return "#6b7280";
 }
 
 function tileTheme(status: BoothStatus) {
@@ -293,8 +286,6 @@ function formatDuration(ms: number) {
   return `${h}h ${m}m`;
 }
 
-/* ---------------- Confirm Modal ---------------- */
-
 function ConfirmModal(props: {
   open: boolean;
   title: string;
@@ -347,8 +338,6 @@ function ConfirmModal(props: {
   );
 }
 
-/* ---------------- Main Page ---------------- */
-
 export default function VendorEventMapLayoutPage() {
   const navigate = useNavigate();
   const { eventId } = useParams<{ eventId: string }>();
@@ -378,10 +367,8 @@ export default function VendorEventMapLayoutPage() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // UX message when Pay Now has no link, so the click doesn't feel "dead"
   const [payNowMsg, setPayNowMsg] = useState<string | null>(null);
 
-  // UX guidance banner tick (for hold countdown)
   const [, forceTick] = useState(0);
   useEffect(() => {
     const t = window.setInterval(() => forceTick((x) => x + 1), 30_000);
@@ -421,10 +408,9 @@ export default function VendorEventMapLayoutPage() {
     };
   }, [diagram]);
 
-  // Booth labels by id (so we never show raw booth ids to users)
   const boothLabelById = useMemo(() => {
     const m = new Map<string, string>();
-    const allLevels = Array.isArray(diagram?.levels) ? diagram!.levels! : [];
+    const allLevels = Array.isArray(diagram?.levels) ? diagram.levels : [];
     if (allLevels.length > 0) {
       for (const lvl of allLevels) {
         for (const b of Array.isArray(lvl.booths) ? lvl.booths : []) {
@@ -432,14 +418,13 @@ export default function VendorEventMapLayoutPage() {
         }
       }
     } else {
-      for (const b of Array.isArray(diagram?.booths) ? diagram!.booths! : []) {
+      for (const b of Array.isArray(diagram?.booths) ? diagram.booths : []) {
         if (b?.id && b?.label) m.set(String(b.id), String(b.label));
       }
     }
     return m;
   }, [diagram]);
 
-  // Owner by booth_id from server applications, if available
   const boothOwnerByBoothId = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of apps) {
@@ -496,9 +481,7 @@ export default function VendorEventMapLayoutPage() {
 
   const selectedBooth = useMemo(() => {
     if (!selectedBoothId) return null;
-    return (
-      boothsWithServerStatus.find((b) => String(b.id) === String(selectedBoothId)) || null
-    );
+    return boothsWithServerStatus.find((b) => String(b.id) === String(selectedBoothId)) || null;
   }, [boothsWithServerStatus, selectedBoothId]);
 
   function isBoothSelectable(b: Booth) {
@@ -506,7 +489,21 @@ export default function VendorEventMapLayoutPage() {
     return s === "available";
   }
 
- async function selectBooth(b: Booth) {
+  async function loadVendorApps() {
+    setLoadingApps(true);
+    setAppsError(null);
+    try {
+      const list = await listVendorApplications();
+      setApps(Array.isArray(list) ? list : []);
+    } catch (e: any) {
+      setAppsError(e?.message || "Failed to load applications.");
+      setApps([]);
+    } finally {
+      setLoadingApps(false);
+    }
+  }
+
+  async function selectBooth(b: Booth) {
     if (!isBoothSelectable(b)) return;
 
     const nextBoothId = String(b.id);
@@ -526,7 +523,6 @@ export default function VendorEventMapLayoutPage() {
       await loadVendorApps();
 
       const savedAppId = String((saved as any)?.id || "").trim();
-
       if (eventId && savedAppId && savedAppId !== String(appId || "").trim()) {
         navigate(
           `/vendor/events/${encodeURIComponent(String(eventId))}/layout?appId=${encodeURIComponent(savedAppId)}`,
@@ -538,12 +534,7 @@ export default function VendorEventMapLayoutPage() {
     } finally {
       setSaveSelectionBusy(false);
     }
-  } catch (e: any) {
-    setSaveSelectionError(e?.message || "Failed to save booth request.");
-  } finally {
-    setSaveSelectionBusy(false);
   }
-}
 
   function clearSelection() {
     setSelectedBoothId(null);
@@ -604,27 +595,13 @@ export default function VendorEventMapLayoutPage() {
     setLoadingDiagram(false);
   }
 
-  async function loadVendorApps() {
-    setLoadingApps(true);
-    setAppsError(null);
-    try {
-      const list = await listVendorApplications();
-      setApps(Array.isArray(list) ? list : []);
-      setLoadingApps(false);
-    } catch (e: any) {
-      setAppsError(e?.message || "Failed to load applications.");
-      setApps([]);
-      setLoadingApps(false);
-    }
-  }
-
   useEffect(() => {
-    loadDiagram();
+    void loadDiagram();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);
 
   useEffect(() => {
-    loadVendorApps();
+    void loadVendorApps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -664,7 +641,7 @@ export default function VendorEventMapLayoutPage() {
     return out;
   }
 
- async function persistBoothSelection(payload: {
+  async function persistBoothSelection(payload: {
     booth_id: string;
     booth_price: number;
   }) {
@@ -672,61 +649,23 @@ export default function VendorEventMapLayoutPage() {
       throw new Error("Missing event ID.");
     }
 
+    if (!appId) {
+      throw new Error("Missing application ID.");
+    }
+
     const progress = loadVendorProgress(String(eventId), appId || undefined);
     const checked = normalizeCheckedForSubmit(progress?.checked);
     const notes = String(progress?.notes || "").trim();
 
-    if (!appId) {
-  throw new Error("Missing application ID.");
-}
-
-const createdOrUpdated = await vendorUpdateApplication({
-  applicationId: Number(appId),
-  booth_id: payload.booth_id,
-  booth_price: payload.booth_price,
-  checked,
-  notes,
-});
-
-    return ((createdOrUpdated as any)?.application ?? createdOrUpdated ?? null) as any;
-  },
-});
-
-    const existingAppId = String((activeEventApp as any)?.id || appId || "").trim();
-
-    if (existingAppId) {
-      const res = await fetch(
-        `${API_BASE}/vendor/applications/${encodeURIComponent(existingAppId)}/progress`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            booth_id: String(nextBoothId),
-            checked: body.checked,
-            notes: body.notes,
-          }),
-        }
-      );
-
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(
-          String(data?.detail || data?.message || "Failed to save booth request.")
-        );
-      }
-
-      return ((data?.application ?? data) || null) as any;
-    }
-
-    const created = await vendorApplyToEvent({
-      eventId,
-      body,
+    const updated = await vendorUpdateApplication({
+      applicationId: Number(appId),
+      booth_id: payload.booth_id,
+      booth_price: payload.booth_price,
+      checked,
+      notes,
     });
 
-    return created as any;
+    return ((updated as any)?.application ?? updated ?? null) as any;
   }
 
   async function onConfirmPurchase() {
@@ -746,23 +685,26 @@ const createdOrUpdated = await vendorUpdateApplication({
     try {
       const boothAny = selectedBooth as any;
 
-console.log("🔥 SELECTED BOOTH:", boothAny);
+      const applied = await persistBoothSelection({
+        booth_id: String(boothAny.id),
+        booth_price: Number(
+          boothAny.price ??
+            boothAny.meta?.price ??
+            boothAny.cost ??
+            boothAny.amount ??
+            0
+        ),
+      });
 
-const applied = await persistBoothSelection({
-  booth_id: String(boothAny.id),
-  booth_price: Number(
-    boothAny.price ??
-    boothAny.meta?.price ??
-    boothAny.cost ??
-    boothAny.amount ??
-    0
-  ),
-});
       await submitApplication({ applicationId: (applied as any).id });
 
       navigate(
         `/vendor/events/${encodeURIComponent(String(eventId))}${
-          (applied as any)?.id ? `?appId=${encodeURIComponent(String((applied as any).id))}` : appId ? `?appId=${encodeURIComponent(String(appId))}` : ""
+          (applied as any)?.id
+            ? `?appId=${encodeURIComponent(String((applied as any).id))}`
+            : appId
+            ? `?appId=${encodeURIComponent(String(appId))}`
+            : ""
         }`
       );
     } catch (e: any) {
@@ -770,16 +712,14 @@ const applied = await persistBoothSelection({
     } finally {
       setSubmitBusy(false);
       setConfirmOpen(false);
-      loadVendorApps();
+      void loadVendorApps();
     }
   }
 
-  // App(s) for this event (best-effort)
   const eventApps = useMemo(() => {
     return (apps || []).filter((a: any) => String(a.event_id) === String(eventId));
   }, [apps, eventId]);
 
-  // Prefer the app from the URL (?appId=...), then fallback to "latest"
   const activeEventApp = useMemo(() => {
     if (!eventApps.length) return null;
 
@@ -810,11 +750,9 @@ const applied = await persistBoothSelection({
       setSelectedBoothId((curr) => (curr === persistedBoothId ? curr : persistedBoothId));
       return;
     }
-
     setSelectedBoothId((curr) => curr);
   }, [persistedBoothId]);
 
-  // Banner label helper
   const pageStatus = useMemo(() => {
     const anyPending = eventApps.some(
       (a: any) => String(a.status || "").toLowerCase() === "submitted"
@@ -928,7 +866,7 @@ const applied = await persistBoothSelection({
 
   function boothUiLabel(b: Booth) {
     const id = String(b.id);
-    return boothLabelById.get(id) || b.label || `Booth`;
+    return boothLabelById.get(id) || b.label || "Booth";
   }
 
   function boothOwnerLabel(b: Booth) {
@@ -983,20 +921,17 @@ const applied = await persistBoothSelection({
       const a: any = activeEventApp;
       const link = String(a?.payment_link || "").trim();
 
-      // If backend ever provides a link, use it.
       if (link) {
         window.open(link, "_blank");
         return;
       }
 
-      // Option A: send vendor to payment instructions (Requirements page)
       if (!eventId) {
         setPayNowMsg("Payment link isn’t available yet for this application.");
         return;
       }
 
       goBackToRequirements("payment");
-      return;
     }
   }
 
@@ -1008,7 +943,6 @@ const applied = await persistBoothSelection({
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto w-full max-w-6xl px-4 py-6">
-        {/* Header */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm text-slate-500">Vendor Portal</div>
@@ -1044,8 +978,8 @@ const applied = await persistBoothSelection({
             <button
               type="button"
               onClick={() => {
-                loadDiagram();
-                loadVendorApps();
+                void loadDiagram();
+                void loadVendorApps();
               }}
               className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
             >
@@ -1063,7 +997,6 @@ const applied = await persistBoothSelection({
           </div>
         </div>
 
-        {/* Step B: Guidance Banner */}
         <div
           className={cx(
             "mb-6 rounded-2xl border p-4 shadow-sm",
@@ -1121,9 +1054,7 @@ const applied = await persistBoothSelection({
           </div>
         </div>
 
-        {/* Body */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr,320px]">
-          {/* Layout */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-lg font-bold text-slate-900">Layout</div>
@@ -1219,7 +1150,6 @@ const applied = await persistBoothSelection({
                     backgroundSize: `${canvas.gridSize * zoom}px ${canvas.gridSize * zoom}px`,
                   }}
                 >
-                  {/* Map elements */}
                   {(currentLevel?.elements || []).map((el: MapElement) => (
                     <div
                       key={String(el.id)}
@@ -1238,7 +1168,6 @@ const applied = await persistBoothSelection({
                     </div>
                   ))}
 
-                  {/* Booths */}
                   {boothsWithServerStatus.map((b) => {
                     const sel = selectedBoothId && String(selectedBoothId) === String(b.id);
                     const canSelect = !disableSelection && isBoothSelectable(b);
@@ -1265,7 +1194,7 @@ const applied = await persistBoothSelection({
                       <button
                         key={String(b.id)}
                         type="button"
-                        onClick={() => selectBooth(b)}
+                        onClick={() => void selectBooth(b)}
                         disabled={!canSelect}
                         className="absolute rounded-2xl shadow-sm"
                         style={{
@@ -1357,7 +1286,6 @@ const applied = await persistBoothSelection({
             )}
           </div>
 
-          {/* Booth Details */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-lg font-bold text-slate-900">Booth Details</div>
             <div className="mt-1 text-sm text-slate-600">
@@ -1466,7 +1394,6 @@ const applied = await persistBoothSelection({
           </div>
         </div>
 
-        {/* Confirm modal */}
         <ConfirmModal
           open={confirmOpen}
           title="Confirm booth request"
@@ -1474,9 +1401,7 @@ const applied = await persistBoothSelection({
             selectedBooth
               ? `${boothUiLabel(selectedBooth)} for ${fmtMoney(
                   selectedBooth.price
-                )}?
-
-Your request will be submitted and marked as awaiting organizer approval.`
+                )}?\n\nYour request will be submitted and marked as awaiting organizer approval.`
               : "Your request will be submitted and marked as awaiting organizer approval."
           }
           confirmText="Submit Request"
@@ -1489,8 +1414,3 @@ Your request will be submitted and marked as awaiting organizer approval.`
     </div>
   );
 }
-
-
-
-
-
