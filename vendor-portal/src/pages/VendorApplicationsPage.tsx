@@ -1,4 +1,3 @@
-// src/pages/VendorApplicationsPage.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
@@ -111,19 +110,11 @@ function getStoredToken() {
 }
 
 function getStoredEmail() {
-  return (
-    localStorage.getItem("userEmail") ||
-    sessionStorage.getItem("userEmail") ||
-    ""
-  );
+  return localStorage.getItem("userEmail") || sessionStorage.getItem("userEmail") || "";
 }
 
 function getStoredRole() {
-  return (
-    localStorage.getItem("userRole") ||
-    sessionStorage.getItem("userRole") ||
-    ""
-  );
+  return localStorage.getItem("userRole") || sessionStorage.getItem("userRole") || "";
 }
 
 function buildLocalAuthHeaders(extra?: Record<string, string>) {
@@ -335,17 +326,30 @@ function pickPrimaryPerEvent(apps: VendorProgressCard[]) {
   for (const eid of Object.keys(byEvent)) {
     const list = byEvent[eid].slice();
     list.sort((a, b) => {
+      const paidScore = (x: VendorProgressCard) => (x.paymentStatus === "paid" ? 1 : 0);
+      if (paidScore(b) !== paidScore(a)) {
+        return paidScore(b) - paidScore(a);
+      }
+
+      const statusScore = (s: string) =>
+        s === "approved" ? 3 : s === "submitted" ? 2 : s === "draft" ? 1 : 0;
+      if (statusScore(b.status || "draft") !== statusScore(a.status || "draft")) {
+        return statusScore(b.status || "draft") - statusScore(a.status || "draft");
+      }
+
       const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
       const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
-      if (tb !== ta) return tb - ta;
-
-      const score = (s: string) => (s === "approved" ? 3 : s === "submitted" ? 2 : s === "draft" ? 1 : 0);
-      return score(b.status || "draft") - score(a.status || "draft");
+      return tb - ta;
     });
     primary.push(list[0]);
   }
 
   primary.sort((a, b) => {
+    const paidScore = (x: VendorProgressCard) => (x.paymentStatus === "paid" ? 1 : 0);
+    if (paidScore(b) !== paidScore(a)) {
+      return paidScore(b) - paidScore(a);
+    }
+
     const ta = new Date(a.submittedAt || a.updatedAt || 0).getTime();
     const tb = new Date(b.submittedAt || b.updatedAt || 0).getTime();
     return tb - ta;
@@ -611,7 +615,8 @@ export default function VendorApplicationsPage() {
               <div className="font-black">Server applications unavailable</div>
               <div className="mt-1 opacity-90">{serverError}</div>
               <div className="mt-2 text-xs font-bold text-amber-800">
-                If payment already completed, refresh after logging back in. Once confirmation succeeds, paid status will appear.
+                If payment already completed, refresh after logging back in. Once confirmation succeeds, paid status
+                will appear.
               </div>
             </div>
           ) : (
