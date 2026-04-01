@@ -253,37 +253,38 @@ function pickActiveApp(apps: VendorApplication[]) {
       return (Number(y.id || 0) || 0) - (Number(x.id || 0) || 0);
     });
 
-  // Prefer non-rejected if there are multiple (keeps dashboard usable)
-  const nonRejected = sorted.find((a) => normalizeStatus(a.status) !== "rejected");
-  return nonRejected || sorted[0];
-}
+  // 🔥 PRIORITY LOGIC
 
-function isPaymentAvailable(app: VendorApplication) {
-  if (typeof app.payment_enabled === "boolean") return app.payment_enabled;
-  if (typeof app.payment_link === "string" && app.payment_link.trim()) return true;
-  // fallback: assume available if approved (MVP)
-  return true;
-}
+  // 1. Paid wins
+  const paid = sorted.find(
+    (a) => String(a.payment_status || "").toLowerCase() === "paid"
+  );
+  if (paid) return paid;
 
-function isPaid(app: VendorApplication) {
-  const ps = String(app.payment_status || "").toLowerCase();
-  return ps === "paid";
-}
+  // 2. Approved + awaiting payment
+  const awaitingPayment = sorted.find(
+    (a) =>
+      normalizeStatus(a.status) === "approved" &&
+      a.booth_id &&
+      String(a.payment_status || "").toLowerCase() !== "paid"
+  );
+  if (awaitingPayment) return awaitingPayment;
 
-function hasBoothSelected(app: VendorApplication) {
-  const boothId = String(app.booth_id || "").trim();
-  return !!boothId;
-}
+  // 3. Approved (no booth yet)
+  const approved = sorted.find(
+    (a) => normalizeStatus(a.status) === "approved"
+  );
+  if (approved) return approved;
 
-function msUntilHoldExpires(app: VendorApplication, nowMs: number) {
-  const raw = String((app as any).booth_reserved_until || "").trim();
-  if (!raw) return null;
-  const d = new Date(raw);
-  const t = d.getTime();
-  if (Number.isNaN(t)) return null;
-  return t - nowMs;
-}
+  // 4. Not rejected
+  const nonRejected = sorted.find(
+    (a) => normalizeStatus(a.status) !== "rejected"
+  );
+  if (nonRejected) return nonRejected;
 
+  // fallback
+  return sorted[0];
+}
 /* ------------------------------ UI helpers ------------------------------ */
 
 
