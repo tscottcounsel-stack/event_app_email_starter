@@ -135,30 +135,6 @@ export default function VendorEventDetailsPage() {
         console.log("VendorEventDetailsPage API_BASE:", API_BASE);
         console.log("VendorEventDetailsPage eventId:", eventId);
 
-        const detailRes = await fetch(`${API_BASE}/events/${encodeURIComponent(String(eventId))}`, {
-          headers,
-        });
-
-        const detailText = await detailRes.text();
-        const detailData = detailText
-          ? (() => {
-              try {
-                return JSON.parse(detailText);
-              } catch {
-                return null;
-              }
-            })()
-          : null;
-
-        if (detailRes.ok) {
-          if (!cancelled) {
-            setEvent(detailData);
-          }
-          return;
-        }
-
-        console.warn("Direct event lookup failed, falling back to /events list:", detailRes.status, detailData);
-
         const listRes = await fetch(`${API_BASE}/events`, { headers });
         const listText = await listRes.text();
         const listData = listText
@@ -172,7 +148,7 @@ export default function VendorEventDetailsPage() {
           : null;
 
         if (!listRes.ok) {
-          throw new Error(detailData?.detail || listData?.detail || "Failed to load event.");
+          throw new Error(listData?.detail || "Failed to load event.");
         }
 
         const events: EventModel[] = Array.isArray(listData)

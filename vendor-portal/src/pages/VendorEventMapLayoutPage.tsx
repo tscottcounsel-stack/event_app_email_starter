@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   listVendorApplications,
-  submitApplication,
   vendorUpdateApplication,
   type ServerApplication,
 } from "../components/api/applications";
@@ -525,7 +524,7 @@ export default function VendorEventMapLayoutPage() {
       const savedAppId = String((saved as any)?.id || "").trim();
       if (eventId && savedAppId && savedAppId !== String(appId || "").trim()) {
         navigate(
-          `/vendor/events/${encodeURIComponent(String(eventId))}/layout?appId=${encodeURIComponent(savedAppId)}`,
+          `/vendor/events/${encodeURIComponent(String(eventId))}/map?appId=${encodeURIComponent(savedAppId)}`,
           { replace: true }
         );
       }
@@ -557,7 +556,7 @@ export default function VendorEventMapLayoutPage() {
     }
 
     try {
-      const url = `${API_BASE}/events/${encodeURIComponent(eventId)}/diagram`;
+      const url = `${API_BASE}/diagrams/${encodeURIComponent(eventId)}`;
       const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
       if (res.ok) {
         const data = (await res.json().catch(() => null)) as DiagramResponse | any;
@@ -696,7 +695,7 @@ export default function VendorEventMapLayoutPage() {
         ),
       });
 
-      await submitApplication({ applicationId: (applied as any).id });
+      await loadVendorApps();
 
       navigate(
         `/vendor/events/${encodeURIComponent(String(eventId))}${
@@ -705,7 +704,12 @@ export default function VendorEventMapLayoutPage() {
             : appId
             ? `?appId=${encodeURIComponent(String(appId))}`
             : ""
-        }`
+        }`,
+        {
+          state: {
+            toast: "Booth request saved.",
+          },
+        }
       );
     } catch (e: any) {
       setSubmitError(e?.message || "Failed to submit request.");
