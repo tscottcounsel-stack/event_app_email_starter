@@ -5,6 +5,7 @@ import BoothMapEditor from "./figma/pages/BoothMapEditor";
 import AdminDashboardPage from "./pages/AdminDashboardPage";
 import AdminEventsPage from "./pages/AdminEventsPage";
 import OrganizerEventDashboardPage from "./pages/OrganizerEventDashboardPage";
+import VendorEventMapLayoutPage from "./pages/VendorEventMapLayoutPage";
 import AdminVerificationsPage from "./pages/AdminVerificationsPage";
 
 /* ---------------- PUBLIC ---------------- */
@@ -248,7 +249,8 @@ export default function App() {
           <Route path="messages" element={<OrganizerMessagesPage />} />
           <Route path="events/:eventId/messages" element={<OrganizerMessagesPage />} />
           <Route path="events/:eventId/details" element={<OrganizerEventDetailsPage />} />
-          <Route path="events/:eventId/map" element={<BoothMapEditor />} />
+         <Route path="events/:eventId/map" element={<BoothMapEditor />} />
+ 
           <Route
             path="events/:eventId/requirements"
             element={<OrganizerEventRequirementsPage />}
@@ -290,8 +292,7 @@ export default function App() {
             path="events/:eventId/requirements"
             element={<VendorEventRequirementsPage />}
           />
-          <Route path="events/:eventId/map" element={<BoothMapEditor />} />
-          <Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
+<Route path="events/:eventId/map" element={<VendorEventMapLayoutPage />} /><Route path="events/:eventId/apply" element={<VendorEventApplyPage />} />
           <Route
             path="events/:eventId/application/:appId"
             element={<VendorApplicationDetailPage />}

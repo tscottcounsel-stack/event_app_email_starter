@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   listVendorApplications,
   vendorUpdateApplication,
+  vendorGetOrCreateDraftApplication, // 👈 ADD THIS
   type ServerApplication,
 } from "../components/api/applications";
 
@@ -652,32 +653,36 @@ async function loadDiagram() {
     return out;
   }
 
-  async function persistBoothSelection(payload: {
-    booth_id: string;
-    booth_price: number;
-  }) {
-    if (!eventId) {
-      throw new Error("Missing event ID.");
-    }
-
-    if (!appId) {
-      throw new Error("Missing application ID.");
-    }
-
-    const progress = loadVendorProgress(String(eventId), appId || undefined);
-    const checked = normalizeCheckedForSubmit(progress?.checked);
-    const notes = String(progress?.notes || "").trim();
-
-    const updated = await vendorUpdateApplication({
-      applicationId: Number(appId),
-      booth_id: payload.booth_id,
-      booth_price: payload.booth_price,
-      checked,
-      notes,
-    });
-
-    return ((updated as any)?.application ?? updated ?? null) as any;
+async function persistBoothSelection(payload: {
+  booth_id: string;
+  booth_price: number;
+}) {
+  if (!eventId) {
+    throw new Error("Missing event ID.");
   }
+
+  // 🔥 ALWAYS ensure we have an application
+  let resolvedAppId = appId;
+
+  if (!resolvedAppId) {
+    const app = await vendorGetOrCreateDraftApplication(eventId);
+    resolvedAppId = String(app.id);
+  }
+
+  const progress = loadVendorProgress(String(eventId), resolvedAppId || undefined);
+  const checked = normalizeCheckedForSubmit(progress?.checked);
+  const notes = String(progress?.notes || "").trim();
+
+  const updated = await vendorUpdateApplication({
+    applicationId: Number(resolvedAppId),
+    booth_id: payload.booth_id,
+    booth_price: payload.booth_price,
+    checked,
+    notes,
+  });
+
+  return ((updated as any)?.application ?? updated ?? null) as any;
+}
 
   async function onConfirmPurchase() {
     if (!selectedBooth) return;
