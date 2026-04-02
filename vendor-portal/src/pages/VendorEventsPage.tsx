@@ -44,7 +44,7 @@ function normalizeEventId(event: VendorEvent): string {
     event?.slug ??
     "";
 
-  return String(raw).trim();
+  return String(raw ?? "").trim();
 }
 
 function isPublishedEvent(event: VendorEvent) {
@@ -298,7 +298,17 @@ export default function VendorEventsPage() {
                   <div className="mt-5">
                     <button
                       type="button"
-                      onClick={() => navigate(`/vendor/events/${eventId}`)}
+                      onClick={() => {
+                        console.log("EVENT RAW:", event);
+                        console.log("EVENT ID:", eventId);
+
+                        if (!eventId) {
+                          console.warn("Missing eventId for event:", event);
+                          return;
+                        }
+
+                        navigate(`/vendor/events/${encodeURIComponent(eventId)}`);
+                      }}
                       disabled={!eventId}
                       className="rounded-lg bg-violet-600 px-5 py-3 font-bold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
