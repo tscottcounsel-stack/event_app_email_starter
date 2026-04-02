@@ -642,6 +642,47 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
         "amount_cents": int(amount_cents),
     }
 
+@router.post("/vendor/applications")
+def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    event_id = _normalize_id(payload.get("event_id") or payload.get("eventId"))
+    if not event_id:
+        raise HTTPException(status_code=400, detail="event_id is required")
+
+    # Reuse an existing app for this event if one already exists
+    for app in _iter_dict_values(_APPLICATIONS):
+        existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
+        if existing_event_id == event_id:
+            _persist_resolved_booth_price(app)
+            return {"ok": True, "application": app}
+
+    new_id = str(int(time.time() * 1000))
+
+    app = {
+        "id": new_id,
+        "event_id": int(event_id) if str(event_id).isdigit() else event_id,
+        "status": "draft",
+        "payment_status": "unpaid",
+        "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
+        "notes": payload.get("notes") or "",
+        "documents": payload.get("documents") if isinstance(payload.get("documents"), dict) else {},
+        "docs": payload.get("docs") if isinstance(payload.get("docs"), dict) else {},
+        "requested_booth_id": payload.get("booth_id") or None,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+
+    booth_price = payload.get("booth_price")
+    if booth_price is not None:
+        cents = _price_to_cents(booth_price)
+        if cents:
+            app["booth_price_cents"] = cents
+            app["amount_cents"] = cents
+            app["resolved_price_cents"] = cents
+
+    _APPLICATIONS[new_id] = app
+    save_store()
+    return {"ok": True, "application": app}
+
 
 @router.post("/stripe/webhook")
 async def stripe_webhook(request: Request) -> Dict[str, Any]:
