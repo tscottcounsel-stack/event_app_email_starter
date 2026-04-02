@@ -79,6 +79,7 @@ allowed_origins = [
     "https://event-app-frontend.vercel.app",
     "https://event-app-frontend-xi.vercel.app",
     "https://event-app-frontend-7dhxwkwbm-tscottcounsel-stacks-projects.vercel.app",
+    "https://event-app-frontend-1pju.vercel.app",
 ]
 
 allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
