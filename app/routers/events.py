@@ -434,13 +434,7 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
 
 @router.get("/events")
 async def get_events():
-    store = get_store_snapshot()
-    events = store.get("events", {})
-
-    if isinstance(events, dict):
-        events_list = list(events.values())
-    else:
-        events_list = events or []
+    events_list = list(_EVENTS.values())
 
     result = []
     for event in events_list:
