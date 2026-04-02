@@ -30,11 +30,15 @@ def _safe_list_of_str(value: Any) -> List[str]:
 
 def _user_vendor_key(user: Dict[str, Any]) -> str:
     email = _safe_str(user.get("email")).lower()
+    user_id = _safe_str(user.get("sub") or user.get("id"))
+
     if email:
         return email
 
-    raise HTTPException(status_code=400, detail="Unable to resolve vendor identity")
+    if user_id:
+        return f"user_{user_id}"
 
+    raise HTTPException(status_code=400, detail="Unable to resolve vendor identity")
 
 def _normalize_vendor_key(vendor_id: Any) -> str:
     vendor_key = _safe_str(vendor_id).lower()
@@ -182,8 +186,7 @@ class VendorReviewCreate(BaseModel):
 @router.get("/me")
 def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
     key = _user_vendor_key(user)
-    return _VENDORS.get(key, {})
-
+    return _VENDORS.get(key) or {}
 
 @router.post("/me")
 def save_my_vendor_profile(
