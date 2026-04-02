@@ -569,16 +569,9 @@ def organizer_put_event_diagram(
 
 @router.get("/organizer/earnings")
 def organizer_earnings(user: dict = Depends(get_current_user)):
-   events_list = list(_EVENTS.values())
+    store = get_store_snapshot()
 
-result = []
-for event in events_list:
-    e = dict(event)
-    stats = _event_marketplace_stats(e, _APPLICATIONS)
-    e.update(stats)
-    result.append(e)
-
-return result
+    events = store.get("events", {}) or {}
     payments = store.get("payments", {}) or {}
 
     if not isinstance(events, dict):
@@ -592,6 +585,113 @@ return result
         if isinstance(e, dict)
     }
 
+    gross_sales = 0.0
+    platform_fees = 0.0
+    net_earnings = 0.0
+    payouts_paid = 0.0
+    payouts_owed = 0.0
+
+    event_totals: Dict[int, Dict[str, Any]] = {}
+
+    for p in payments.values():
+        if not isinstance(p, dict):
+            continue
+
+        if str(p.get("status", "")).lower() != "paid":
+            continue
+
+        event_id = int(p.get("event_id") or 0)
+        event_row = events.get(str(event_id)) or events.get(event_id) or {}
+
+        payment_email = _norm_email(
+            p.get("organizer_email")
+            or (event_row or {}).get("organizer_email")
+            or (event_row or {}).get("owner_email")
+        )
+        payment_owner_id = (
+            p.get("organizer_id")
+            or (event_row or {}).get("organizer_id")
+            or (event_row or {}).get("owner_id")
+            or (event_row or {}).get("created_by")
+        )
+
+        payment_belongs = event_id in owned_event_ids or _event_belongs_to_user(
+            {
+                "organizer_email": payment_email,
+                "organizer_id": payment_owner_id,
+            },
+            user,
+        )
+
+        if not payment_belongs:
+            continue
+
+        amount = float(p.get("amount") or 0)
+        fee = float(p.get("platform_fee") or 0)
+        payout = float(p.get("organizer_payout") or 0)
+        payout_status = str(p.get("payout_status") or "unpaid").strip().lower()
+
+        gross_sales += amount
+        platform_fees += fee
+        net_earnings += payout
+
+        if payout_status == "paid":
+            payouts_paid += payout
+        else:
+            payouts_owed += payout
+
+        title = p.get("event_title") or (event_row or {}).get("title") or f"Event {event_id}"
+
+        if event_id not in event_totals:
+            event_totals[event_id] = {
+                "event_id": event_id,
+                "event_title": title,
+                "gross_sales": 0.0,
+                "platform_fees": 0.0,
+                "net_earnings": 0.0,
+                "payouts_paid": 0.0,
+                "payouts_owed": 0.0,
+                "payout_status_counts": {"paid": 0, "unpaid": 0},
+            }
+
+        event_totals[event_id]["gross_sales"] += amount
+        event_totals[event_id]["platform_fees"] += fee
+        event_totals[event_id]["net_earnings"] += payout
+
+        if payout_status == "paid":
+            event_totals[event_id]["payouts_paid"] += payout
+            event_totals[event_id]["payout_status_counts"]["paid"] += 1
+        else:
+            event_totals[event_id]["payouts_owed"] += payout
+            event_totals[event_id]["payout_status_counts"]["unpaid"] += 1
+
+    event_rows = []
+    for row in event_totals.values():
+        row["gross_sales"] = round(float(row["gross_sales"]), 2)
+        row["platform_fees"] = round(float(row["platform_fees"]), 2)
+        row["net_earnings"] = round(float(row["net_earnings"]), 2)
+        row["payouts_paid"] = round(float(row["payouts_paid"]), 2)
+        row["payouts_owed"] = round(float(row["payouts_owed"]), 2)
+        event_rows.append(row)
+
+    event_rows.sort(
+        key=lambda row: (
+            float(row.get("net_earnings") or 0),
+            str(row.get("event_title") or ""),
+        ),
+        reverse=True,
+    )
+
+    return {
+        "summary": {
+            "gross_sales": round(gross_sales, 2),
+            "platform_fees": round(platform_fees, 2),
+            "net_earnings": round(net_earnings, 2),
+            "payouts_paid": round(payouts_paid, 2),
+            "payouts_owed": round(payouts_owed, 2),
+        },
+        "events": event_rows,
+    }
     gross_sales = 0.0
     platform_fees = 0.0
     net_earnings = 0.0
