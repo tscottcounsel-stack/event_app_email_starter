@@ -543,56 +543,68 @@ export default function VendorEventMapLayoutPage() {
     return eventId ? `vendor:event:${eventId}:diagram` : "";
   }, [eventId]);
 
-  async function loadDiagram() {
-    setLoadingDiagram(true);
-    setLoadError(null);
-    setDiagram(null);
-    setSource("none");
+async function loadDiagram() {
+  setLoadingDiagram(true);
+  setLoadError(null);
+  setDiagram(null);
+  setSource("none");
 
-    if (!eventId) {
-      setLoadError("Missing eventId in route.");
+  if (!eventId) {
+    setLoadError("Missing eventId in route.");
+    setLoadingDiagram(false);
+    return;
+  }
+
+  try {
+    // ✅ STEP 1: ALWAYS load events (this is your stable source)
+    const resEvents = await fetch(`${API_BASE}/events`);
+    if (!resEvents.ok) throw new Error("Failed to load events");
+
+    const events = await resEvents.json();
+    const event = (events || []).find(
+      (e: any) => String(e.id) === String(eventId)
+    );
+
+    if (!event) {
+      setLoadError("Event not found.");
       setLoadingDiagram(false);
       return;
     }
 
+    // ✅ STEP 2: Try diagram (optional enhancement)
     try {
-      const url = `${API_BASE}/diagrams/${encodeURIComponent(eventId)}`;
-      const res = await fetch(url, { method: "GET", headers: { Accept: "application/json" } });
-      if (res.ok) {
-        const data = (await res.json().catch(() => null)) as DiagramResponse | any;
-        const doc = data?.diagram && typeof data.diagram === "object" ? data.diagram : data;
+      const resDiagram = await fetch(
+        `${API_BASE}/diagrams/${encodeURIComponent(eventId)}`
+      );
+
+      if (resDiagram.ok) {
+        const data = await resDiagram.json();
+        const doc = data?.diagram ?? data;
+
         if (doc && typeof doc === "object") {
-          setDiagram(doc as DiagramDoc);
+          setDiagram(doc);
           setSource("api");
-          try {
-            if (diagramCacheKey) localStorage.setItem(diagramCacheKey, JSON.stringify(doc));
-          } catch {
-            // ignore
-          }
           setLoadingDiagram(false);
           return;
         }
       }
     } catch {
-      // fall through
+      // ignore diagram failure
     }
 
-    try {
-      const cached = diagramCacheKey ? safeJsonParse(localStorage.getItem(diagramCacheKey)) : null;
-      if (cached && typeof cached === "object") {
-        setDiagram(cached as DiagramDoc);
-        setSource("localStorage");
-        setLoadingDiagram(false);
-        return;
-      }
-    } catch {
-      // ignore
-    }
+    // ✅ STEP 3: FALLBACK — use empty layout instead of breaking
+    setDiagram({
+      booths: [],
+      canvas: { width: 1400, height: 900, gridSize: 20 },
+    });
 
     setSource("none");
-    setLoadError("Could not load booth diagram from API or local cache.");
+    setLoadingDiagram(false);
+  } catch (err: any) {
+    setLoadError(err.message || "Failed to load event.");
     setLoadingDiagram(false);
   }
+}
 
   useEffect(() => {
     void loadDiagram();

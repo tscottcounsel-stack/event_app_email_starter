@@ -569,9 +569,16 @@ def organizer_put_event_diagram(
 
 @router.get("/organizer/earnings")
 def organizer_earnings(user: dict = Depends(get_current_user)):
-    store = get_store_snapshot()
+   events_list = list(_EVENTS.values())
 
-    events = store.get("events", {}) or {}
+result = []
+for event in events_list:
+    e = dict(event)
+    stats = _event_marketplace_stats(e, _APPLICATIONS)
+    e.update(stats)
+    result.append(e)
+
+return result
     payments = store.get("payments", {}) or {}
 
     if not isinstance(events, dict):
