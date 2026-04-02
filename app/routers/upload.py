@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/data/uploads"))UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/data/uploads"))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _save_upload(file: UploadFile) -> dict:
