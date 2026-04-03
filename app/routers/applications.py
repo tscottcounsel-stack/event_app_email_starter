@@ -311,6 +311,14 @@ def _payment_exists_for_application(app_id: str) -> bool:
 
     return False
 
+
+def _current_status(app: Dict[str, Any]) -> str:
+    return _as_str(app.get("status")).lower()
+
+
+def _is_locked_for_vendor_edits(app: Dict[str, Any]) -> bool:
+    return _current_status(app) in {"submitted", "approved", "paid"}
+
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
@@ -521,8 +529,6 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
     apps: List[Dict[str, Any]] = []
     for app in _iter_dict_values(_APPLICATIONS):
         _persist_resolved_booth_price(app)
-        if app.get("resolved_price_cents"):
-            app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
         apps.append(app)
     return apps
 
@@ -533,8 +539,6 @@ def get_vendor_application(app_id: str) -> Dict[str, Any]:
 
     app = _get_application_or_404(app_id)
     _persist_resolved_booth_price(app)
-    if app.get("resolved_price_cents"):
-        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
     return app
 
 
@@ -544,6 +548,12 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+
+    if _is_locked_for_vendor_edits(app):
+        raise HTTPException(
+            status_code=400,
+            detail="Application is locked and cannot be modified.",
+        )
 
     booth_id = _as_str(payload.get("booth_id"))
     if booth_id:
@@ -571,9 +581,6 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
 
-    if app.get("resolved_price_cents"):
-        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
-
     app["updated_at"] = _now_iso()
     save_store()
     return {"ok": True, "application": app}
@@ -584,11 +591,43 @@ def vendor_update_application_progress(app_id: str, payload: Dict[str, Any] = Bo
     return vendor_update_application(app_id, payload)
 
 
+
+
+@router.post("/vendor/applications/{app_id}/submit")
+def vendor_submit_application(app_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
+    app = _get_application_or_404(app_id)
+    status = _current_status(app)
+
+    if status not in {"", "draft"}:
+        raise HTTPException(status_code=400, detail="Application already submitted.")
+
+    booth_id = _normalize_id(app.get("booth_id") or app.get("requested_booth_id"))
+    if not booth_id:
+        raise HTTPException(status_code=400, detail="You must select a booth before submitting.")
+
+    app["status"] = "submitted"
+    app["submitted_at"] = _now_iso()
+    app["updated_at"] = _now_iso()
+
+    cents = _persist_resolved_booth_price(app)
+    if cents:
+        app["booth_price"] = round(cents / 100, 2)
+
+    save_store()
+    return {"ok": True, "application": app}
+
+
 @router.post("/vendor/applications/{app_id}/pay-now")
 def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+
+    if _current_status(app) != "approved":
+        raise HTTPException(status_code=400, detail="Payment is only available after organizer approval.")
+
     amount_cents = _get_amount_cents_from_app(app)
 
     secret_key = _as_str(os.getenv("STRIPE_SECRET_KEY"))
@@ -655,10 +694,14 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id is required")
 
-    # Reuse an existing app for this event if one already exists
+    # Reuse an existing draft app for this event if one already exists.
+    # Do not reuse submitted / approved / paid applications.
     for app in _iter_dict_values(_APPLICATIONS):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
-        if existing_event_id == event_id:
+        if existing_event_id != event_id:
+            continue
+
+        if _current_status(app) in {"", "draft"}:
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
                 app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
@@ -687,9 +730,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             app["booth_price_cents"] = cents
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
-
-    if app.get("resolved_price_cents"):
-        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
+            app["booth_price"] = round(cents / 100, 2)
 
     _APPLICATIONS[new_id] = app
     save_store()
@@ -893,8 +934,6 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
 
         # Ensure price is resolved
         _persist_resolved_booth_price(app)
-        if app.get("resolved_price_cents"):
-            app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
 
         # Minimal normalization for frontend
         enriched = {
