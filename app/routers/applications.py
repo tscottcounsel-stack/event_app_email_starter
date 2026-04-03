@@ -304,6 +304,8 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
         enriched["total_price"] = booth_price
 
     return enriched
+
+
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
     cents = _persist_resolved_booth_price(app)
     if not cents:
@@ -335,6 +337,7 @@ def _current_status(app: Dict[str, Any]) -> str:
 
 def _is_locked_for_vendor_edits(app: Dict[str, Any]) -> bool:
     return _current_status(app) in {"submitted", "approved", "paid"}
+
 
 def _create_payment_record(
     app: Dict[str, Any],
@@ -662,14 +665,15 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
-success_url = (
-    f"{frontend}/vendor/applications"
-    f"?payment=success&appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
-)
-cancel_url = (
-    f"{frontend}/vendor/applications"
-    f"?payment=cancelled&appId={app_id_str}"
-)
+    success_url = (
+        f"{frontend}/vendor/applications"
+        f"?payment=success&appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+    )
+    cancel_url = (
+        f"{frontend}/vendor/applications"
+        f"?payment=cancelled&appId={app_id_str}"
+    )
+
     session = stripe.checkout.Session.create(
         mode="payment",
         client_reference_id=str(app_id_str),
@@ -974,33 +978,3 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
         apps.append(enriched)
 
     return {"applications": apps}
-
-@router.get("/organizer/events/{event_id}/applications/{app_id}")
-def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
-    expire_reservations_if_needed()
-
-    app = _get_application_or_404(app_id)
-
-    # Ensure it belongs to the correct event
-    app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
-    if app_event_id != str(event_id):
-        raise HTTPException(status_code=404, detail="Application not found for this event")
-
-    return _serialize_application(app)
-
-@router.post("/organizer/applications/{app_id}/approve")
-def organizer_approve_application(app_id: str) -> Dict[str, Any]:
-    app = _get_application_or_404(app_id)
-
-    app["status"] = "approved"
-
-    return _serialize_application(app)
-
-
-@router.post("/organizer/applications/{app_id}/reject")
-def organizer_reject_application(app_id: str) -> Dict[str, Any]:
-    app = _get_application_or_404(app_id)
-
-    app["status"] = "rejected"
-
-    return _serialize_application(app)
