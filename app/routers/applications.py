@@ -662,12 +662,14 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
-    success_url = (
-        f"{frontend}/vendor/applications"
-        f"?payment=success&app_id={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
-    )
-    cancel_url = f"{frontend}/vendor/applications?payment=cancelled&app_id={app_id_str}"
-
+success_url = (
+    f"{frontend}/vendor/applications"
+    f"?payment=success&appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+)
+cancel_url = (
+    f"{frontend}/vendor/applications"
+    f"?payment=cancelled&appId={app_id_str}"
+)
     session = stripe.checkout.Session.create(
         mode="payment",
         client_reference_id=str(app_id_str),
