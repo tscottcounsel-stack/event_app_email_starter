@@ -395,7 +395,8 @@ async function handlePayNow(app: VendorProgressCard) {
       return;
     }
 
-    const checkoutUrl = data?.checkout_url || data?.url || data?.checkoutUrl;
+    const checkoutUrl =
+      data?.checkout_url || data?.checkoutUrl || data?.url || data?.payment_url || data?.session_url;
     if (typeof checkoutUrl === "string" && checkoutUrl) {
       window.location.href = checkoutUrl;
       return;
@@ -535,11 +536,35 @@ export default function VendorApplicationsPage() {
 
     (async () => {
       try {
-        setPaymentMessage("Payment successful. Updating status...");
-        window.setTimeout(async () => {
-          await loadApplications();
-          setPaymentMessage(null);
-        }, 1200);
+        setPaymentMessage("Payment successful. Finalizing payment...");
+        const appId = params.get("appId") || params.get("app_id") || "";
+        const sessionId = params.get("session_id") || "";
+
+        if (appId) {
+          const confirmUrl = new URL(
+            `${API_BASE}/vendor/applications/${encodeURIComponent(appId)}/confirm-payment`
+          );
+          if (sessionId) {
+            confirmUrl.searchParams.set("session_id", sessionId);
+          }
+
+          const confirmRes = await fetch(confirmUrl.toString(), {
+            method: "POST",
+            headers: buildLocalAuthHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+          });
+
+          const confirmData = await confirmRes.json().catch(() => null);
+          if (!confirmRes.ok) {
+            const detail =
+              (typeof confirmData?.detail === "string" && confirmData.detail) ||
+              `Unable to confirm payment (${confirmRes.status}).`;
+            throw new Error(detail);
+          }
+        }
+
+        await loadApplications();
+        setPaymentMessage("Payment confirmed.");
 
         const cleanUrl = new URL(window.location.href);
         cleanUrl.searchParams.delete("payment");
@@ -547,6 +572,10 @@ export default function VendorApplicationsPage() {
         cleanUrl.searchParams.delete("app_id");
         cleanUrl.searchParams.delete("session_id");
         window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
+
+        window.setTimeout(() => {
+          setPaymentMessage(null);
+        }, 1200);
       } catch (e: any) {
         console.error("payment refresh error", e);
         setPaymentMessage(e?.message || "Payment completed. Refresh the page if status does not update.");

@@ -107,18 +107,53 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
 
 function PaymentSuccessStandalone() {
   React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const appId = params.get("appId") || params.get("app_id") || "";
+    const sessionId = params.get("session_id") || "";
+
+    const redirectToVendorApplications = () => {
+      const next = new URL(window.location.origin + "/vendor/applications");
+      next.searchParams.set("payment", "success");
+      if (appId) next.searchParams.set("appId", appId);
+      if (sessionId) next.searchParams.set("session_id", sessionId);
+      window.location.replace(`${next.pathname}${next.search}`);
+    };
+
     const timer = window.setTimeout(() => {
       try {
-        const token = localStorage.getItem("accessToken");
+        const token =
+          localStorage.getItem("accessToken") ||
+          localStorage.getItem("token") ||
+          sessionStorage.getItem("accessToken") ||
+          sessionStorage.getItem("token");
 
         if (!token) {
-          window.location.replace("/login?returnTo=/vendor/dashboard");
+          window.setTimeout(() => {
+            const retryToken =
+              localStorage.getItem("accessToken") ||
+              localStorage.getItem("token") ||
+              sessionStorage.getItem("accessToken") ||
+              sessionStorage.getItem("token");
+
+            if (!retryToken) {
+              const loginUrl = new URL(window.location.origin + "/login");
+              const returnTo = new URL(window.location.origin + "/vendor/applications");
+              returnTo.searchParams.set("payment", "success");
+              if (appId) returnTo.searchParams.set("appId", appId);
+              if (sessionId) returnTo.searchParams.set("session_id", sessionId);
+              loginUrl.searchParams.set("returnTo", `${returnTo.pathname}${returnTo.search}`);
+              window.location.replace(`${loginUrl.pathname}${loginUrl.search}`);
+              return;
+            }
+
+            redirectToVendorApplications();
+          }, 800);
           return;
         }
 
-        window.location.replace("/vendor/dashboard?payment=success");
+        redirectToVendorApplications();
       } catch {
-        window.location.replace("/vendor/dashboard");
+        redirectToVendorApplications();
       }
     }, 1500);
 
