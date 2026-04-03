@@ -971,3 +971,16 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
         apps.append(enriched)
 
     return {"applications": apps}
+
+@router.get("/organizer/events/{event_id}/applications/{app_id}")
+def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
+    app = _get_application_or_404(app_id)
+
+    # Ensure it belongs to the correct event
+    app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
+    if app_event_id != str(event_id):
+        raise HTTPException(status_code=404, detail="Application not found for this event")
+
+    return _serialize_application(app)
