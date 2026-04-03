@@ -71,11 +71,14 @@ def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _get_application_or_404(app_id: Any) -> Dict[str, Any]:
-    key = _normalize_id(app_id)
-    if not key:
-        raise HTTPException(status_code=404, detail="Application not found")
-    app = _APPLICATIONS.get(key)
+def _get_application_or_404(app_id: str) -> Dict[str, Any]:
+    aid = _normalize_id(app_id)
+
+    for k, v in _APPLICATIONS.items():
+        if _normalize_id(k) == aid:
+            return v
+
+    raise HTTPException(status_code=404, detail="Application not found")    app = _APPLICATIONS.get(key)
     if app is None:
         app = _APPLICATIONS.get(int(key)) if key.isdigit() else None
     if app is None:
