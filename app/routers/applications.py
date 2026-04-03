@@ -459,7 +459,8 @@ def _create_payment_record(
     }
 
     _PAYMENTS[payment_id] = record
-    return record
+    save_store()
+    return _PAYMENTS[payment_id]
 
 def _mark_application_paid(
     app: Dict[str, Any],
