@@ -71,19 +71,18 @@ def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _get_application_or_404(app_id: str) -> Dict[str, Any]:
-    aid = _normalize_id(app_id)
-
-    for k, v in _APPLICATIONS.items():
-        if _normalize_id(k) == aid:
-            return v
-
-    raise HTTPException(status_code=404, detail="Application not found")    app = _APPLICATIONS.get(key)
-    if app is None:
-        app = _APPLICATIONS.get(int(key)) if key.isdigit() else None
-    if app is None:
+def _get_application_or_404(app_id: Any) -> Dict[str, Any]:
+    key = _normalize_id(app_id)
+    if not key:
         raise HTTPException(status_code=404, detail="Application not found")
-    return app
+
+    for stored_key, app in _APPLICATIONS.items():
+        if _normalize_id(stored_key) == key:
+            return app
+        if isinstance(app, dict) and _normalize_id(app.get("id")) == key:
+            return app
+
+    raise HTTPException(status_code=404, detail="Application not found")
 
 
 def _get_event_for_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -340,7 +339,6 @@ def _current_status(app: Dict[str, Any]) -> str:
 
 def _is_locked_for_vendor_edits(app: Dict[str, Any]) -> bool:
     return _current_status(app) in {"submitted", "approved", "paid"}
-
 
 def _create_payment_record(
     app: Dict[str, Any],
@@ -981,3 +979,33 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
         apps.append(enriched)
 
     return {"applications": apps}
+
+@router.get("/organizer/events/{event_id}/applications/{app_id}")
+def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
+    expire_reservations_if_needed()
+
+    app = _get_application_or_404(app_id)
+
+    # Ensure it belongs to the correct event
+    app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
+    if app_event_id != str(event_id):
+        raise HTTPException(status_code=404, detail="Application not found for this event")
+
+    return _serialize_application(app)
+
+@router.post("/organizer/applications/{app_id}/approve")
+def organizer_approve_application(app_id: str) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    app["status"] = "approved"
+
+    return _serialize_application(app)
+
+
+@router.post("/organizer/applications/{app_id}/reject")
+def organizer_reject_application(app_id: str) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    app["status"] = "rejected"
+
+    return _serialize_application(app)
