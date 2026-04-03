@@ -653,6 +653,8 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id == event_id:
             _persist_resolved_booth_price(app)
+            if app.get("resolved_price_cents"):
+    app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
             return {"ok": True, "application": app}
 
     new_id = str(int(time.time() * 1000))
