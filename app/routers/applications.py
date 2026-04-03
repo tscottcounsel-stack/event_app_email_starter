@@ -482,8 +482,13 @@ def _mark_application_paid(
     if session_id:
         app["stripe_session_id"] = session_id
 
-    if not _payment_exists_for_application(_normalize_id(app.get("id")) or ""):
-        _create_payment_record(app, amount, source=source, session_id=session_id)
+   # ALWAYS create payment record (no silent skips)
+_create_payment_record(
+    app,
+    amount=amount,
+    source=source,
+    session_id=session_id,
+)
 
     save_store()
     return app
