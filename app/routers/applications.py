@@ -521,6 +521,8 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
     apps: List[Dict[str, Any]] = []
     for app in _iter_dict_values(_APPLICATIONS):
         _persist_resolved_booth_price(app)
+        if app.get("resolved_price_cents"):
+            app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
         apps.append(app)
     return apps
 
@@ -531,6 +533,8 @@ def get_vendor_application(app_id: str) -> Dict[str, Any]:
 
     app = _get_application_or_404(app_id)
     _persist_resolved_booth_price(app)
+    if app.get("resolved_price_cents"):
+        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
     return app
 
 
@@ -566,6 +570,9 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
             app["booth_price_cents"] = cents
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
+
+    if app.get("resolved_price_cents"):
+        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
 
     app["updated_at"] = _now_iso()
     save_store()
@@ -654,7 +661,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
         if existing_event_id == event_id:
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
-    app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
+                app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
             return {"ok": True, "application": app}
 
     new_id = str(int(time.time() * 1000))
@@ -680,6 +687,9 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             app["booth_price_cents"] = cents
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
+
+    if app.get("resolved_price_cents"):
+        app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
 
     _APPLICATIONS[new_id] = app
     save_store()
@@ -883,6 +893,8 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
 
         # Ensure price is resolved
         _persist_resolved_booth_price(app)
+        if app.get("resolved_price_cents"):
+            app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
 
         # Minimal normalization for frontend
         enriched = {
