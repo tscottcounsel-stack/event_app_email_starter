@@ -1010,3 +1010,47 @@ def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     app["status"] = "rejected"
 
     return _serialize_application(app)
+
+@router.post("/vendor/applications/{app_id}/confirm-payment")
+def vendor_confirm_payment(app_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    session_id = _as_str(payload.get("session_id"))
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    secret_key = _as_str(os.getenv("STRIPE_SECRET_KEY"))
+    if not secret_key:
+        raise HTTPException(status_code=500, detail="Missing STRIPE_SECRET_KEY")
+
+    try:
+        import stripe  # type: ignore
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Stripe not configured: {exc}")
+
+    stripe.api_key = secret_key
+
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to retrieve Stripe session: {exc}")
+
+    payment_status = _as_str(getattr(session, "payment_status", None) or session.get("payment_status"))
+    status = _as_str(getattr(session, "status", None) or session.get("status"))
+
+    if payment_status != "paid" and status != "complete":
+        raise HTTPException(status_code=400, detail="Stripe session is not paid")
+
+    expected_amount = _get_amount_cents_from_app(app)
+    amount_total = getattr(session, "amount_total", None) or session.get("amount_total") or 0
+    stripe_amount = int(amount_total or expected_amount)
+
+    _mark_application_paid(
+        app,
+        stripe_amount,
+        user=None,
+        source="confirm_payment",
+        session_id=session_id,
+    )
+
+    return {"ok": True, "application": _serialize_application(app)}
