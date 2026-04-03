@@ -465,10 +465,62 @@ def _mark_application_paid(
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     app["payment_status"] = "paid"
-    app["status"] = app.get("status") or "approved"
-    app["paid_at"] = _now_iso()
-    app["amount_cents"] = int(amount)
-    app["resolved_price_cents"] = int(amount)
+    from app.store import _PAYMENTS, save_store
+from uuid import uuid4
+
+payment_id = str(uuid4())
+
+amount = float(app.get("amount_due") or 0)
+
+platform_fee = round(amount * 0.1, 2)  # 10% fee (adjust later)
+organizer_payout = round(amount - platform_fee, 2)
+
+_PAYMENTS[payment_id] = {
+    "id": payment_id,
+    "application_id": app.get("id"),
+    "event_id": app.get("event_id"),
+    "event_title": app.get("event_title") or f"Event {app.get('event_id')}",
+    "vendor_email": app.get("vendor_email"),
+    "organizer_email": app.get("organizer_email"),
+    "amount": amount,
+    "platform_fee": platform_fee,
+    "organizer_payout": organizer_payout,
+    "status": "paid",
+    "payout_status": "unpaid",
+}
+
+save_store()from app.store import _PAYMENTS, save_store
+from uuid import uuid4
+
+payment_id = str(uuid4())
+
+amount = float(app.get("amount_due") or 0)
+
+platform_fee = round(amount * 0.1, 2)  # 10% fee (adjust later)
+organizer_payout = round(amount - platform_fee, 2)
+
+_PAYMENTS[payment_id] = {
+    "id": payment_id,
+    "application_id": app.get("id"),
+    "event_id": app.get("event_id"),
+    "event_title": app.get("event_title") or f"Event {app.get('event_id')}",
+    "vendor_email": app.get("vendor_email"),
+    "organizer_email": app.get("organizer_email"),
+    "amount": amount,
+    "platform_fee": platform_fee,
+    "organizer_payout": organizer_payout,
+    "status": "paid",
+    "payout_status": "unpaid",
+}
+
+# ✅ update application AFTER payment record
+app["status"] = app.get("status") or "approved"
+app["paid_at"] = utc_now_iso()
+app["amount_cents"] = int(amount)
+app["resolved_price_cents"] = int(amount)
+
+# ✅ THEN save
+save_store()
     if user is not None:
         app["paid_by"] = user
     if source:
