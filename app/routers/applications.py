@@ -30,6 +30,17 @@ _EVENTS_FALLBACK: Dict[Any, Dict[str, Any]] = {}
 _PAYMENTS_FALLBACK: Dict[Any, Dict[str, Any]] = {}
 
 
+
+# Compatibility exports for other routers that import these names directly
+_APPLICATIONS = _APPLICATIONS_FALLBACK
+_EVENTS = _EVENTS_FALLBACK
+_PAYMENTS = _PAYMENTS_FALLBACK
+
+if _store_module is not None:
+    _APPLICATIONS = getattr(_store_module, "_APPLICATIONS", _APPLICATIONS_FALLBACK)
+    _EVENTS = getattr(_store_module, "_EVENTS", _EVENTS_FALLBACK)
+    _PAYMENTS = getattr(_store_module, "_PAYMENTS", _PAYMENTS_FALLBACK)
+
 def _applications_store() -> Dict[Any, Dict[str, Any]]:
     if _store_module is not None:
         value = getattr(_store_module, "__applications_store()_ATTR__", None)
