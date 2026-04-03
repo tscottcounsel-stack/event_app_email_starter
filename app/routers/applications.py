@@ -287,6 +287,23 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> Optional[int]:
     return cents
 
 
+
+
+def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
+    cents = _persist_resolved_booth_price(app)
+    booth_price = round(cents / 100, 2) if cents else None
+
+    enriched = dict(app)
+    if cents:
+        enriched["resolved_price_cents"] = cents
+        enriched["amount_cents"] = cents
+        enriched["total_cents"] = cents
+        enriched["booth_price_cents"] = enriched.get("booth_price_cents") or cents
+        enriched["booth_price"] = booth_price
+        enriched["amount_due"] = booth_price
+        enriched["total_price"] = booth_price
+
+    return enriched
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
     cents = _persist_resolved_booth_price(app)
     if not cents:
@@ -528,8 +545,7 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
 
     apps: List[Dict[str, Any]] = []
     for app in _iter_dict_values(_APPLICATIONS):
-        _persist_resolved_booth_price(app)
-        apps.append(app)
+        apps.append(_serialize_application(app))
     return apps
 
 
@@ -538,8 +554,7 @@ def get_vendor_application(app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
-    _persist_resolved_booth_price(app)
-    return app
+    return _serialize_application(app)
 
 
 
@@ -583,7 +598,7 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
 
     app["updated_at"] = _now_iso()
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.put("/vendor/applications/{app_id}/progress")
@@ -616,7 +631,7 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
         app["booth_price"] = round(cents / 100, 2)
 
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.post("/vendor/applications/{app_id}/pay-now")
@@ -705,7 +720,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
                 app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
-            return {"ok": True, "application": app}
+            return {"ok": True, "application": _serialize_application(app)}
 
     new_id = str(int(time.time() * 1000))
 
@@ -734,7 +749,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
 
     _APPLICATIONS[new_id] = app
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.post("/stripe/webhook")
@@ -849,7 +864,7 @@ def organizer_reserve_booth(
     ).isoformat()
     _persist_resolved_booth_price(app)
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.post("/organizer/applications/{app_id}/change-booth")
@@ -863,7 +878,7 @@ def organizer_change_booth(
     app["booth_id"] = payload.booth_id
     _persist_resolved_booth_price(app)
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.post("/organizer/applications/{app_id}/extend-reservation")
@@ -890,7 +905,7 @@ def organizer_extend_reservation(
         tz=timezone.utc,
     ).isoformat()
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.post("/organizer/applications/{app_id}/release-reservation")
@@ -899,7 +914,7 @@ def organizer_release_reservation(app_id: str) -> Dict[str, Any]:
     app.pop("reservation_expires_at", None)
     app.pop("booth_id", None)
     save_store()
-    return {"ok": True, "application": app}
+    return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.get("/admin/payments")
@@ -933,11 +948,11 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             continue
 
         # Ensure price is resolved
-        _persist_resolved_booth_price(app)
+        serialized = _serialize_application(app)
 
         # Minimal normalization for frontend
         enriched = {
-            **app,
+            **serialized,
             "id": app.get("id"),
             "event_id": event_id_str,
             "status": app.get("status"),
@@ -946,6 +961,11 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             "requested_booth_id": app.get("requested_booth_id"),
             "vendor_email": app.get("vendor_email"),
             "updated_at": app.get("updated_at") or app.get("submitted_at"),
+            "amount_due": serialized.get("amount_due"),
+            "booth_price": serialized.get("booth_price"),
+            "amount_cents": serialized.get("amount_cents"),
+            "resolved_price_cents": serialized.get("resolved_price_cents"),
+            "total_cents": serialized.get("total_cents"),
         }
 
         apps.append(enriched)
