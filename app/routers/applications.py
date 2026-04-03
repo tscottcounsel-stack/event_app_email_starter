@@ -984,3 +984,24 @@ def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Application not found for this event")
 
     return _serialize_application(app)
+
+@router.post("/organizer/applications/{app_id}/approve")
+def organizer_approve_application(app_id: str) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    # Update status
+    app["status"] = "approved"
+
+    # Persist if needed (depends on your storage)
+    APPLICATIONS[app_id] = app
+
+    return _serialize_application(app)
+
+@router.post("/organizer/applications/{app_id}/reject")
+def organizer_reject_application(app_id: str) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    app["status"] = "rejected"
+    APPLICATIONS[app_id] = app
+
+    return _serialize_application(app)
