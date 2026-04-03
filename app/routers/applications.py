@@ -16,53 +16,19 @@ router = APIRouter(tags=["applications"])
 # ---------------------------------------------------------------------------
 
 try:
-    import app.store as _store_module
-    from app.store import save_store
+    from app.store import (
+        _APPLICATIONS,
+        _EVENTS,
+        _PAYMENTS,
+        save_store,
+    )
 except Exception:
-    _store_module = None
+    _APPLICATIONS: Dict[str, Dict[str, Any]] = {}
+    _EVENTS: Dict[str, Dict[str, Any]] = {}
+    _PAYMENTS: Dict[str, Dict[str, Any]] = {}
 
     def save_store() -> None:
         return None
-
-
-_APPLICATIONS_FALLBACK: Dict[Any, Dict[str, Any]] = {}
-_EVENTS_FALLBACK: Dict[Any, Dict[str, Any]] = {}
-_PAYMENTS_FALLBACK: Dict[Any, Dict[str, Any]] = {}
-
-
-
-# Compatibility exports for other routers that import these names directly
-_APPLICATIONS = _APPLICATIONS_FALLBACK
-_EVENTS = _EVENTS_FALLBACK
-_PAYMENTS = _PAYMENTS_FALLBACK
-
-if _store_module is not None:
-    _APPLICATIONS = getattr(_store_module, "_APPLICATIONS", _APPLICATIONS_FALLBACK)
-    _EVENTS = getattr(_store_module, "_EVENTS", _EVENTS_FALLBACK)
-    _PAYMENTS = getattr(_store_module, "_PAYMENTS", _PAYMENTS_FALLBACK)
-
-def _applications_store() -> Dict[Any, Dict[str, Any]]:
-    if _store_module is not None:
-        value = getattr(_store_module, "__applications_store()_ATTR__", None)
-        if isinstance(value, dict):
-            return value
-    return _APPLICATIONS_FALLBACK
-
-
-def _events_store() -> Dict[Any, Dict[str, Any]]:
-    if _store_module is not None:
-        value = getattr(_store_module, "__events_store()_ATTR__", None)
-        if isinstance(value, dict):
-            return value
-    return _EVENTS_FALLBACK
-
-
-def _payments_store() -> Dict[Any, Dict[str, Any]]:
-    if _store_module is not None:
-        value = getattr(_store_module, "__payments_store()_ATTR__", None)
-        if isinstance(value, dict):
-            return value
-    return _PAYMENTS_FALLBACK
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +76,7 @@ def _get_application_or_404(app_id: Any) -> Dict[str, Any]:
     if not key:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    for stored_key, app in _applications_store().items():
+    for stored_key, app in _APPLICATIONS.items():
         if _normalize_id(stored_key) == key:
             return app
         if isinstance(app, dict) and _normalize_id(app.get("id")) == key:
@@ -129,9 +95,9 @@ def _get_event_for_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     event_key = _normalize_id(event_id)
     if not event_key:
         return None
-    event = _events_store().get(event_key)
+    event = _EVENTS.get(event_key)
     if event is None and event_key.isdigit():
-        event = _events_store().get(int(event_key))
+        event = _EVENTS.get(int(event_key))
     return event if isinstance(event, dict) else None
 
 
@@ -357,7 +323,7 @@ def _payment_exists_for_application(app_id: str) -> bool:
     if not target:
         return False
 
-    for payment in _iter_dict_values(_payments_store()):
+    for payment in _iter_dict_values(_PAYMENTS):
         pid = _normalize_id(
             payment.get("application_id") or payment.get("applicationId")
         )
@@ -492,9 +458,9 @@ def _create_payment_record(
         "paid_at": _now_iso(),
     }
 
-    _payments_store()[payment_id] = record
+    _PAYMENTS[payment_id] = record
     save_store()
-    return _payments_store()[payment_id]
+    return _PAYMENTS[payment_id]
 
 def _mark_application_paid(
     app: Dict[str, Any],
@@ -542,7 +508,7 @@ def expire_reservations_if_needed() -> int:
     now_ts = time.time()
     expired_count = 0
 
-    for app in _iter_dict_values(_applications_store()):
+    for app in _iter_dict_values(_APPLICATIONS):
         expires_at = app.get("reservation_expires_at")
         if not expires_at:
             continue
@@ -584,7 +550,7 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
     expire_reservations_if_needed()
 
     apps: List[Dict[str, Any]] = []
-    for app in _iter_dict_values(_applications_store()):
+    for app in _iter_dict_values(_APPLICATIONS):
         apps.append(_serialize_application(app))
     return apps
 
@@ -702,12 +668,12 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
     success_url = (
-        f"{frontend}/vendor/applications"
-        f"?payment=success&appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+        f"{frontend}/vendor/payment-success"
+        f"?appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
     )
     cancel_url = (
-        f"{frontend}/vendor/applications"
-        f"?payment=cancelled&appId={app_id_str}"
+        f"{frontend}/vendor/payment-cancel"
+        f"?appId={app_id_str}"
     )
 
     session = stripe.checkout.Session.create(
@@ -742,6 +708,9 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     return {
         "ok": True,
         "checkout_url": session_url,
+        "checkoutUrl": session_url,
+        "url": session_url,
+        "session_url": session_url,
         "session_id": session_id,
         "amount_cents": int(amount_cents),
     }
@@ -754,7 +723,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
 
     # Reuse an existing draft app for this event if one already exists.
     # Do not reuse submitted / approved / paid applications.
-    for app in _iter_dict_values(_applications_store()):
+    for app in _iter_dict_values(_APPLICATIONS):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id != event_id:
             continue
@@ -790,7 +759,7 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             app["resolved_price_cents"] = cents
             app["booth_price"] = round(cents / 100, 2)
 
-    _applications_store()[new_id] = app
+    _APPLICATIONS[new_id] = app
     save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
@@ -852,9 +821,9 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
         if not app_id:
             return {"ok": True, "ignored": "missing application_id"}
 
-        app = _applications_store().get(app_id)
+        app = _APPLICATIONS.get(app_id)
         if app is None and app_id.isdigit():
-            app = _applications_store().get(int(app_id))
+            app = _APPLICATIONS.get(int(app_id))
 
         if app is None:
             return {"ok": True, "ignored": f"application {app_id} not found"}
@@ -962,15 +931,15 @@ def organizer_release_reservation(app_id: str) -> Dict[str, Any]:
 
 @router.get("/admin/payments")
 def list_admin_payments() -> List[Dict[str, Any]]:
-    return _iter_dict_values(_payments_store())
+    return _iter_dict_values(_PAYMENTS)
 
 
 @router.get("/organizer/activity")
 def organizer_activity() -> Dict[str, Any]:
     return {
-        "applications": len(_iter_dict_values(_applications_store())),
-        "payments": len(_iter_dict_values(_payments_store())),
-        "events": len(_iter_dict_values(_events_store())),
+        "applications": len(_iter_dict_values(_APPLICATIONS)),
+        "payments": len(_iter_dict_values(_PAYMENTS)),
+        "events": len(_iter_dict_values(_EVENTS)),
     }
 
 
@@ -985,7 +954,7 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
     event_id_str = str(event_id)
 
     apps = []
-    for app in _iter_dict_values(_applications_store()):
+    for app in _iter_dict_values(_APPLICATIONS):
         aid = _normalize_id(app.get("event_id") or app.get("eventId"))
         if aid != event_id_str:
             continue
@@ -1033,7 +1002,6 @@ def organizer_approve_application(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
     app["status"] = "approved"
-    app["updated_at"] = _now_iso()
     save_store()
 
     return _serialize_application(app)
@@ -1044,16 +1012,30 @@ def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
     app["status"] = "rejected"
-    app["updated_at"] = _now_iso()
     save_store()
 
     return _serialize_application(app)
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
-def vendor_confirm_payment(app_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+def vendor_confirm_payment(
+    app_id: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
-    session_id = _as_str(payload.get("session_id"))
+    normalized_app_id = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
+    if _payment_exists_for_application(normalized_app_id):
+        app["payment_status"] = "paid"
+        save_store()
+        return {"ok": True, "already_paid": True, "application": _serialize_application(app)}
+
+    session_id = (
+        _as_str(payload.get("session_id"))
+        or _as_str(request.query_params.get("session_id"))
+        or _as_str(app.get("checkout_session_id"))
+        or _as_str(app.get("stripe_session_id"))
+    )
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
@@ -1090,5 +1072,6 @@ def vendor_confirm_payment(app_id: str, payload: Dict[str, Any] = Body(default_f
         source="confirm_payment",
         session_id=session_id,
     )
+    save_store()
 
     return {"ok": True, "application": _serialize_application(app)}
