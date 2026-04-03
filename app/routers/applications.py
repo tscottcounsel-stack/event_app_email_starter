@@ -668,7 +668,7 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
     success_url = (
-        f"{frontend}/vendor/applications"
+        f"{frontend}/vendor/payment-success"
         f"?payment=success&appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
     )
     cancel_url = (
@@ -708,6 +708,9 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     return {
         "ok": True,
         "checkout_url": session_url,
+        "checkoutUrl": session_url,
+        "url": session_url,
+        "session_url": session_url,
         "session_id": session_id,
         "amount_cents": int(amount_cents),
     }
@@ -1012,10 +1015,22 @@ def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     return _serialize_application(app)
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
-def vendor_confirm_payment(app_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+def vendor_confirm_payment(
+    app_id: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
-    session_id = _as_str(payload.get("session_id"))
+    if _as_str(app.get("payment_status")).lower() == "paid" or _payment_exists_for_application(app_id):
+        return {"ok": True, "already_paid": True, "application": _serialize_application(app)}
+
+    session_id = (
+        _as_str(payload.get("session_id"))
+        or _as_str(request.query_params.get("session_id"))
+        or _as_str(app.get("checkout_session_id"))
+        or _as_str(app.get("stripe_session_id"))
+    )
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
@@ -1053,4 +1068,5 @@ def vendor_confirm_payment(app_id: str, payload: Dict[str, Any] = Body(default_f
         session_id=session_id,
     )
 
+    save_store()
     return {"ok": True, "application": _serialize_application(app)}
