@@ -620,6 +620,9 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
 
     app = _get_application_or_404(app_id)
     status = _current_status(app)
+  
+    if app.get("payment_status") == "paid":
+    return {"status": "already_paid"}
 
     if status not in {"", "draft"}:
         raise HTTPException(status_code=400, detail="Application already submitted.")
