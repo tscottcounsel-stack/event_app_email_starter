@@ -622,7 +622,7 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
     status = _current_status(app)
   
     if app.get("payment_status") == "paid":
-    return {"status": "already_paid"}
+        return {"status": "already_paid"}
 
     if status not in {"", "draft"}:
         raise HTTPException(status_code=400, detail="Application already submitted.")
@@ -1027,6 +1027,9 @@ def vendor_confirm_payment(
 ) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
+    if app.get("payment_status") == "paid":
+        return {"ok": True, "already_paid": True, "application": _serialize_application(app)}
+
     normalized_app_id = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     if _payment_exists_for_application(normalized_app_id):
         app["payment_status"] = "paid"
@@ -1056,12 +1059,14 @@ def vendor_confirm_payment(
     try:
         session = stripe.checkout.Session.retrieve(session_id)
     except Exception as exc:
+        if "rate limit" in str(exc).lower():
+            return {"ok": False, "pending_retry": True, "detail": "Stripe rate limit hit. Retry in a moment."}
         raise HTTPException(status_code=400, detail=f"Unable to retrieve Stripe session: {exc}")
 
     payment_status = _as_str(getattr(session, "payment_status", None) or session.get("payment_status"))
-    status = _as_str(getattr(session, "status", None) or session.get("status"))
+    status_value = _as_str(getattr(session, "status", None) or session.get("status"))
 
-    if payment_status != "paid" and status != "complete":
+    if payment_status != "paid" and status_value != "complete":
         raise HTTPException(status_code=400, detail="Stripe session is not paid")
 
     expected_amount = _get_amount_cents_from_app(app)
