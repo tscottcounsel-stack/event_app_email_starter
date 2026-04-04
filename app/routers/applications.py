@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -12,23 +13,28 @@ router = APIRouter(tags=["applications"])
 
 
 # ---------------------------------------------------------------------------
-# Safe store imports / fallbacks
+# Live store module import / compatibility exports
 # ---------------------------------------------------------------------------
 
 try:
-    from app.store import (
-        _APPLICATIONS,
-        _EVENTS,
-        _PAYMENTS,
-        save_store,
-    )
+    import app.store as store  # type: ignore
 except Exception:
-    _APPLICATIONS: Dict[str, Dict[str, Any]] = {}
-    _EVENTS: Dict[str, Dict[str, Any]] = {}
-    _PAYMENTS: Dict[str, Dict[str, Any]] = {}
+    class _FallbackStore:
+        _APPLICATIONS: Dict[Any, Dict[str, Any]] = {}
+        _EVENTS: Dict[Any, Dict[str, Any]] = {}
+        _PAYMENTS: Dict[Any, Dict[str, Any]] = {}
 
-    def save_store() -> None:
-        return None
+        @staticmethod
+        def save_store() -> None:
+            return None
+
+    store = _FallbackStore()  # type: ignore
+
+
+# Compatibility exports for other modules that still import these names.
+_APPLICATIONS = store._APPLICATIONS
+_EVENTS = store._EVENTS
+_PAYMENTS = store._PAYMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +52,22 @@ class BoothActionPayload(BaseModel):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _save_store() -> None:
+    store.save_store()
+
+
+def _applications_store() -> Dict[Any, Dict[str, Any]]:
+    return store._APPLICATIONS
+
+
+def _events_store() -> Dict[Any, Dict[str, Any]]:
+    return store._EVENTS
+
+
+def _payments_store() -> Dict[Any, Dict[str, Any]]:
+    return store._PAYMENTS
 
 
 def _as_str(value: Any) -> str:
@@ -76,7 +98,7 @@ def _get_application_or_404(app_id: Any) -> Dict[str, Any]:
     if not key:
         raise HTTPException(status_code=404, detail="Application not found")
 
-    for stored_key, app in _APPLICATIONS.items():
+    for stored_key, app in _applications_store().items():
         if _normalize_id(stored_key) == key:
             return app
         if isinstance(app, dict) and _normalize_id(app.get("id")) == key:
@@ -95,9 +117,11 @@ def _get_event_for_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     event_key = _normalize_id(event_id)
     if not event_key:
         return None
-    event = _EVENTS.get(event_key)
+
+    events = _events_store()
+    event = events.get(event_key)
     if event is None and event_key.isdigit():
-        event = _EVENTS.get(int(event_key))
+        event = events.get(int(event_key))
     return event if isinstance(event, dict) else None
 
 
@@ -149,16 +173,12 @@ def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
 
 
 def _price_to_cents(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value if value >= 1000 else value * 100 if value > 0 else None
     if isinstance(value, float):
-        if value <= 0:
-            return None
-        return int(round(value * 100))
+        return int(round(value * 100)) if value > 0 else None
     if isinstance(value, str):
         text = value.strip().replace("$", "").replace(",", "")
         if not text:
@@ -167,9 +187,7 @@ def _price_to_cents(value: Any) -> Optional[int]:
             number = float(text)
         except Exception:
             return None
-        if number <= 0:
-            return None
-        return int(round(number * 100))
+        return int(round(number * 100)) if number > 0 else None
     if isinstance(value, dict):
         for key in (
             "price_cents",
@@ -289,8 +307,6 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> Optional[int]:
     return cents
 
 
-
-
 def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
     cents = _persist_resolved_booth_price(app)
     booth_price = round(cents / 100, 2) if cents else None
@@ -323,10 +339,8 @@ def _payment_exists_for_application(app_id: str) -> bool:
     if not target:
         return False
 
-    for payment in _iter_dict_values(_PAYMENTS):
-        pid = _normalize_id(
-            payment.get("application_id") or payment.get("applicationId")
-        )
+    for payment in _iter_dict_values(_payments_store()):
+        pid = _normalize_id(payment.get("application_id") or payment.get("applicationId"))
         if pid == target and _as_str(payment.get("status")).lower() == "paid":
             return True
 
@@ -340,34 +354,20 @@ def _current_status(app: Dict[str, Any]) -> str:
 def _is_locked_for_vendor_edits(app: Dict[str, Any]) -> bool:
     return _current_status(app) in {"submitted", "approved", "paid"}
 
+
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
     source: str,
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-
     payment_id = str(int(time.time() * 1000))
     app_id = _normalize_id(app.get("id")) or payment_id
 
-    # -------------------------
-    # LOAD RELATED DATA
-    # -------------------------
     event = _get_event_for_app(app) or {}
+    event_id = _normalize_id(event.get("id") or app.get("event_id") or app.get("eventId"))
+    event_title = event.get("title") or event.get("name") or "Untitled event"
 
-    event_id = _normalize_id(
-        event.get("id")
-        or app.get("event_id")
-        or app.get("eventId")
-    )
-
-    event_title = (
-        event.get("title")
-        or event.get("name")
-        or "Untitled event"
-    )
-
-    # Vendor info (comes from application)
     vendor_name = (
         app.get("vendor_name")
         or app.get("business_name")
@@ -376,10 +376,8 @@ def _create_payment_record(
         or app.get("vendor_email")
         or "Unknown vendor"
     )
-
     vendor_email = app.get("vendor_email") or "unknown@email.com"
 
-    # Organizer info (comes from event)
     organizer_name = (
         event.get("organizer_name")
         or event.get("company_name")
@@ -387,80 +385,45 @@ def _create_payment_record(
         or event.get("email")
         or "Unknown organizer"
     )
+    organizer_email = event.get("organizer_email") or event.get("email") or "unknown@email.com"
+    organizer_id = event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
 
-    organizer_email = (
-        event.get("organizer_email")
-        or event.get("email")
-        or "unknown@email.com"
-    )
+    booth_id = app.get("booth_id") or app.get("selected_booth_id") or app.get("requested_booth_id")
+    booth_label = app.get("booth_label") or app.get("booth_number") or booth_id
 
-    # Booth info
-    booth_id = (
-        app.get("booth_id")
-        or app.get("selected_booth_id")
-        or app.get("requested_booth_id")
-    )
-
-    booth_label = (
-        app.get("booth_label")
-        or app.get("booth_number")
-        or booth_id
-    )
-
-    # -------------------------
-    # FINANCIALS
-    # -------------------------
     amount_cents = int(amount)
     amount_dollars = round(amount_cents / 100, 2)
-
-    # You can adjust this later
     platform_fee_cents = int(amount_cents * 0.10)
     platform_fee = round(platform_fee_cents / 100, 2)
-
     organizer_payout = round((amount_cents - platform_fee_cents) / 100, 2)
 
-    # -------------------------
-    # FINAL RECORD
-    # -------------------------
     record = {
         "id": payment_id,
-
-        # Relationships
         "application_id": app_id,
         "event_id": event_id,
         "event_title": event_title,
-
-        # Vendor
         "vendor_name": vendor_name,
         "vendor_email": vendor_email,
-
-        # Organizer
         "organizer_name": organizer_name,
         "organizer_email": organizer_email,
-
-        # Booth
+        "organizer_id": organizer_id,
         "booth_id": booth_id,
         "booth_label": booth_label,
-
-        # Financials
         "amount_cents": amount_cents,
         "amount": amount_dollars,
         "platform_fee": platform_fee,
         "organizer_payout": organizer_payout,
-
-        # Stripe
         "session_id": session_id,
         "source": source,
-
-        # Status
         "status": "paid",
         "created_at": _now_iso(),
         "paid_at": _now_iso(),
     }
 
-    _PAYMENTS[payment_id] = record
-    save_store()
-    return _PAYMENTS[payment_id]
+    _payments_store()[payment_id] = record
+    _save_store()
+    return record
+
 
 def _mark_application_paid(
     app: Dict[str, Any],
@@ -482,10 +445,11 @@ def _mark_application_paid(
     if session_id:
         app["stripe_session_id"] = session_id
 
-    if not _payment_exists_for_application(_normalize_id(app.get("id")) or ""):
+    normalized_app_id = _normalize_id(app.get("id")) or ""
+    if not _payment_exists_for_application(normalized_app_id):
         _create_payment_record(app, amount, source=source, session_id=session_id)
 
-    save_store()
+    _save_store()
     return app
 
 
@@ -508,15 +472,13 @@ def expire_reservations_if_needed() -> int:
     now_ts = time.time()
     expired_count = 0
 
-    for app in _iter_dict_values(_APPLICATIONS):
+    for app in _iter_dict_values(_applications_store()):
         expires_at = app.get("reservation_expires_at")
         if not expires_at:
             continue
 
         try:
-            expires_ts = datetime.fromisoformat(
-                str(expires_at).replace("Z", "+00:00")
-            ).timestamp()
+            expires_ts = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")).timestamp()
         except Exception:
             continue
 
@@ -536,7 +498,7 @@ def expire_reservations_if_needed() -> int:
         expired_count += 1
 
     if expired_count:
-        save_store()
+        _save_store()
 
     return expired_count
 
@@ -548,20 +510,14 @@ def expire_reservations_if_needed() -> int:
 @router.get("/vendor/applications")
 def list_vendor_applications() -> List[Dict[str, Any]]:
     expire_reservations_if_needed()
-
-    apps: List[Dict[str, Any]] = []
-    for app in _iter_dict_values(_APPLICATIONS):
-        apps.append(_serialize_application(app))
-    return apps
+    return [_serialize_application(app) for app in _iter_dict_values(_applications_store())]
 
 
 @router.get("/vendor/applications/{app_id}")
 def get_vendor_application(app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
-
     app = _get_application_or_404(app_id)
     return _serialize_application(app)
-
 
 
 @router.patch("/vendor/applications/{app_id}")
@@ -571,10 +527,7 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     app = _get_application_or_404(app_id)
 
     if _is_locked_for_vendor_edits(app):
-        raise HTTPException(
-            status_code=400,
-            detail="Application is locked and cannot be modified.",
-        )
+        raise HTTPException(status_code=400, detail="Application is locked and cannot be modified.")
 
     booth_id = _as_str(payload.get("booth_id"))
     if booth_id:
@@ -603,7 +556,7 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
             app["resolved_price_cents"] = cents
 
     app["updated_at"] = _now_iso()
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -612,17 +565,12 @@ def vendor_update_application_progress(app_id: str, payload: Dict[str, Any] = Bo
     return vendor_update_application(app_id, payload)
 
 
-
-
 @router.post("/vendor/applications/{app_id}/submit")
 def vendor_submit_application(app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
     status = _current_status(app)
-  
-    if app.get("payment_status") == "paid":
-        return {"status": "already_paid"}
 
     if status not in {"", "draft"}:
         raise HTTPException(status_code=400, detail="Application already submitted.")
@@ -639,7 +587,7 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
     if cents:
         app["booth_price"] = round(cents / 100, 2)
 
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -656,10 +604,7 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     secret_key = _as_str(os.getenv("STRIPE_SECRET_KEY"))
     if not secret_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Stripe not configured: missing STRIPE_SECRET_KEY",
-        )
+        raise HTTPException(status_code=500, detail="Stripe not configured: missing STRIPE_SECRET_KEY")
 
     try:
         import stripe  # type: ignore
@@ -670,14 +615,8 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     app_id_str = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     frontend = _get_frontend_base_url()
-    success_url = (
-        f"{frontend}/vendor/payment-success"
-        f"?appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
-    )
-    cancel_url = (
-        f"{frontend}/vendor/payment-cancel"
-        f"?appId={app_id_str}"
-    )
+    success_url = f"{frontend}/vendor/payment-success?appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{frontend}/vendor/payment-cancel?appId={app_id_str}"
 
     session = stripe.checkout.Session.create(
         mode="payment",
@@ -690,9 +629,7 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
                 "price_data": {
                     "currency": "usd",
                     "unit_amount": int(amount_cents),
-                    "product_data": {
-                        "name": f"Booth fee for application {app_id_str}",
-                    },
+                    "product_data": {"name": f"Booth fee for application {app_id_str}"},
                 },
             }
         ],
@@ -706,7 +643,7 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     app["checkout_session_id"] = session_id
     app["checkout_created_at"] = _now_iso()
     app["checkout_amount_cents"] = int(amount_cents)
-    save_store()
+    _save_store()
 
     return {
         "ok": True,
@@ -718,15 +655,14 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
         "amount_cents": int(amount_cents),
     }
 
+
 @router.post("/vendor/applications")
 def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
     event_id = _normalize_id(payload.get("event_id") or payload.get("eventId"))
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id is required")
 
-    # Reuse an existing draft app for this event if one already exists.
-    # Do not reuse submitted / approved / paid applications.
-    for app in _iter_dict_values(_APPLICATIONS):
+    for app in _iter_dict_values(_applications_store()):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id != event_id:
             continue
@@ -738,7 +674,6 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             return {"ok": True, "application": _serialize_application(app)}
 
     new_id = str(int(time.time() * 1000))
-
     app = {
         "id": new_id,
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
@@ -762,8 +697,8 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
             app["resolved_price_cents"] = cents
             app["booth_price"] = round(cents / 100, 2)
 
-    _APPLICATIONS[new_id] = app
-    save_store()
+    _applications_store()[new_id] = app
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -805,7 +740,6 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
         session = stripe.checkout.Session.retrieve(session_id)
 
         app_id: Optional[str] = None
-
         metadata = getattr(session, "metadata", None)
         if metadata and "application_id" in metadata:
             app_id = _normalize_id(metadata["application_id"])
@@ -824,17 +758,14 @@ async def stripe_webhook(request: Request) -> Dict[str, Any]:
         if not app_id:
             return {"ok": True, "ignored": "missing application_id"}
 
-        app = _APPLICATIONS.get(app_id)
+        app = _applications_store().get(app_id)
         if app is None and app_id.isdigit():
-            app = _APPLICATIONS.get(int(app_id))
+            app = _applications_store().get(int(app_id))
 
         if app is None:
             return {"ok": True, "ignored": f"application {app_id} not found"}
 
-        if (
-            _as_str(app.get("payment_status")).lower() == "paid"
-            or _payment_exists_for_application(app_id)
-        ):
+        if _as_str(app.get("payment_status")).lower() == "paid" or _payment_exists_for_application(app_id):
             return {"ok": True, "already_paid": True}
 
         expected_amount = _get_amount_cents_from_app(app)
@@ -878,7 +809,7 @@ def organizer_reserve_booth(
         tz=timezone.utc,
     ).isoformat()
     _persist_resolved_booth_price(app)
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -892,7 +823,7 @@ def organizer_change_booth(
         raise HTTPException(status_code=400, detail="booth_id is required")
     app["booth_id"] = payload.booth_id
     _persist_resolved_booth_price(app)
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -909,9 +840,7 @@ def organizer_extend_reservation(
         try:
             base_ts = max(
                 base_ts,
-                datetime.fromisoformat(
-                    str(current_expires).replace("Z", "+00:00")
-                ).timestamp(),
+                datetime.fromisoformat(str(current_expires).replace("Z", "+00:00")).timestamp(),
             )
         except Exception:
             pass
@@ -919,7 +848,7 @@ def organizer_extend_reservation(
         base_ts + minutes * 60,
         tz=timezone.utc,
     ).isoformat()
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
@@ -928,21 +857,21 @@ def organizer_release_reservation(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
     app.pop("reservation_expires_at", None)
     app.pop("booth_id", None)
-    save_store()
+    _save_store()
     return {"ok": True, "application": _serialize_application(app)}
 
 
 @router.get("/admin/payments")
 def list_admin_payments() -> List[Dict[str, Any]]:
-    return _iter_dict_values(_PAYMENTS)
+    return _iter_dict_values(_payments_store())
 
 
 @router.get("/organizer/activity")
 def organizer_activity() -> Dict[str, Any]:
     return {
-        "applications": len(_iter_dict_values(_APPLICATIONS)),
-        "payments": len(_iter_dict_values(_PAYMENTS)),
-        "events": len(_iter_dict_values(_EVENTS)),
+        "applications": len(_iter_dict_values(_applications_store())),
+        "payments": len(_iter_dict_values(_payments_store())),
+        "events": len(_iter_dict_values(_events_store())),
     }
 
 
@@ -950,22 +879,19 @@ def organizer_activity() -> Dict[str, Any]:
 def applications_router_health() -> Dict[str, Any]:
     return {"ok": True, "router": "applications"}
 
+
 @router.get("/organizer/events/{event_id}/applications")
 def organizer_list_applications(event_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     event_id_str = str(event_id)
-
     apps = []
-    for app in _iter_dict_values(_APPLICATIONS):
+    for app in _iter_dict_values(_applications_store()):
         aid = _normalize_id(app.get("event_id") or app.get("eventId"))
         if aid != event_id_str:
             continue
 
-        # Ensure price is resolved
         serialized = _serialize_application(app)
-
-        # Minimal normalization for frontend
         enriched = {
             **serialized,
             "id": app.get("id"),
@@ -982,42 +908,38 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             "resolved_price_cents": serialized.get("resolved_price_cents"),
             "total_cents": serialized.get("total_cents"),
         }
-
         apps.append(enriched)
 
     return {"applications": apps}
+
 
 @router.get("/organizer/events/{event_id}/applications/{app_id}")
 def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
-
-    # Ensure it belongs to the correct event
     app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
     if app_event_id != str(event_id):
         raise HTTPException(status_code=404, detail="Application not found for this event")
 
     return _serialize_application(app)
 
+
 @router.post("/organizer/applications/{app_id}/approve")
 def organizer_approve_application(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
-
     app["status"] = "approved"
-    save_store()
-
+    _save_store()
     return _serialize_application(app)
 
 
 @router.post("/organizer/applications/{app_id}/reject")
 def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
-
     app["status"] = "rejected"
-    save_store()
-
+    _save_store()
     return _serialize_application(app)
+
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
 def vendor_confirm_payment(
@@ -1027,13 +949,23 @@ def vendor_confirm_payment(
 ) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
 
-    if app.get("payment_status") == "paid":
+    normalized_app_id = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
+
+    if _as_str(app.get("payment_status")).lower() == "paid":
+        if not _payment_exists_for_application(normalized_app_id):
+            amount = _get_amount_cents_from_app(app)
+            _create_payment_record(
+                app,
+                amount=amount,
+                source="confirm_payment_repair",
+                session_id=_as_str(app.get("stripe_session_id")) or _as_str(app.get("checkout_session_id")),
+            )
+            _save_store()
         return {"ok": True, "already_paid": True, "application": _serialize_application(app)}
 
-    normalized_app_id = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
     if _payment_exists_for_application(normalized_app_id):
         app["payment_status"] = "paid"
-        save_store()
+        _save_store()
         return {"ok": True, "already_paid": True, "application": _serialize_application(app)}
 
     session_id = (
@@ -1080,6 +1012,6 @@ def vendor_confirm_payment(
         source="confirm_payment",
         session_id=session_id,
     )
-    save_store()
+    _save_store()
 
     return {"ok": True, "application": _serialize_application(app)}
