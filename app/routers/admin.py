@@ -1,12 +1,29 @@
+
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
-from app.routers.auth import get_current_user
+from app.routers.auth import (
+    admin_create_user,
+    admin_delete_user,
+    get_current_user,
+    list_all_users,
+)
 from app.store import get_store_snapshot, load_store, save_store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class AdminAccountCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    email: str
+    password: str
+    role: str
+    full_name: str | None = None
+    username: str | None = None
 
 
 def require_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -34,28 +51,31 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
     load_store()
     store = get_store_snapshot()
 
-    vendors = store.get("vendors", {})
-    organizers = store.get("organizers", {})
+    accounts = list_all_users()
+    vendor_items = [u for u in accounts if str(u.get("role") or "").lower() == "vendor"]
+    organizer_items = [u for u in accounts if str(u.get("role") or "").lower() == "organizer"]
+
     applications = store.get("applications", {})
     events = store.get("events", {})
     payments = store.get("payments", [])
+    verifications = store.get("verifications", {})
 
-    vendor_items = _as_list(vendors)
-    organizer_items = _as_list(organizers)
     application_items = [a for a in _as_list(applications) if isinstance(a, dict)]
     event_items = [e for e in _as_list(events) if isinstance(e, dict)]
     payment_items = [p for p in _as_list(payments) if isinstance(p, dict)]
+    verification_items = [v for v in _as_list(verifications) if isinstance(v, dict)]
 
-    paid_apps = [a for a in application_items if a.get("payment_status") == "paid"]
+    paid_apps = [a for a in application_items if str(a.get("payment_status") or "").lower() == "paid"]
 
     approved_unpaid = [
         a
         for a in application_items
-        if a.get("status") == "approved" and a.get("payment_status") != "paid"
+        if str(a.get("status") or "").lower() == "approved"
+        and str(a.get("payment_status") or "").lower() != "paid"
     ]
 
     pending_items = [
-        a for a in application_items if a.get("verification_status") == "pending"
+        a for a in verification_items if str(a.get("status") or "").lower() == "pending"
     ]
 
     gross_sales = 0.0
@@ -74,6 +94,12 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
         platform_revenue += fee
         organizer_payouts += payout
 
+    recent_payments = sorted(
+        payment_items,
+        key=lambda row: str(row.get("paid_at") or row.get("created_at") or ""),
+        reverse=True,
+    )[:5]
+
     return {
         "stats": {
             "total_vendors": len(vendor_items),
@@ -88,9 +114,39 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
             "organizer_payouts_owed": round(organizer_payouts, 2),
         },
         "recent_activity": [],
-        "pending_verifications": [],
-        "recent_payments": payment_items[-5:],
+        "pending_verifications": pending_items[:5],
+        "recent_payments": recent_payments,
     }
+
+
+@router.get("/accounts")
+async def admin_accounts(user: dict = Depends(require_admin)):
+    accounts = list_all_users()
+    return {"accounts": accounts}
+
+
+@router.post("/accounts")
+async def admin_accounts_create(
+    payload: AdminAccountCreateRequest,
+    user: dict = Depends(require_admin),
+):
+    account = admin_create_user(
+        email=payload.email,
+        password=payload.password,
+        role=payload.role,
+        full_name=payload.full_name,
+        username=payload.username,
+    )
+    return {"ok": True, "account": account}
+
+
+@router.delete("/accounts/{user_id}")
+async def admin_accounts_delete(user_id: int, user: dict = Depends(require_admin)):
+    if int(user.get("id") or 0) == int(user_id):
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+
+    deleted = admin_delete_user(user_id)
+    return {"ok": True, "account": deleted}
 
 
 @router.get("/payments")
@@ -143,9 +199,7 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         for p in payments:
             if not isinstance(p, dict):
                 continue
-            if str(p.get("id")) == str(payment_id) or str(p.get("payment_id")) == str(
-                payment_id
-            ):
+            if str(p.get("id")) == str(payment_id) or str(p.get("payment_id")) == str(payment_id):
                 payment = p
                 break
 

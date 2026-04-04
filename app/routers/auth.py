@@ -1,8 +1,10 @@
-# app/routers/auth.py
+
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -39,6 +41,10 @@ ORGANIZER_VERIFICATION_FEE = 49
 UPLOAD_DIR = Path("uploads/verifications")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+AUTH_DATA_DIR = Path(os.getenv("DATA_DIR", "/data/vendorconnect"))
+AUTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_AUTH_USERS_PATH = AUTH_DATA_DIR / "_auth_users.json"
+
 
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip().lower()
@@ -51,6 +57,100 @@ def _index_user(u: Dict[str, Any]) -> None:
     un = _norm(u.get("username"))
     if un:
         _USERS_BY_USERNAME[un] = int(u["id"])
+
+
+def _rebuild_indexes() -> None:
+    _USERS_BY_EMAIL.clear()
+    _USERS_BY_USERNAME.clear()
+    for user in _USERS.values():
+        if isinstance(user, dict):
+            _index_user(user)
+
+
+def _next_user_id() -> int:
+    ids = [int(k) for k in _USERS.keys()] if _USERS else [0]
+    return max(ids) + 1
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd = None
+    tmp_name = None
+    try:
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=path.name + ".",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_name, path)
+        tmp_name = None
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+
+
+def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(user.get("id") or 0),
+        "email": _norm(user.get("email")),
+        "username": _norm(user.get("username")),
+        "role": _norm(user.get("role")),
+        "full_name": (user.get("full_name") or "").strip() or None,
+        "is_active": bool(user.get("is_active", True)),
+        "created_at": user.get("created_at"),
+        "updated_at": user.get("updated_at"),
+    }
+
+
+def _persist_users() -> None:
+    payload = {
+        "users": [dict(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))],
+        "next_id": _NEXT_ID,
+    }
+    _atomic_write_json(_AUTH_USERS_PATH, payload)
+
+
+def _load_users() -> None:
+    global _NEXT_ID
+
+    if not _AUTH_USERS_PATH.exists():
+        _rebuild_indexes()
+        return
+
+    try:
+        raw = json.loads(_AUTH_USERS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        _rebuild_indexes()
+        return
+
+    _USERS.clear()
+    for item in raw.get("users", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            uid = int(item.get("id"))
+        except Exception:
+            continue
+        normalized = dict(item)
+        normalized["id"] = uid
+        normalized["email"] = _norm(normalized.get("email"))
+        normalized["username"] = _norm(normalized.get("username") or normalized.get("email"))
+        normalized["role"] = _norm(normalized.get("role") or "vendor")
+        normalized["is_active"] = bool(normalized.get("is_active", True))
+        _USERS[uid] = normalized
+
+    _rebuild_indexes()
+    _NEXT_ID = max(int(raw.get("next_id", 1) or 1), _next_user_id())
 
 
 def _hash_password(pw: str) -> str:
@@ -80,18 +180,24 @@ def _add_user(
     role: str,
     username: Optional[str] = None,
     full_name: Optional[str] = None,
+    persist: bool = True,
 ) -> Dict[str, Any]:
+    now = int(time.time())
     u = {
         "id": int(user_id),
         "email": _norm(email),
         "username": _norm(username or email),
         "password_hash": _hash_password(password),
-        "role": role,
+        "role": _norm(role),
         "full_name": (full_name or "").strip() or None,
         "is_active": True,
+        "created_at": now,
+        "updated_at": now,
     }
     _USERS[int(user_id)] = u
     _index_user(u)
+    if persist:
+        _persist_users()
     return u
 
 
@@ -109,15 +215,28 @@ def _seed_dev_users() -> None:
         (17, "sammys@example.com", "aabbcc1", "vendor"),
     ]
 
+    changed = False
     for uid, email, pw, role in seed:
         if _norm(email) in _USERS_BY_EMAIL:
             continue
-        _add_user(user_id=uid, email=email, password=pw, role=role, username=email)
+        _add_user(
+            user_id=uid,
+            email=email,
+            password=pw,
+            role=role,
+            username=email,
+            persist=False,
+        )
+        changed = True
 
     if _USERS:
         _NEXT_ID = max(_USERS.keys()) + 1
 
+    if changed:
+        _persist_users()
 
+
+_load_users()
 _seed_dev_users()
 
 _JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
@@ -288,6 +407,68 @@ def _save_upload(file: UploadFile, prefix: str) -> tuple[str, str, str]:
     return str(destination), f"/uploads/verifications/{saved_name}", saved_name
 
 
+def list_all_users() -> List[Dict[str, Any]]:
+    return [_serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))]
+
+
+def admin_create_user(
+    *,
+    email: str,
+    password: str,
+    role: str,
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    global _NEXT_ID
+
+    normalized_email = _norm(email)
+    normalized_role = _norm(role)
+    normalized_username = _norm(username or email)
+
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Email required")
+    if len(str(password or "")) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if normalized_role not in {"vendor", "organizer", "admin"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    if normalized_email in _USERS_BY_EMAIL:
+        raise HTTPException(status_code=409, detail="Account already exists")
+    if normalized_username in _USERS_BY_USERNAME:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    user = _add_user(
+        user_id=int(_NEXT_ID),
+        email=normalized_email,
+        password=password,
+        role=normalized_role,
+        username=normalized_username,
+        full_name=full_name,
+        persist=True,
+    )
+    _NEXT_ID = max(_NEXT_ID + 1, _next_user_id())
+    _persist_users()
+    return _serialize_user(user)
+
+
+def admin_delete_user(user_id: int) -> Dict[str, Any]:
+    uid = int(user_id)
+    user = _USERS.get(uid)
+    if not isinstance(user, dict):
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    email = _norm(user.get("email"))
+    username = _norm(user.get("username"))
+
+    _USERS.pop(uid, None)
+    if email:
+        _USERS_BY_EMAIL.pop(email, None)
+    if username:
+        _USERS_BY_USERNAME.pop(username, None)
+
+    _persist_users()
+    return _serialize_user(user)
+
+
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
 ) -> Dict[str, Any]:
@@ -360,33 +541,13 @@ class VerificationConfirmRequest(BaseModel):
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
 def register(payload: RegisterRequest) -> AuthResponse:
-    _seed_dev_users()
-    global _NEXT_ID
-    email = _norm(payload.email)
-    if not email:
-        raise HTTPException(status_code=400, detail="Email required")
-    password = str(payload.password or "")
-    if len(password) < 6:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 6 characters"
-        )
-    role = _norm(payload.role) or "vendor"
-    if role not in {"vendor", "organizer", "admin"}:
-        raise HTTPException(status_code=400, detail="Invalid role")
-    if email in _USERS_BY_EMAIL:
-        raise HTTPException(status_code=409, detail="Account already exists")
-    username = _norm(payload.username) or email
-    if username in _USERS_BY_USERNAME:
-        raise HTTPException(status_code=409, detail="Username already exists")
-    user = _add_user(
-        user_id=int(_NEXT_ID),
-        email=email,
-        password=password,
-        role=role,
-        username=username,
+    user = admin_create_user(
+        email=payload.email,
+        password=payload.password,
+        role=payload.role,
+        username=payload.username,
         full_name=payload.full_name,
     )
-    _NEXT_ID += 1
     token = _create_access_token(
         email=str(user["email"]), role=str(user["role"]), is_active=True
     )
@@ -397,7 +558,6 @@ def register(payload: RegisterRequest) -> AuthResponse:
 
 @router.post("/login", response_model=AuthResponse, status_code=200)
 def login(payload: LoginRequest) -> AuthResponse:
-    _seed_dev_users()
     identifier = _norm(payload.email) or _norm(payload.username)
     if not identifier:
         raise HTTPException(status_code=400, detail="Email or username required")
@@ -417,6 +577,7 @@ def login(payload: LoginRequest) -> AuthResponse:
                 password=master_pw,
                 role=role,
                 username=identifier,
+                persist=True,
             )
         else:
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -477,7 +638,6 @@ def verification_public_list():
             }
         )
 
-    # de-dupe by email, keeping the last record seen
     deduped: Dict[str, Dict[str, Any]] = {}
     for item in items:
         deduped[item["email"]] = item
@@ -489,7 +649,6 @@ def verification_public_list():
 def verification_public(email: str):
     email = (email or "").strip().lower()
 
-    # Find matching organizer record
     for _, value in list((_VERIFICATIONS or {}).items()):
         if not isinstance(value, dict):
             continue
