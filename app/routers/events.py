@@ -402,8 +402,27 @@ def _public_diagram_payload_for_event(event_id: int) -> Dict[str, Any]:
 def _event_marketplace_stats(event: dict, applications: dict) -> dict:
     booths = []
 
-    diagram_slot = event.get("diagram") or {}
-    diagram_doc = {}
+    event_id = int(event.get("id") or 0)
+
+diagram_doc = {}
+
+# 1. Try event-local diagram
+diagram_slot = event.get("diagram")
+if isinstance(diagram_slot, dict):
+    if isinstance(diagram_slot.get("diagram"), dict):
+        diagram_doc = diagram_slot.get("diagram") or {}
+    elif "levels" in diagram_slot:
+        diagram_doc = diagram_slot
+
+# 2. FALLBACK → global diagram store
+if not diagram_doc:
+    raw = _DIAGRAMS.get(event_id)
+    if isinstance(raw, dict):
+        if isinstance(raw.get("diagram"), dict):
+            diagram_doc = raw.get("diagram") or {}
+        elif "levels" in raw:
+            diagram_doc = rawv
+
 
     if isinstance(diagram_slot, dict):
         if isinstance(diagram_slot.get("diagram"), dict):
