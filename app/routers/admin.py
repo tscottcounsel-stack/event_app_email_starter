@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -41,6 +40,7 @@ def _as_list(value: Any) -> list:
         return value
     return []
 
+
 def _as_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -76,6 +76,7 @@ def _event_status_label(event: Dict[str, Any]) -> str:
     if published is False:
         return "draft"
     return raw or "unknown"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
