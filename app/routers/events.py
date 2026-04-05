@@ -398,78 +398,63 @@ def _public_diagram_payload_for_event(event_id: int) -> Dict[str, Any]:
         "booth_state_by_id": booth_state_by_id,
     }
 
-
 def _event_marketplace_stats(event: dict, applications: dict) -> dict:
     booths = []
 
     event_id = int(event.get("id") or 0)
 
-diagram_doc = {}
+    diagram_doc = {}
 
-# 1. Try event-local diagram
-diagram_slot = event.get("diagram")
-if isinstance(diagram_slot, dict):
-    if isinstance(diagram_slot.get("diagram"), dict):
-        diagram_doc = diagram_slot.get("diagram") or {}
-    elif "levels" in diagram_slot:
-        diagram_doc = diagram_slot
-
-# 2. FALLBACK → global diagram store
-if not diagram_doc:
-    raw = _DIAGRAMS.get(event_id)
-    if isinstance(raw, dict):
-        if isinstance(raw.get("diagram"), dict):
-            diagram_doc = raw.get("diagram") or {}
-        elif "levels" in raw:
-            diagram_doc = rawv
-
-
+    # 1. Try event-local diagram
+    diagram_slot = event.get("diagram")
     if isinstance(diagram_slot, dict):
         if isinstance(diagram_slot.get("diagram"), dict):
             diagram_doc = diagram_slot.get("diagram") or {}
-        elif "levels" in diagram_slot or "booths" in diagram_slot:
+        elif "levels" in diagram_slot:
             diagram_doc = diagram_slot
 
-    if isinstance(diagram_doc, dict):
-        levels = diagram_doc.get("levels", [])
-        if isinstance(levels, list):
-            for level in levels:
-                if isinstance(level, dict):
-                    level_booths = level.get("booths", [])
-                    if isinstance(level_booths, list):
-                        booths.extend([b for b in level_booths if isinstance(b, dict)])
+    # 2. FALLBACK → global diagram store
+    if not diagram_doc:
+        raw = _DIAGRAMS.get(event_id)
+        if isinstance(raw, dict):
+            if isinstance(raw.get("diagram"), dict):
+                diagram_doc = raw.get("diagram") or {}
+            elif "levels" in raw:
+                diagram_doc = raw
 
-        root_booths = diagram_doc.get("booths", [])
-        if isinstance(root_booths, list):
-            booths.extend([b for b in root_booths if isinstance(b, dict)])
+    levels = diagram_doc.get("levels", [])
+
+    for lvl in levels:
+        if isinstance(lvl, dict):
+            bs = lvl.get("booths", [])
+            if isinstance(bs, list):
+                booths.extend([b for b in bs if isinstance(b, dict)])
 
     prices = []
-    pricing_categories = diagram_doc.get("pricingCategories", []) if isinstance(diagram_doc, dict) else []
-
     for b in booths:
-        try:
-            price = _resolve_booth_price(b, pricing_categories)
-            if price > 0:
-                prices.append(price)
-        except Exception:
-            continue
+        raw_price = b.get("price")
+        if raw_price not in (None, "", 0):
+            try:
+                price = float(str(raw_price).replace("$", "").replace(",", "").strip())
+                if price > 0:
+                    prices.append(price)
+            except Exception:
+                continue
 
-    event_id = int(event.get("id") or 0)
-
-    sold = sum(
-        1
-        for a in applications.values()
-        if int(a.get("event_id") or 0) == event_id
-        and _coerce_payment_status(a.get("payment_status")) == "paid"
+    total_booths = len(booths)
+    paid_booths = sum(
+        1 for a in applications.values()
+        if a.get("event_id") == event_id and a.get("status") == "paid"
     )
 
-    total = len(booths)
+    booths_from_price = min(prices) if prices else None
+    spots_left = max(total_booths - paid_booths, 0)
 
     return {
-        "booths_from_price": min(prices) if prices else None,
-        "spots_left": max(0, total - sold),
-        "total_booths": total,
-        "paid_booths": sold,
+        "booths_from_price": booths_from_price,
+        "total_booths": total_booths,
+        "paid_booths": paid_booths,
+        "spots_left": spots_left,
     }
 
 
