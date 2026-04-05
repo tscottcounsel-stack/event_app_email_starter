@@ -944,11 +944,13 @@ def admin_mark_payout_paid(payment_id: int):
 @router.get("/public/events")
 def public_list_events():
     out = []
-    for e in _EVENTS.values():
-        if e.get("published") and not e.get("archived"):
-            out.append(_as_event_dict(e))
+    for event in _EVENTS.values():
+        if event.get("published") and not event.get("archived"):
+            e = dict(event)
+            stats = _event_marketplace_stats(e, _APPLICATIONS)
+            e.update(stats)
+            out.append(e)
     return {"events": out}
-
 
 @router.get("/public/events/{event_id}")
 def public_get_event(event_id: int):
