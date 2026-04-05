@@ -1,9 +1,15 @@
 ﻿# app/routers/events.py
 from __future__ import annotations
 
+print("🔥 EVENTS.PY LOADED — NEW VERSION")
+
 from datetime import datetime, timezone
 import os
 import re
+import logging
+logger = logging.getLogger(__name__)
+logger.warning("🔥 app.routers.events loaded")
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
