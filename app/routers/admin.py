@@ -281,3 +281,71 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payout_status": payment["payout_status"],
         "payout_sent_at": payment["payout_sent_at"],
     }
+
+@router.post("/reset-demo-data")
+async def reset_demo_data(user: dict = Depends(require_admin)):
+
+    ALLOWED_RESET_EMAILS = {"admin@example.com"}
+
+if user.get("email") not in ALLOWED_RESET_EMAILS:
+    raise HTTPException(status_code=403, detail="Not authorized for reset")
+    from app.store import (
+        _EVENTS,
+        _APPLICATIONS,
+        _PAYMENTS,
+        _VERIFICATIONS,
+        _PAYOUTS,
+        _AUDIT_LOGS,
+        _BOOTHS,
+        _LAYOUT_META,
+        _TEMPLATES,
+        save_store,
+    )
+
+    from app.routers.auth import _USERS, _USERS_BY_EMAIL, _USERS_BY_USERNAME, _persist_users
+
+    # ----------------------------
+    # 🔥 CLEAR STORE DATA
+    # ----------------------------
+    _EVENTS.clear()
+    _APPLICATIONS.clear()
+    _PAYMENTS.clear()
+    _VERIFICATIONS.clear()
+    _PAYOUTS.clear()
+    _AUDIT_LOGS.clear()
+    _BOOTHS.clear()
+    _LAYOUT_META.clear()
+    _TEMPLATES.clear()
+
+    save_store()
+
+    # ----------------------------
+    # 🔥 REMOVE NON-ADMIN USERS
+    # ----------------------------
+    admin_users = {
+        uid: u for uid, u in _USERS.items()
+        if str(u.get("role", "")).lower() == "admin"
+    }
+
+    _USERS.clear()
+    _USERS.update(admin_users)
+
+    # rebuild indexes
+    _USERS_BY_EMAIL.clear()
+    _USERS_BY_USERNAME.clear()
+
+    for u in _USERS.values():
+        email = (u.get("email") or "").strip().lower()
+        username = (u.get("username") or "").strip().lower()
+        if email:
+            _USERS_BY_EMAIL[email] = u["id"]
+        if username:
+            _USERS_BY_USERNAME[username] = u["id"]
+
+    _persist_users()
+
+    return {
+        "ok": True,
+        "message": "Demo data cleared. System ready for live use.",
+        "remaining_admins": len(_USERS),
+    }
