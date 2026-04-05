@@ -284,11 +284,9 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
 
 @router.post("/reset-demo-data")
 async def reset_demo_data(user: dict = Depends(require_admin)):
+    if user.get("email") != "admin@example.com":
+        raise HTTPException(status_code=403, detail="Not authorized for reset")
 
-    ALLOWED_RESET_EMAILS = {"admin@example.com"}
-
-if user.get("email") not in ALLOWED_RESET_EMAILS:
-    raise HTTPException(status_code=403, detail="Not authorized for reset")
     from app.store import (
         _EVENTS,
         _APPLICATIONS,
@@ -302,11 +300,13 @@ if user.get("email") not in ALLOWED_RESET_EMAILS:
         save_store,
     )
 
-    from app.routers.auth import _USERS, _USERS_BY_EMAIL, _USERS_BY_USERNAME, _persist_users
+    from app.routers.auth import (
+        _USERS,
+        _USERS_BY_EMAIL,
+        _USERS_BY_USERNAME,
+        _persist_users,
+    )
 
-    # ----------------------------
-    # 🔥 CLEAR STORE DATA
-    # ----------------------------
     _EVENTS.clear()
     _APPLICATIONS.clear()
     _PAYMENTS.clear()
@@ -319,18 +319,15 @@ if user.get("email") not in ALLOWED_RESET_EMAILS:
 
     save_store()
 
-    # ----------------------------
-    # 🔥 REMOVE NON-ADMIN USERS
-    # ----------------------------
     admin_users = {
-        uid: u for uid, u in _USERS.items()
-        if str(u.get("role", "")).lower() == "admin"
+        uid: u
+        for uid, u in _USERS.items()
+        if str(u.get("role", "")).strip().lower() == "admin"
     }
 
     _USERS.clear()
     _USERS.update(admin_users)
 
-    # rebuild indexes
     _USERS_BY_EMAIL.clear()
     _USERS_BY_USERNAME.clear()
 
@@ -338,9 +335,9 @@ if user.get("email") not in ALLOWED_RESET_EMAILS:
         email = (u.get("email") or "").strip().lower()
         username = (u.get("username") or "").strip().lower()
         if email:
-            _USERS_BY_EMAIL[email] = u["id"]
+            _USERS_BY_EMAIL[email] = int(u["id"])
         if username:
-            _USERS_BY_USERNAME[username] = u["id"]
+            _USERS_BY_USERNAME[username] = int(u["id"])
 
     _persist_users()
 
