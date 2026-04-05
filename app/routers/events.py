@@ -276,6 +276,22 @@ def _safe_float(value: Any) -> float:
     except Exception:
         return 0.0
 
+def _resolve_booth_price(booth: dict, pricing_categories: list | None) -> float:
+    # 1. Explicit booth price wins
+    price = booth.get("price")
+    if price not in (None, "", 0):
+        return _safe_float(price)
+
+    # 2. Category-based pricing
+    category_id = booth.get("categoryId") or booth.get("category")
+
+    if category_id and isinstance(pricing_categories, list):
+        for c in pricing_categories:
+            if str(c.get("id")) == str(category_id):
+                return _safe_float(c.get("price"))
+
+    # 3. Fallback
+    return _safe_float(price)
 
 def _normalize_public_requirements_payload(payload: Any) -> Dict[str, Any]:
     root = payload if isinstance(payload, dict) else {}
@@ -401,17 +417,16 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
         if isinstance(root_booths, list):
             booths.extend([b for b in root_booths if isinstance(b, dict)])
 
-    prices = []
-    for b in booths:
-        raw_price = b.get("price")
-        if raw_price is None or raw_price == "":
-            continue
-        try:
-            price = float(str(raw_price).replace("$", "").replace(",", "").strip())
-            if price > 0:
-                prices.append(price)
-        except Exception:
-            continue
+   prices = []
+pricing_categories = diagram_doc.get("pricingCategories", [])
+
+for b in booths:
+    try:
+        price = _resolve_booth_price(b, pricing_categories)
+        if price > 0:
+            prices.append(price)
+    except Exception:
+        continue
 
     event_id = int(event.get("id") or 0)
 
