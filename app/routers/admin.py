@@ -77,6 +77,7 @@ def _event_status_label(event: Dict[str, Any]) -> str:
         return "draft"
     return raw or "unknown"
 
+
 def _normalize_id(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -101,6 +102,7 @@ def _event_exists_for_application(app: Dict[str, Any], events: Any) -> bool:
 
     return False
 
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -120,21 +122,21 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
     verifications = store.get("verifications", {})
 
     event_items = [e for e in _as_list(events) if isinstance(e, dict)]
-application_items_all = [a for a in _as_list(applications) if isinstance(a, dict)]
-application_items = [
-    a for a in application_items_all if _event_exists_for_application(a, event_items)
-]
-payment_items = [p for p in _as_list(payments) if isinstance(p, dict)]
-verification_items = [v for v in _as_list(verifications) if isinstance(v, dict)]
+    application_items_all = [a for a in _as_list(applications) if isinstance(a, dict)]
+    application_items = [
+        a for a in application_items_all if _event_exists_for_application(a, event_items)
+    ]
+    payment_items = [p for p in _as_list(payments) if isinstance(p, dict)]
+    verification_items = [v for v in _as_list(verifications) if isinstance(v, dict)]
 
-paid_apps = [a for a in application_items if str(a.get("payment_status") or "").lower() == "paid"]
+    paid_apps = [a for a in application_items if str(a.get("payment_status") or "").lower() == "paid"]
 
-approved_unpaid = [
-    a
-    for a in application_items
-    if str(a.get("status") or "").lower() == "approved"
-    and str(a.get("payment_status") or "").lower() != "paid"
-]
+    approved_unpaid = [
+        a
+        for a in application_items
+        if str(a.get("status") or "").lower() == "approved"
+        and str(a.get("payment_status") or "").lower() != "paid"
+    ]
 
     pending_items = [
         a for a in verification_items if str(a.get("status") or "").lower() == "pending"
