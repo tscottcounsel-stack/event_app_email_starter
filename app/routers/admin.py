@@ -41,6 +41,41 @@ def _as_list(value: Any) -> list:
         return value
     return []
 
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _event_status_label(event: Dict[str, Any]) -> str:
+    raw = str(event.get("status") or "").strip().lower()
+    published = _as_bool(event.get("published"))
+    if published is None:
+        published = _as_bool(event.get("is_published"))
+
+    active = _as_bool(event.get("active"))
+    if active is None:
+        active = _as_bool(event.get("is_active"))
+
+    if raw == "disabled" or active is False:
+        return "disabled"
+    if raw == "draft":
+        return "draft"
+    if raw in {"live", "published"}:
+        return "live"
+    if published is True and active is not False:
+        return "live"
+    if published is False:
+        return "draft"
+    return raw or "unknown"
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -104,7 +139,7 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
         "stats": {
             "total_vendors": len(vendor_items),
             "total_organizers": len(organizer_items),
-            "live_events": len(event_items),
+            "live_events": len([e for e in event_items if _event_status_label(e) == "live"]),
             "applications_submitted": len(application_items),
             "approved_awaiting_payment": len(approved_unpaid),
             "paid_applications": len(paid_apps),
