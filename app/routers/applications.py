@@ -510,8 +510,22 @@ def expire_reservations_if_needed() -> int:
 @router.get("/vendor/applications")
 def list_vendor_applications() -> List[Dict[str, Any]]:
     expire_reservations_if_needed()
-    return [_serialize_application(app) for app in _iter_dict_values(_applications_store())]
 
+    filtered_apps: List[Dict[str, Any]] = []
+
+    for app in _iter_dict_values(_applications_store()):
+        try:
+            event = _get_event_for_app(app)
+
+            if not event:
+                continue
+
+            filtered_apps.append(_serialize_application(app))
+        except Exception as e:
+            print("Skipping bad application record:", e)
+            continue
+
+    return filtered_apps
 
 @router.get("/vendor/applications/{app_id}")
 def get_vendor_application(app_id: str) -> Dict[str, Any]:
