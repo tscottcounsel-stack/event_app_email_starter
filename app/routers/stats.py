@@ -3,20 +3,27 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.permissions import require_feature
 from app.db import get_db
 from app.models.application import Application
 from app.models.event import Event
 from app.models.vendor import Vendor
+from app.routers.auth import get_current_user
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 
 @router.get("")
-def get_stats(db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_stats(
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
+    require_feature(user, "advanced_analytics", "Pro Vendor")
+
     vendor_count = db.query(func.count(Vendor.id)).scalar() or 0
     event_count = db.query(func.count(Event.id)).scalar() or 0
     application_count = db.query(func.count(Application.id)).scalar() or 0

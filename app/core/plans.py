@@ -1,0 +1,32 @@
+PLAN_FEATURES = {
+    "starter": {
+        "verified_badge": False,
+        "featured_listing_boost": False,
+        "advanced_analytics": False,
+        "organizer_messaging": False,
+        "advanced_map_tools": False,
+        "vendor_match_ai": False,
+        "application_automation": False,
+        "max_events": 1,
+    },
+    "pro_vendor": {
+        "verified_badge": True,
+        "featured_listing_boost": True,
+        "advanced_analytics": True,
+        "organizer_messaging": True,
+        "advanced_map_tools": False,
+        "vendor_match_ai": False,
+        "application_automation": False,
+        "max_events": 1,
+    },
+    "enterprise_organizer": {
+        "verified_badge": True,
+        "featured_listing_boost": True,
+        "advanced_analytics": True,
+        "organizer_messaging": True,
+        "advanced_map_tools": True,
+        "vendor_match_ai": True,
+        "application_automation": True,
+        "max_events": 9999,
+    },
+}

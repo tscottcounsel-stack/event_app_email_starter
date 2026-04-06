@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -109,12 +108,20 @@ def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "is_active": bool(user.get("is_active", True)),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
+        "plan": user.get("plan", "starter"),
+        "subscription_status": user.get("subscription_status", "inactive"),
+        "stripe_customer_id": user.get("stripe_customer_id"),
+        "stripe_subscription_id": user.get("stripe_subscription_id"),
+        "current_period_end": user.get("current_period_end"),
+        "cancel_at_period_end": bool(user.get("cancel_at_period_end", False)),
     }
 
 
 def _persist_users() -> None:
     payload = {
-        "users": [dict(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))],
+        "users": [
+            dict(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))
+        ],
         "next_id": _NEXT_ID,
     }
     _atomic_write_json(_AUTH_USERS_PATH, payload)
@@ -147,6 +154,12 @@ def _load_users() -> None:
         normalized["username"] = _norm(normalized.get("username") or normalized.get("email"))
         normalized["role"] = _norm(normalized.get("role") or "vendor")
         normalized["is_active"] = bool(normalized.get("is_active", True))
+        normalized.setdefault("plan", "starter")
+        normalized.setdefault("subscription_status", "inactive")
+        normalized.setdefault("stripe_customer_id", None)
+        normalized.setdefault("stripe_subscription_id", None)
+        normalized.setdefault("current_period_end", None)
+        normalized.setdefault("cancel_at_period_end", False)
         _USERS[uid] = normalized
 
     _rebuild_indexes()
@@ -183,6 +196,7 @@ def _add_user(
     persist: bool = True,
 ) -> Dict[str, Any]:
     now = int(time.time())
+
     u = {
         "id": int(user_id),
         "email": _norm(email),
@@ -193,11 +207,20 @@ def _add_user(
         "is_active": True,
         "created_at": now,
         "updated_at": now,
+        "plan": "starter",
+        "subscription_status": "inactive",
+        "stripe_customer_id": None,
+        "stripe_subscription_id": None,
+        "current_period_end": None,
+        "cancel_at_period_end": False,
     }
+
     _USERS[int(user_id)] = u
     _index_user(u)
+
     if persist:
         _persist_users()
+
     return u
 
 
@@ -246,15 +269,16 @@ _AUD = "event-app-clients"
 _ISS = "event-app"
 
 
-def _create_access_token(*, email: str, role: str, is_active: bool) -> str:
+def _create_access_token(*, email: str, role: str, is_active: bool, plan: str) -> str:
     if jwt is None:
-        return f"devtoken:{email}:{role}:{int(time.time())}"
+        return f"devtoken:{email}:{role}:{plan}:{int(time.time())}"
 
     now = int(time.time())
     payload = {
         "sub": email,
         "email": email,
         "role": role,
+        "plan": plan,
         "is_active": bool(is_active),
         "iat": now,
         "exp": now + _JWT_TTL_SECONDS,
@@ -270,11 +294,17 @@ def _decode_token(token: str) -> Dict[str, Any]:
             parts = token.split(":")
             email = parts[1] if len(parts) > 1 else ""
             role = parts[2] if len(parts) > 2 else "vendor"
-            return {"email": email, "role": role, "is_active": True}
+            plan = parts[3] if len(parts) > 3 else "starter"
+            return {"email": email, "role": role, "plan": plan, "is_active": True}
         raise HTTPException(status_code=401, detail="Invalid token")
 
     try:
-        return jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALG], audience=_AUD)
+        return jwt.decode(
+            token,
+            _JWT_SECRET,
+            algorithms=[_JWT_ALG],
+            audience=_AUD,
+        )
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -408,7 +438,9 @@ def _save_upload(file: UploadFile, prefix: str) -> tuple[str, str, str]:
 
 
 def list_all_users() -> List[Dict[str, Any]]:
-    return [_serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))]
+    return [
+        _serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))
+    ]
 
 
 def admin_create_user(
@@ -488,9 +520,8 @@ def get_current_user(
         )
 
     user_id = _USERS_BY_EMAIL.get(email)
-    full_name = None
-    if user_id is not None:
-        full_name = _USERS.get(int(user_id), {}).get("full_name")
+    user_data = _USERS.get(int(user_id)) if user_id is not None else {}
+    full_name = user_data.get("full_name") if user_data else None
 
     return {
         "id": int(user_id) if user_id is not None else None,
@@ -498,6 +529,12 @@ def get_current_user(
         "role": role,
         "is_active": is_active,
         "full_name": full_name,
+        "plan": user_data.get("plan", payload.get("plan", "starter")),
+        "subscription_status": user_data.get("subscription_status", "inactive"),
+        "stripe_customer_id": user_data.get("stripe_customer_id"),
+        "stripe_subscription_id": user_data.get("stripe_subscription_id"),
+        "current_period_end": user_data.get("current_period_end"),
+        "cancel_at_period_end": user_data.get("cancel_at_period_end", False),
     }
 
 
@@ -549,10 +586,15 @@ def register(payload: RegisterRequest) -> AuthResponse:
         full_name=payload.full_name,
     )
     token = _create_access_token(
-        email=str(user["email"]), role=str(user["role"]), is_active=True
+        email=str(user["email"]),
+        role=str(user["role"]),
+        is_active=True,
+        plan=str(user.get("plan", "starter")),
     )
     return AuthResponse(
-        accessToken=token, role=str(user["role"]), email=str(user["email"])
+        accessToken=token,
+        role=str(user["role"]),
+        email=str(user["email"]),
     )
 
 
@@ -589,10 +631,15 @@ def login(payload: LoginRequest) -> AuthResponse:
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Inactive account")
     token = _create_access_token(
-        email=str(user["email"]), role=str(user["role"]), is_active=True
+        email=str(user["email"]),
+        role=str(user["role"]),
+        is_active=True,
+        plan=str(user.get("plan", "starter")),
     )
     return AuthResponse(
-        accessToken=token, role=str(user["role"]), email=str(user["email"])
+        accessToken=token,
+        role=str(user["role"]),
+        email=str(user["email"]),
     )
 
 
@@ -600,7 +647,8 @@ def login(payload: LoginRequest) -> AuthResponse:
 def refresh(user: Dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
     email = str(user.get("email") or "")
     role = str(user.get("role") or "vendor")
-    token = _create_access_token(email=email, role=role, is_active=True)
+    plan = str(user.get("plan") or "starter")
+    token = _create_access_token(email=email, role=role, is_active=True, plan=plan)
     return AuthResponse(accessToken=token, role=role, email=email)
 
 

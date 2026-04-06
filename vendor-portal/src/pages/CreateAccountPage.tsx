@@ -1,6 +1,7 @@
 // src/pages/CreateAccountPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { clearSession, readSession } from "../auth/authStorage";
 
 type Role = "vendor" | "organizer";
 
@@ -99,6 +100,9 @@ const ORGANIZER_AGREEMENTS: AgreementItem[] = [
 ];
 
 function TopBar() {
+  const navigate = useNavigate();
+  const session = readSession();
+
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
@@ -107,12 +111,34 @@ function TopBar() {
           <span className="text-lg font-black text-slate-900">VendorConnect</span>
         </Link>
 
-        <Link
-          to="/login"
-          className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
-        >
-          Sign in
-        </Link>
+        {session?.accessToken ? (
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearSession();
+                navigate('/login');
+              }}
+              className="rounded-full border border-red-200 bg-white px-5 py-2 text-sm font-extrabold text-red-700 hover:bg-red-50"
+            >
+              Logout
+            </button>
+          </div>
+        ) : (
+          <Link
+            to="/login"
+            className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-extrabold text-slate-700 hover:bg-slate-50"
+          >
+            Sign in
+          </Link>
+        )}
       </div>
     </header>
   );
@@ -202,12 +228,12 @@ function AgreementRow({
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex items-start gap-4">
+      <div className="flex items-center gap-4">
         <button
           type="button"
           onClick={onToggle}
           className={[
-            "mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 transition",
+            "grid h-7 w-7 shrink-0 place-items-center rounded-full border-2 transition",
             checked ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-300 bg-white",
           ].join(" ")}
           aria-label={checked ? "Checked" : "Unchecked"}
@@ -257,7 +283,6 @@ export default function CreateAccountPage() {
       setStep(2);
       setCheckedIds([]);
       setError(null);
-      setEmail(roleFromUrl === "vendor" ? "vendor@example.com" : "you@example.com");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roleFromUrl]);
@@ -268,10 +293,10 @@ export default function CreateAccountPage() {
   const total = agreements.length;
   const pct = total ? Math.round((completed / total) * 100) : 0;
 
-  const [fullName, setFullName] = useState("John Doe");
-  const [email, setEmail] = useState(role === "vendor" ? "vendor@example.com" : "you@example.com");
-  const [password, setPassword] = useState("password");
-  const [confirmPassword, setConfirmPassword] = useState("password");
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -280,7 +305,6 @@ export default function CreateAccountPage() {
     setRole(nextRole);
     setCheckedIds([]);
     setError(null);
-    setEmail(nextRole === "vendor" ? "vendor@example.com" : "you@example.com");
   }
 
   function toggleAgreement(id: string) {
@@ -556,6 +580,7 @@ export default function CreateAccountPage() {
                           name="fullName"
                           value={fullName}
                           onChange={(e) => setFullName(e.target.value)}
+                          placeholder="Your full name"
                           className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm font-semibold text-slate-900 outline-none focus:border-indigo-400"
                         />
                       </div>
@@ -570,6 +595,8 @@ export default function CreateAccountPage() {
                         name="email"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        autoComplete="email"
                         className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm font-semibold text-slate-900 outline-none focus:border-indigo-400"
                       />
                     </div>
@@ -585,6 +612,8 @@ export default function CreateAccountPage() {
                           type="password"
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
+                          placeholder="Create a password"
+                          autoComplete="new-password"
                           className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm font-semibold text-slate-900 outline-none focus:border-indigo-400"
                         />
                       </div>
@@ -599,6 +628,8 @@ export default function CreateAccountPage() {
                           type="password"
                           value={confirmPassword}
                           onChange={(e) => setConfirmPassword(e.target.value)}
+                          placeholder="Re-enter your password"
+                          autoComplete="new-password"
                           className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm font-semibold text-slate-900 outline-none focus:border-indigo-400"
                         />
                       </div>

@@ -998,7 +998,7 @@ useEffect(() => {
           })
         );
 
-        setResize({ ...resize, cx: e.clientX, cy: e.clientY });
+        setResize({ ...resize, sw: nw, sh: nh, cx: e.clientX, cy: e.clientY });
         markDirty();
       }
     };
@@ -1029,6 +1029,7 @@ useEffect(() => {
       window.alert("Published (Locked) — unlock layout to resize items.");
       return;
     }
+    e.preventDefault();
     e.stopPropagation();
 
     if (kind === "booth") {
@@ -1828,16 +1829,19 @@ const updated = await vendorUpdateApplication({
 
                   {selected && !pickerMode && !vendorMode ? (
                     <div
+                      onClick={(e) => e.stopPropagation()}
                       onMouseDown={(e) => beginResize("element", el.id, e)}
                       style={{
                         position: "absolute",
-                        right: 8,
-                        bottom: 8,
-                        width: 14,
-                        height: 14,
+                        right: 6,
+                        bottom: 6,
+                        width: 18,
+                        height: 18,
                         borderRadius: 6,
                         background: "#0f172a",
                         cursor: "nwse-resize",
+                        zIndex: 3,
+                        boxShadow: "0 1px 3px rgba(15,23,42,0.3)",
                       }}
                     />
                   ) : null}
@@ -2027,16 +2031,19 @@ const updated = await vendorUpdateApplication({
 
                   {selected && !pickerMode && !vendorMode ? (
                     <div
+                      onClick={(e) => e.stopPropagation()}
                       onMouseDown={(e) => beginResize("booth", (b as any).id, e)}
                       style={{
                         position: "absolute",
-                        right: 8,
-                        bottom: 8,
-                        width: 14,
-                        height: 14,
+                        right: 6,
+                        bottom: 6,
+                        width: 18,
+                        height: 18,
                         borderRadius: 6,
                         background: "#0f172a",
                         cursor: "nwse-resize",
+                        zIndex: 3,
+                        boxShadow: "0 1px 3px rgba(15,23,42,0.3)",
                       }}
                     />
                   ) : null}

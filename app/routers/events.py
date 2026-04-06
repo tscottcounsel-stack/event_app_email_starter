@@ -17,6 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.permissions import require_event_limit
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
 from app.store import (
@@ -482,6 +483,9 @@ def organizer_create_event(payload: EventCreate, user: dict = Depends(get_curren
     organizer_email = _norm_email(user.get("email"))
     if not organizer_email:
         raise HTTPException(status_code=401, detail="Authenticated user email missing")
+
+    existing_event_count = len(_owned_events_for_user(user))
+    require_event_limit(user, existing_event_count)
 
     eid = next_event_id()
     organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
