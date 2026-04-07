@@ -183,6 +183,15 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
     try:
         metadata = _extract_metadata(session)
 
+        client_reference_id = getattr(session, "client_reference_id", None)
+        if client_reference_id is None and isinstance(session, dict):
+            client_reference_id = session.get("client_reference_id")
+
+        if client_reference_id:
+            user = _lookup_user(user_id=client_reference_id)
+            if user:
+                return user
+
         user_id = metadata.get("user_id")
         if user_id:
             user = _lookup_user(user_id=user_id)
@@ -194,16 +203,32 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             email = session.get("customer_email")
 
         if not email:
+            customer_details = getattr(session, "customer_details", None)
+            if customer_details is None and isinstance(session, dict):
+                customer_details = session.get("customer_details") or {}
+
+            if isinstance(customer_details, dict):
+                email = customer_details.get("email")
+            else:
+                email = getattr(customer_details, "email", None)
+
+        if not email:
             email = metadata.get("email")
 
         if email:
-            return _lookup_user(email=email)
+            user = _lookup_user(email=email)
+            if user:
+                return user
+
+        print("⚠️ Checkout session lookup failed")
+        print("   client_reference_id =", client_reference_id)
+        print("   metadata =", metadata)
+        print("   customer_email =", email)
 
         return None
     except Exception as exc:
         print("🔥 USER LOOKUP ERROR:", str(exc))
         return None
-
 
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
