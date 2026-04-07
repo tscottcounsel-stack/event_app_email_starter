@@ -386,7 +386,165 @@ async def stripe_webhook(request: Request):
 
     elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         try:
-            success = _sync_from_subscription_object(data_object)
+            success = _sync_fr# app/routers/billing.py
+
+import os
+import stripe
+from fastapi import APIRouter, Request, HTTPException
+
+router = APIRouter()
+
+# ... keep your existing Stripe setup, helpers, and router config ...
+
+def _price_id_to_plan(price_id: str | None) -> str | None:
+    if not price_id:
+        return None
+
+    price_map = {
+        os.getenv("STRIPE_PRICE_STARTER", ""): "starter",
+        os.getenv("STRIPE_PRICE_PRO_ORGANIZER", ""): "pro_organizer",
+        os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER", ""): "enterprise_organizer",
+        os.getenv("STRIPE_PRICE_PRO_VENDOR", ""): "pro_vendor",
+        os.getenv("STRIPE_PRICE_ENTERPRISE_VENDOR", ""): "enterprise_vendor",
+    }
+
+    return price_map.get(price_id)
+
+
+def _apply_subscription_plan_to_user(user: dict, subscription_obj) -> None:
+    """
+    Canonical subscription -> price_id -> plan sync.
+    Accepts either a Stripe Subscription object or dict-like payload.
+    """
+    if not user or not subscription_obj:
+        return
+
+    items = subscription_obj.get("items", {}).get("data", [])
+    if not items:
+        print("🔥 SUB LOOKUP ERROR: subscription has no items.data")
+        return
+
+    first_item = items[0] or {}
+    price = first_item.get("price") or {}
+    price_id = price.get("id")
+
+    if not price_id:
+        print("🔥 SUB LOOKUP ERROR: missing subscription item price.id")
+        return
+
+    plan = _price_id_to_plan(price_id)
+
+    if not plan:
+        print(f"🔥 SUB LOOKUP ERROR: unmapped price_id={price_id}")
+        return
+
+    sub_status = subscription_obj.get("status") or "active"
+
+    user["plan"] = plan
+    user["stripe_subscription_id"] = subscription_obj.get("id") or user.get("stripe_subscription_id")
+    user["subscription_status"] = "active" if sub_status in {"active", "trialing"} else sub_status
+
+    _save_user_updates(user)
+
+    print(
+        f"✅ SUB PLAN SYNC: email={user.get('email')} "
+        f"price_id={price_id} plan={plan} status={user['subscription_status']}"
+    )
+
+
+@router.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except Exception as e:
+        print("🔥 WEBHOOK VERIFY ERROR:", str(e))
+        raise HTTPException(status_code=400, detail="Invalid webhook")
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    try:
+        # ------------------------------------------------------------------
+        # 1) checkout.session.completed
+        # ------------------------------------------------------------------
+        if event_type == "checkout.session.completed":
+            customer_id = data.get("customer")
+            subscription_id = data.get("subscription")
+
+            # Keep your existing user lookup logic if it already works.
+            # Prefer customer_id if that is what already matches correctly in your app.
+            user = None
+
+            if customer_id:
+                user = _find_user_by_stripe_customer_id(customer_id)
+
+            if not user:
+                # Optional fallback if you already store email / metadata
+                session_email = data.get("customer_details", {}).get("email") or data.get("customer_email")
+                if session_email:
+                    user = _find_user_by_email(session_email)
+
+            if user and customer_id and not user.get("stripe_customer_id"):
+                user["stripe_customer_id"] = customer_id
+                _save_user_updates(user)
+
+            if user and subscription_id:
+                user["stripe_subscription_id"] = subscription_id
+                _save_user_updates(user)
+
+            # CORE FIX: retrieve subscription, resolve price_id, map plan, save active state
+            if user and subscription_id:
+                try:
+                    subscription = stripe.Subscription.retrieve(subscription_id)
+                    print("🔎 CHECKOUT SUBSCRIPTION:", subscription)
+                    _apply_subscription_plan_to_user(user, subscription)
+                except Exception as e:
+                    print("🔥 SUB LOOKUP ERROR:", str(e))
+
+        # ------------------------------------------------------------------
+        # 2) customer.subscription.created / updated
+        # Stripe recommends using customer.subscription events to track
+        # subscription lifecycle changes.
+        # ------------------------------------------------------------------
+        elif event_type in {
+            "customer.subscription.created",
+            "customer.subscription.updated",
+        }:
+            subscription = data
+            customer_id = subscription.get("customer")
+
+            user = None
+            if customer_id:
+                user = _find_user_by_stripe_customer_id(customer_id)
+
+            if user:
+                _apply_subscription_plan_to_user(user, subscription)
+
+        # ------------------------------------------------------------------
+        # 3) customer.subscription.deleted
+        # ------------------------------------------------------------------
+        elif event_type == "customer.subscription.deleted":
+            subscription = data
+            customer_id = subscription.get("customer")
+
+            user = None
+            if customer_id:
+                user = _find_user_by_stripe_customer_id(customer_id)
+
+            if user:
+                user["subscription_status"] = "canceled"
+                # Keep existing plan or downgrade here if that is your intended logic
+                _save_user_updates(user)
+                print(f"✅ SUB CANCELED: email={user.get('email')}")
+
+    except Exception as e:
+        print("🔥 WEBHOOK HANDLER ERROR:", str(e))
+
+    return {"received": True}om_subscription_object(data_object)
             if not success:
                 print("⚠️ Subscription sync failed (no user match)")
         except Exception as exc:
