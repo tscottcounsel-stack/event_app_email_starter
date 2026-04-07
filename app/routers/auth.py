@@ -538,6 +538,11 @@ def get_current_user(
     }
 
 
+@router.get("/me")
+def read_current_user(user: Dict[str, Any] = Depends(get_current_user)):
+    return {"user": user}
+
+
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     email: Optional[str] = None
