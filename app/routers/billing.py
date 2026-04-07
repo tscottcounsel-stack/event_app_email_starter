@@ -417,13 +417,26 @@ async def stripe_webhook(request: Request):
                 )
                 _save_user_updates(user)
 
-                metadata = _extract_metadata(data_object)
-                plan = str(metadata.get("plan") or "").strip().lower()
+               # 🔥 FORCE PLAN FROM SUBSCRIPTION (RELIABLE)
+try:
+    if subscription_id:
+        sub = stripe.Subscription.retrieve(subscription_id)
 
-                if plan:
-                    user["plan"] = plan
-                    user["subscription_status"] = "active"
-                    _save_user_updates(user)
+        price_id = None
+        try:
+            price_id = sub["items"]["data"][0]["price"]["id"]
+        except Exception:
+            pass
+
+        plan = _price_id_to_plan(price_id)
+
+        if user and plan:
+            user["plan"] = plan
+            user["subscription_status"] = "active"
+            _save_user_updates(user)
+
+except Exception as e:
+    print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(e))
             else:
                 print("⚠️ No user found for checkout session")
         except Exception as exc:
