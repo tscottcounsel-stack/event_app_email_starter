@@ -102,7 +102,12 @@ def _save_user_updates(user: Dict[str, Any]) -> None:
     _persist_users()
 
 
-def _set_customer_fields(user: Dict[str, Any], *, customer_id: Optional[str], subscription_id: Optional[str]) -> None:
+def _set_customer_fields(
+    user: Dict[str, Any],
+    *,
+    customer_id: Optional[str],
+    subscription_id: Optional[str],
+) -> None:
     if customer_id:
         user["stripe_customer_id"] = customer_id
     if subscription_id:
@@ -341,16 +346,31 @@ async def stripe_webhook(request: Request):
     data_object = ((event.get("data") or {}).get("object") or {})
 
     if event_type == "checkout.session.completed":
-        user = _find_user_from_checkout_session(data_object)
-        if user is not None:
-            _set_customer_fields(
-                user,
-                customer_id=str(data_object.get("customer") or "").strip() or None,
-                subscription_id=str(data_object.get("subscription") or "").strip() or None,
-            )
-            _save_user_updates(user)
+        try:
+            user = _find_user_from_checkout_session(data_object)
 
-    elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
-        _sync_from_subscription_object(data_object)
+            if user:
+                _set_customer_fields(
+                    user,
+                    customer_id=str(data_object.get("customer") or "").strip() or None,
+                    subscription_id=str(data_object.get("subscription") or "").strip() or None,
+                )
+                _save_user_updates(user)
+            else:
+                print("⚠️ No user found for checkout session")
+        except Exception as exc:
+            print("🔥 WEBHOOK ERROR (checkout.session.completed):", str(exc))
+
+    elif event_type in {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    }:
+        try:
+            success = _sync_from_subscription_object(data_object)
+            if not success:
+                print("⚠️ Subscription sync failed (no user match)")
+        except Exception as exc:
+            print("🔥 WEBHOOK ERROR (subscription):", str(exc))
 
     return {"received": True, "event_type": event_type}
