@@ -405,11 +405,9 @@ async def stripe_webhook(request: Request):
                         subscription = stripe_sdk.Subscription.retrieve(subscription_id)
                         price_id = _extract_subscription_price_id(subscription)
                         plan = _price_id_to_plan(price_id)
+                        print("🔎 MAPPED PLAN:", plan)
 
-                        print("🔎 SUB DATA:", subscription)
-                        print("🔎 PRICE ID:", price_id)
-                        print("🔎 EXPECTED PRO:", os.getenv("STRIPE_PRICE_PRO_VENDOR"))
-                        print("🔎 EXPECTED ENT:", os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER"))
+                        os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER"))
 
                         if plan and plan != "starter":
                             user["plan"] = plan
