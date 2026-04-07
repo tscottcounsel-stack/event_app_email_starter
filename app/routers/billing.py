@@ -342,18 +342,35 @@ async def stripe_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid Stripe webhook: {exc}")
 
-    event_type = str(event.get("type") or "")
-    data_object = ((event.get("data") or {}).get("object") or {})
+    event_type = str(getattr(event, "type", "") or "")
+
+    event_data = getattr(event, "data", None)
+    if event_data is None and isinstance(event, dict):
+        event_data = event.get("data")
+
+    data_object = getattr(event_data, "object", None)
+    if data_object is None and isinstance(event_data, dict):
+        data_object = event_data.get("object")
+
+    if data_object is None:
+        data_object = {}
 
     if event_type == "checkout.session.completed":
         try:
             user = _find_user_from_checkout_session(data_object)
 
+            customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
+            subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
+
+            if isinstance(data_object, dict):
+                customer_id = str(data_object.get("customer") or "").strip() or customer_id
+                subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
+
             if user:
                 _set_customer_fields(
                     user,
-                    customer_id=str(data_object.get("customer") or "").strip() or None,
-                    subscription_id=str(data_object.get("subscription") or "").strip() or None,
+                    customer_id=customer_id,
+                    subscription_id=subscription_id,
                 )
                 _save_user_updates(user)
             else:
