@@ -20,7 +20,6 @@ router = APIRouter(prefix="/billing", tags=["Billing"])
 
 class CheckoutSessionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
     plan: str
     success_url: str
     cancel_url: str
@@ -28,16 +27,12 @@ class CheckoutSessionRequest(BaseModel):
 
 class PortalSessionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
     return_url: str
 
 
 def _require_stripe() -> Any:
     if stripe is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Stripe SDK missing. Install stripe.",
-        )
+        raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
 
     secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
@@ -55,10 +50,7 @@ def _plan_to_price_id(plan: str) -> str:
     }
     price_id = mapping.get(normalized, "")
     if not price_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No Stripe price configured for plan '{normalized}'",
-        )
+        raise HTTPException(status_code=400, detail=f"No Stripe price configured for plan '{normalized}'")
     return price_id
 
 
@@ -80,11 +72,7 @@ def _to_iso(ts: Any) -> Optional[str]:
         return None
 
 
-def _lookup_user(
-    *,
-    user_id: Any = None,
-    email: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if user_id not in (None, ""):
         try:
             found = _USERS.get(int(user_id))
@@ -109,12 +97,7 @@ def _save_user_updates(user: Dict[str, Any]) -> None:
     _persist_users()
 
 
-def _set_customer_fields(
-    user: Dict[str, Any],
-    *,
-    customer_id: Optional[str],
-    subscription_id: Optional[str],
-) -> None:
+def _set_customer_fields(user: Dict[str, Any], *, customer_id: Optional[str], subscription_id: Optional[str]) -> None:
     if customer_id:
         user["stripe_customer_id"] = customer_id
     if subscription_id:
@@ -226,17 +209,11 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     cancel_at_period_end = bool(getattr(subscription, "cancel_at_period_end", False))
     current_period_end = getattr(subscription, "current_period_end", None)
 
-    user = _lookup_user(
-        user_id=metadata.get("user_id"),
-        email=metadata.get("email"),
-    )
+    user = _lookup_user(user_id=metadata.get("user_id"), email=metadata.get("email"))
 
     if user is None and customer_id:
         for candidate in _USERS.values():
-            if (
-                isinstance(candidate, dict)
-                and str(candidate.get("stripe_customer_id") or "").strip() == customer_id
-            ):
+            if isinstance(candidate, dict) and str(candidate.get("stripe_customer_id") or "").strip() == customer_id:
                 user = candidate
                 break
 
@@ -259,10 +236,7 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
 
 
 @router.post("/create-checkout-session")
-def create_checkout_session(
-    payload: CheckoutSessionRequest,
-    user: dict = Depends(get_current_user),
-):
+def create_checkout_session(payload: CheckoutSessionRequest, user: dict = Depends(get_current_user)):
     stripe_sdk = _require_stripe()
 
     plan = str(payload.plan or "").strip().lower()
@@ -272,16 +246,10 @@ def create_checkout_session(
     price_id = _plan_to_price_id(plan)
 
     if plan == "pro_vendor" and str(user.get("role") or "").strip().lower() != "vendor":
-        raise HTTPException(
-            status_code=403,
-            detail="Pro Vendor checkout is only for vendor accounts",
-        )
+        raise HTTPException(status_code=403, detail="Pro Vendor checkout is only for vendor accounts")
 
     if plan == "enterprise_organizer" and str(user.get("role") or "").strip().lower() != "organizer":
-        raise HTTPException(
-            status_code=403,
-            detail="Enterprise Organizer checkout is only for organizer accounts",
-        )
+        raise HTTPException(status_code=403, detail="Enterprise Organizer checkout is only for organizer accounts")
 
     lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
     if lookup is None:
@@ -319,23 +287,13 @@ def create_checkout_session(
     try:
         session = stripe_sdk.checkout.Session.create(**session_kwargs)
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Stripe checkout session failed: {exc}",
-        )
+        raise HTTPException(status_code=400, detail=f"Stripe checkout session failed: {exc}")
 
-    return {
-        "ok": True,
-        "url": session.url,
-        "session_id": session.id,
-    }
+    return {"ok": True, "url": session.url, "session_id": session.id}
 
 
 @router.post("/create-portal-session")
-def create_portal_session(
-    payload: PortalSessionRequest,
-    user: dict = Depends(get_current_user),
-):
+def create_portal_session(payload: PortalSessionRequest, user: dict = Depends(get_current_user)):
     stripe_sdk = _require_stripe()
 
     lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
@@ -344,26 +302,14 @@ def create_portal_session(
 
     customer_id = str(lookup.get("stripe_customer_id") or "").strip()
     if not customer_id:
-        raise HTTPException(
-            status_code=400,
-            detail="No Stripe customer found for this account",
-        )
+        raise HTTPException(status_code=400, detail="No Stripe customer found for this account")
 
     try:
-        session = stripe_sdk.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=payload.return_url,
-        )
+        session = stripe_sdk.billing_portal.Session.create(customer=customer_id, return_url=payload.return_url)
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Stripe billing portal failed: {exc}",
-        )
+        raise HTTPException(status_code=400, detail=f"Stripe billing portal failed: {exc}")
 
-    return {
-        "ok": True,
-        "url": session.url,
-    }
+    return {"ok": True, "url": session.url}
 
 
 @router.post("/webhook")
@@ -410,43 +356,35 @@ async def stripe_webhook(request: Request):
                 subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
 
             if user:
-                _set_customer_fields(
-                    user,
-                    customer_id=customer_id,
-                    subscription_id=subscription_id,
-                )
+                _set_customer_fields(user, customer_id=customer_id, subscription_id=subscription_id)
                 _save_user_updates(user)
 
-               # 🔥 FORCE PLAN FROM SUBSCRIPTION (RELIABLE)
-try:
-    if subscription_id:
-        sub = stripe.Subscription.retrieve(subscription_id)
+                if subscription_id:
+                    try:
+                        subscription = stripe_sdk.Subscription.retrieve(subscription_id)
+                        price_id = _extract_subscription_price_id(subscription)
+                        plan = _price_id_to_plan(price_id)
 
-        price_id = None
-        try:
-            price_id = sub["items"]["data"][0]["price"]["id"]
-        except Exception:
-            pass
+                        if plan and plan != "starter":
+                            user["plan"] = plan
+                            user["subscription_status"] = "active"
+                            _save_user_updates(user)
+                    except Exception as exc:
+                        print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
+                else:
+                    metadata = _extract_metadata(data_object)
+                    plan = str(metadata.get("plan") or "").strip().lower()
 
-        plan = _price_id_to_plan(price_id)
-
-        if user and plan:
-            user["plan"] = plan
-            user["subscription_status"] = "active"
-            _save_user_updates(user)
-
-except Exception as e:
-    print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(e))
+                    if plan:
+                        user["plan"] = plan
+                        user["subscription_status"] = "active"
+                        _save_user_updates(user)
             else:
                 print("⚠️ No user found for checkout session")
         except Exception as exc:
             print("🔥 WEBHOOK ERROR (checkout.session.completed):", str(exc))
 
-    elif event_type in {
-        "customer.subscription.created",
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    }:
+    elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         try:
             success = _sync_from_subscription_object(data_object)
             if not success:
