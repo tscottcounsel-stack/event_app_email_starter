@@ -375,11 +375,16 @@ async def stripe_webhook(request: Request):
                 _set_customer_fields(user, customer_id=customer_id, subscription_id=subscription_id)
                 _save_user_updates(user)
 
-                if subscription_id:
+                                if subscription_id:
                     try:
                         subscription = stripe_sdk.Subscription.retrieve(subscription_id)
                         price_id = _extract_subscription_price_id(subscription)
                         plan = _price_id_to_plan(price_id)
+
+                        print("🔎 SUB DATA:", subscription)
+                        print("🔎 PRICE ID:", price_id)
+                        print("🔎 EXPECTED PRO:", os.getenv("STRIPE_PRICE_PRO_VENDOR"))
+                        print("🔎 EXPECTED ENT:", os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER"))
 
                         if plan and plan != "starter":
                             user["plan"] = plan
