@@ -996,3 +996,7 @@ def review_verification(
 
     _save_verification_record(record)
     return {"ok": True, "verification": record}
+
+@router.get("/debug/users")
+def debug_users():
+    return _USERS
