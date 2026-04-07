@@ -224,11 +224,11 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
         print("   client_reference_id =", client_reference_id)
         print("   metadata =", metadata)
         print("   customer_email =", email)
-
         return None
     except Exception as exc:
         print("🔥 USER LOOKUP ERROR:", str(exc))
         return None
+
 
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
@@ -405,9 +405,6 @@ async def stripe_webhook(request: Request):
                         subscription = stripe_sdk.Subscription.retrieve(subscription_id)
                         price_id = _extract_subscription_price_id(subscription)
                         plan = _price_id_to_plan(price_id)
-                        print("🔎 MAPPED PLAN:", plan)
-
-                        os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER"))
 
                         if plan and plan != "starter":
                             user["plan"] = plan
