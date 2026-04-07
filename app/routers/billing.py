@@ -375,7 +375,7 @@ async def stripe_webhook(request: Request):
                 _set_customer_fields(user, customer_id=customer_id, subscription_id=subscription_id)
                 _save_user_updates(user)
 
-                                if subscription_id:
+                if subscription_id:
                     try:
                         subscription = stripe_sdk.Subscription.retrieve(subscription_id)
                         price_id = _extract_subscription_price_id(subscription)
