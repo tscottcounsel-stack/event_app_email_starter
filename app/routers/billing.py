@@ -55,7 +55,10 @@ def _plan_to_price_id(plan: str) -> str:
     }
     price_id = mapping.get(normalized, "")
     if not price_id:
-        raise HTTPException(status_code=400, detail=f"No Stripe price configured for plan '{normalized}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No Stripe price configured for plan '{normalized}'",
+        )
     return price_id
 
 
@@ -77,7 +80,11 @@ def _to_iso(ts: Any) -> Optional[str]:
         return None
 
 
-def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _lookup_user(
+    *,
+    user_id: Any = None,
+    email: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     if user_id not in (None, ""):
         try:
             found = _USERS.get(int(user_id))
@@ -88,9 +95,9 @@ def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optiona
 
     normalized_email = str(email or "").strip().lower()
     if normalized_email:
-        user_id = _USERS_BY_EMAIL.get(normalized_email)
-        if user_id is not None:
-            found = _USERS.get(int(user_id))
+        matched_user_id = _USERS_BY_EMAIL.get(normalized_email)
+        if matched_user_id is not None:
+            found = _USERS.get(int(matched_user_id))
             if isinstance(found, dict):
                 return found
 
@@ -170,30 +177,48 @@ def _extract_subscription_price_id(subscription: Any) -> Optional[str]:
         return None
 
 
+def _extract_metadata(obj: Any) -> Dict[str, Any]:
+    metadata = getattr(obj, "metadata", None)
+    if metadata is None and isinstance(obj, dict):
+        metadata = obj.get("metadata")
+
+    if isinstance(metadata, dict):
+        return metadata
+
+    try:
+        return dict(metadata or {})
+    except Exception:
+        return {}
+
+
 def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
-    metadata = getattr(session, "metadata", None) or {}
-    if not isinstance(metadata, dict):
-        try:
-            metadata = dict(metadata)
-        except Exception:
-            metadata = {}
+    try:
+        metadata = _extract_metadata(session)
 
-    user_id = metadata.get("user_id")
-    email = metadata.get("email") or getattr(session, "customer_details", None)
-    if not isinstance(email, str):
-        email = metadata.get("email")
+        user_id = metadata.get("user_id")
+        if user_id:
+            user = _lookup_user(user_id=user_id)
+            if user:
+                return user
 
-    session_email = getattr(session, "customer_email", None) or email
-    return _lookup_user(user_id=user_id, email=session_email)
+        email = getattr(session, "customer_email", None)
+        if not email and isinstance(session, dict):
+            email = session.get("customer_email")
+
+        if not email:
+            email = metadata.get("email")
+
+        if email:
+            return _lookup_user(email=email)
+
+        return None
+    except Exception as exc:
+        print("🔥 USER LOOKUP ERROR:", str(exc))
+        return None
 
 
 def _sync_from_subscription_object(subscription: Any) -> bool:
-    metadata = getattr(subscription, "metadata", None) or {}
-    if not isinstance(metadata, dict):
-        try:
-            metadata = dict(metadata)
-        except Exception:
-            metadata = {}
+    metadata = _extract_metadata(subscription)
 
     customer_id = str(getattr(subscription, "customer", None) or metadata.get("customer") or "").strip() or None
     subscription_id = str(getattr(subscription, "id", None) or "").strip() or None
@@ -208,7 +233,10 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
 
     if user is None and customer_id:
         for candidate in _USERS.values():
-            if isinstance(candidate, dict) and str(candidate.get("stripe_customer_id") or "").strip() == customer_id:
+            if (
+                isinstance(candidate, dict)
+                and str(candidate.get("stripe_customer_id") or "").strip() == customer_id
+            ):
                 user = candidate
                 break
 
@@ -244,10 +272,16 @@ def create_checkout_session(
     price_id = _plan_to_price_id(plan)
 
     if plan == "pro_vendor" and str(user.get("role") or "").strip().lower() != "vendor":
-        raise HTTPException(status_code=403, detail="Pro Vendor checkout is only for vendor accounts")
+        raise HTTPException(
+            status_code=403,
+            detail="Pro Vendor checkout is only for vendor accounts",
+        )
 
     if plan == "enterprise_organizer" and str(user.get("role") or "").strip().lower() != "organizer":
-        raise HTTPException(status_code=403, detail="Enterprise Organizer checkout is only for organizer accounts")
+        raise HTTPException(
+            status_code=403,
+            detail="Enterprise Organizer checkout is only for organizer accounts",
+        )
 
     lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
     if lookup is None:
@@ -285,7 +319,10 @@ def create_checkout_session(
     try:
         session = stripe_sdk.checkout.Session.create(**session_kwargs)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe checkout session failed: {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stripe checkout session failed: {exc}",
+        )
 
     return {
         "ok": True,
@@ -307,7 +344,10 @@ def create_portal_session(
 
     customer_id = str(lookup.get("stripe_customer_id") or "").strip()
     if not customer_id:
-        raise HTTPException(status_code=400, detail="No Stripe customer found for this account")
+        raise HTTPException(
+            status_code=400,
+            detail="No Stripe customer found for this account",
+        )
 
     try:
         session = stripe_sdk.billing_portal.Session.create(
@@ -315,7 +355,10 @@ def create_portal_session(
             return_url=payload.return_url,
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe billing portal failed: {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stripe billing portal failed: {exc}",
+        )
 
     return {
         "ok": True,
@@ -373,6 +416,14 @@ async def stripe_webhook(request: Request):
                     subscription_id=subscription_id,
                 )
                 _save_user_updates(user)
+
+                metadata = _extract_metadata(data_object)
+                plan = str(metadata.get("plan") or "").strip().lower()
+
+                if plan:
+                    user["plan"] = plan
+                    user["subscription_status"] = "active"
+                    _save_user_updates(user)
             else:
                 print("⚠️ No user found for checkout session")
         except Exception as exc:
