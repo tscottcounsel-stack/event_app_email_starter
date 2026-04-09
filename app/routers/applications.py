@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -6,10 +5,27 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(tags=["applications"])
+
+
+# ---------------------------------------------------------------------------
+# Auth import / compatibility fallback
+# ---------------------------------------------------------------------------
+
+try:
+    from app.auth import get_current_user  # type: ignore
+except Exception:
+    try:
+        from app.routes.auth import get_current_user  # type: ignore
+    except Exception:
+        def get_current_user() -> Dict[str, Any]:
+            raise HTTPException(
+                status_code=500,
+                detail="get_current_user import not configured for applications router",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -76,9 +92,56 @@ def _as_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalize_email(value: Any) -> str:
+    return _as_str(value).lower()
+
+
 def _normalize_id(value: Any) -> Optional[str]:
     text = _as_str(value)
     return text or None
+
+
+def _user_vendor_email(user: Any) -> str:
+    if not isinstance(user, dict):
+        return ""
+    return _normalize_email(
+        user.get("email")
+        or user.get("vendor_email")
+        or user.get("username")
+    )
+
+
+def _user_vendor_id(user: Any) -> Optional[str]:
+    if not isinstance(user, dict):
+        return None
+    value = user.get("vendor_id") or user.get("id") or user.get("sub")
+    return _normalize_id(value)
+
+
+def _app_vendor_email(app: Dict[str, Any]) -> str:
+    return _normalize_email(app.get("vendor_email"))
+
+
+def _app_vendor_id(app: Dict[str, Any]) -> Optional[str]:
+    return _normalize_id(app.get("vendor_id"))
+
+
+def _app_belongs_to_user(app: Dict[str, Any], user: Any) -> bool:
+    user_email = _user_vendor_email(user)
+    user_id = _user_vendor_id(user)
+    app_email = _app_vendor_email(app)
+    app_id = _app_vendor_id(app)
+
+    if user_email and app_email and user_email == app_email:
+        return True
+    if user_id and app_id and user_id == app_id:
+        return True
+    return False
+
+
+def _assert_vendor_access(app: Dict[str, Any], user: Any) -> None:
+    if not _app_belongs_to_user(app, user):
+        raise HTTPException(status_code=404, detail="Application not found")
 
 
 def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
@@ -508,16 +571,23 @@ def expire_reservations_if_needed() -> int:
 # ---------------------------------------------------------------------------
 
 @router.get("/vendor/applications")
-def list_vendor_applications() -> List[Dict[str, Any]]:
+def list_vendor_applications(user: dict = Depends(get_current_user)) -> List[Dict[str, Any]]:
     expire_reservations_if_needed()
+
+    vendor_email = _user_vendor_email(user)
+    vendor_id = _user_vendor_id(user)
+    if not vendor_email and not vendor_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     filtered_apps: List[Dict[str, Any]] = []
 
     for app in _iter_dict_values(_applications_store()):
         try:
             event = _get_event_for_app(app)
-
             if not event:
+                continue
+
+            if not _app_belongs_to_user(app, user):
                 continue
 
             filtered_apps.append(_serialize_application(app))
@@ -527,18 +597,25 @@ def list_vendor_applications() -> List[Dict[str, Any]]:
 
     return filtered_apps
 
+
 @router.get("/vendor/applications/{app_id}")
-def get_vendor_application(app_id: str) -> Dict[str, Any]:
+def get_vendor_application(app_id: str, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     expire_reservations_if_needed()
     app = _get_application_or_404(app_id)
+    _assert_vendor_access(app, user)
     return _serialize_application(app)
 
 
 @router.patch("/vendor/applications/{app_id}")
-def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def vendor_update_application(
+    app_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+    _assert_vendor_access(app, user)
 
     if _is_locked_for_vendor_edits(app):
         raise HTTPException(status_code=400, detail="Application is locked and cannot be modified.")
@@ -575,15 +652,20 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
 
 
 @router.put("/vendor/applications/{app_id}/progress")
-def vendor_update_application_progress(app_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    return vendor_update_application(app_id, payload)
+def vendor_update_application_progress(
+    app_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
+    return vendor_update_application(app_id, payload, user)
 
 
 @router.post("/vendor/applications/{app_id}/submit")
-def vendor_submit_application(app_id: str) -> Dict[str, Any]:
+def vendor_submit_application(app_id: str, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+    _assert_vendor_access(app, user)
     status = _current_status(app)
 
     if status not in {"", "draft"}:
@@ -606,10 +688,11 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
 
 
 @router.post("/vendor/applications/{app_id}/pay-now")
-def vendor_pay_now(app_id: str) -> Dict[str, Any]:
+def vendor_pay_now(app_id: str, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+    _assert_vendor_access(app, user)
 
     if _current_status(app) != "approved":
         raise HTTPException(status_code=400, detail="Payment is only available after organizer approval.")
@@ -671,14 +754,26 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
 
 @router.post("/vendor/applications")
-def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+def create_vendor_application(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    user: dict = Depends(get_current_user),
+) -> Dict[str, Any]:
     event_id = _normalize_id(payload.get("event_id") or payload.get("eventId"))
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id is required")
 
+    vendor_email = _user_vendor_email(user)
+    if not vendor_email:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    vendor_id = _user_vendor_id(user) or vendor_email
+
     for app in _iter_dict_values(_applications_store()):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id != event_id:
+            continue
+
+        if not _app_belongs_to_user(app, user):
             continue
 
         if _current_status(app) in {"", "draft"}:
@@ -691,6 +786,14 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
     app = {
         "id": new_id,
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
+        "vendor_id": vendor_id,
+        "vendor_email": vendor_email,
+        "vendor_name": _as_str(
+            user.get("vendor_name")
+            or user.get("business_name")
+            or user.get("company_name")
+            or user.get("name")
+        ) or None,
         "status": "draft",
         "payment_status": "unpaid",
         "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
@@ -914,7 +1017,9 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             "payment_status": app.get("payment_status"),
             "booth_id": app.get("booth_id"),
             "requested_booth_id": app.get("requested_booth_id"),
+            "vendor_id": app.get("vendor_id"),
             "vendor_email": app.get("vendor_email"),
+            "vendor_name": app.get("vendor_name"),
             "updated_at": app.get("updated_at") or app.get("submitted_at"),
             "amount_due": serialized.get("amount_due"),
             "booth_price": serialized.get("booth_price"),
@@ -960,8 +1065,10 @@ def vendor_confirm_payment(
     app_id: str,
     request: Request,
     payload: Dict[str, Any] = Body(default_factory=dict),
+    user: dict = Depends(get_current_user),
 ) -> Dict[str, Any]:
     app = _get_application_or_404(app_id)
+    _assert_vendor_access(app, user)
 
     normalized_app_id = _normalize_id(app.get("id")) or _normalize_id(app_id) or ""
 
