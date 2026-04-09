@@ -17,6 +17,16 @@ router = APIRouter(tags=["applications"])
 
 
 # ---------------------------------------------------------------------------
+# Shared auth decode import / fallback
+# ---------------------------------------------------------------------------
+
+try:
+    from app.routers.auth import _decode_token as _shared_decode_token  # type: ignore
+except Exception:
+    _shared_decode_token = None  # type: ignore
+
+
+# ---------------------------------------------------------------------------
 # Live store module import / compatibility exports
 # ---------------------------------------------------------------------------
 
@@ -35,7 +45,6 @@ except Exception:
     store = _FallbackStore()  # type: ignore
 
 
-# Compatibility exports for other modules that still import these names.
 _APPLICATIONS = store._APPLICATIONS
 _EVENTS = store._EVENTS
 _PAYMENTS = store._PAYMENTS
@@ -90,11 +99,22 @@ def _extract_user_from_token(auth_header: Optional[str]) -> Dict[str, Any]:
         return {}
 
     prefix = "Bearer "
-    if not str(auth_header).startswith(prefix):
+    header_value = str(auth_header).strip()
+    if not header_value.startswith(prefix):
         return {}
 
-    token = str(auth_header)[len(prefix):].strip()
-    if not token or jwt is None:
+    token = header_value[len(prefix):].strip()
+    if not token:
+        return {}
+
+    if _shared_decode_token is not None:
+        try:
+            payload = _shared_decode_token(token)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    if jwt is None:
         return {}
 
     try:
@@ -106,6 +126,12 @@ def _extract_user_from_token(auth_header: Optional[str]) -> Dict[str, Any]:
         )
     except Exception:
         return {}
+
+
+def _extract_vendor_email_from_user(user: Dict[str, Any]) -> str:
+    return _as_str(
+        user.get("email") or user.get("sub") or user.get("username")
+    ).strip().lower()
 
 
 def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
@@ -539,9 +565,7 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
     expire_reservations_if_needed()
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _as_str(
-        user.get("email") or user.get("sub") or user.get("username")
-    ).lower()
+    vendor_email = _extract_vendor_email_from_user(user)
 
     filtered_apps: List[Dict[str, Any]] = []
 
@@ -724,9 +748,7 @@ def create_vendor_application(
         raise HTTPException(status_code=400, detail="event_id is required")
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _as_str(
-        user.get("email") or user.get("sub") or user.get("username")
-    )
+    vendor_email = _extract_vendor_email_from_user(user)
     vendor_id = user.get("vendor_id") or user.get("id") or user.get("sub")
 
     for app in _iter_dict_values(_applications_store()):
