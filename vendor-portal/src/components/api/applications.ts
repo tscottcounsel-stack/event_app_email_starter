@@ -1,4 +1,4 @@
-// src/components/api/applications.ts
+
 import { readSession } from "../../auth/authStorage";
 
 const API_BASE =
@@ -34,6 +34,8 @@ export type ApplyBody = {
   booth_category_id?: string | null;
   checked?: Record<string, boolean>;
   notes?: string;
+  vendor_email?: string | null;
+  vendor_name?: string | null;
 };
 
 type ApiError = Error & {
@@ -183,6 +185,7 @@ function normalizeDocumentsShape(
 
   return out;
 }
+
 function buildProgressPayload(body: any) {
   const documents = normalizeDocumentsShape(body?.documents ?? body?.docs);
 
@@ -256,10 +259,18 @@ export async function vendorApplyToEvent(args: {
   body: ApplyBody;
 }): Promise<ServerApplication> {
   const eventId = idPath("eventId", args.eventId);
+  const session = mustHaveSession();
+
+  const enrichedBody: ApplyBody = {
+    ...(args.body || {}),
+    vendor_email:
+      args.body?.vendor_email !== undefined ? args.body.vendor_email : session?.email || null,
+  };
+
   const data = await fetchJsonOrThrow(`${API_BASE}/applications/events/${eventId}/apply`, {
     method: "POST",
     headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(args.body || {}),
+    body: JSON.stringify(enrichedBody),
   });
   return unwrapApplication(data);
 }
@@ -301,20 +312,21 @@ export async function vendorGetOrCreateDraftApplication(a1: any): Promise<Server
     if (bPayment !== aPayment) return bPayment - aPayment;
 
     const aTime = Date.parse(
-      String(a?.updated_at || a?.submitted_at || a?.created_at || 0)
+      String((a as any)?.updated_at || (a as any)?.submitted_at || (a as any)?.created_at || 0)
     );
     const bTime = Date.parse(
-      String(b?.updated_at || b?.submitted_at || b?.created_at || 0)
+      String((b as any)?.updated_at || (b as any)?.submitted_at || (b as any)?.created_at || 0)
     );
     if (bTime !== aTime) return bTime - aTime;
 
-    return Number(b?.id || 0) - Number(a?.id || 0);
+    return Number((b as any)?.id || 0) - Number((a as any)?.id || 0);
   })[0];
 
   if (existing) return unwrapApplication(existing);
 
   return vendorApplyToEvent({ eventId: eventIdPath, body: {} });
 }
+
 export async function vendorGetOrCreateDraftApplicationLegacy(a1: any): Promise<ServerApplication> {
   return vendorGetOrCreateDraftApplication(a1);
 }
@@ -322,15 +334,15 @@ export async function vendorGetOrCreateDraftApplicationLegacy(a1: any): Promise<
 export async function vendorSaveProgress(...args: any[]): Promise<ServerApplication> {
   const [a1, a2] = args;
 
-  const isObj = (v: any) => v != null && typeof v === "object" && !Array.isArray(v);
+  const isLocalObj = (v: any) => v != null && typeof v === "object" && !Array.isArray(v);
 
   let applicationId: string | number | undefined;
   let body: any;
 
-  if (isObj(a1) && ("applicationId" in a1 || "appId" in a1 || "body" in a1)) {
+  if (isLocalObj(a1) && ("applicationId" in a1 || "appId" in a1 || "body" in a1)) {
     applicationId =
-      a1.applicationId ?? a1.appId ?? pickAppIdFromUnknownShape(a1.body ?? a1);
-    body = a1.body ?? a1;
+      (a1 as any).applicationId ?? (a1 as any).appId ?? pickAppIdFromUnknownShape((a1 as any).body ?? a1);
+    body = (a1 as any).body ?? a1;
   } else {
     const payload = a2 != null ? a2 : a1;
     applicationId =
@@ -479,8 +491,3 @@ export async function organizerConfirmPayment(args: {
 
   return unwrapApplication(data);
 }
-
-
-
-
-
