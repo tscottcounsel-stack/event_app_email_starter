@@ -5,8 +5,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, Header, HTTPException, Request
 from pydantic import BaseModel
+
+try:
+    from jose import jwt  # type: ignore
+except Exception:
+    jwt = None  # type: ignore
 
 router = APIRouter(tags=["applications"])
 
@@ -78,6 +83,29 @@ def _as_str(value: Any) -> str:
 def _normalize_id(value: Any) -> Optional[str]:
     text = _as_str(value)
     return text or None
+
+
+def _extract_user_from_token(auth_header: Optional[str]) -> Dict[str, Any]:
+    if not auth_header:
+        return {}
+
+    prefix = "Bearer "
+    if not str(auth_header).startswith(prefix):
+        return {}
+
+    token = str(auth_header)[len(prefix):].strip()
+    if not token or jwt is None:
+        return {}
+
+    try:
+        return jwt.decode(
+            token,
+            os.getenv("JWT_SECRET", "dev-secret"),
+            algorithms=[os.getenv("JWT_ALG", "HS256")],
+            options={"verify_aud": False},
+        )
+    except Exception:
+        return {}
 
 
 def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
@@ -671,14 +699,24 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
 
 @router.post("/vendor/applications")
-def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+def create_vendor_application(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     event_id = _normalize_id(payload.get("event_id") or payload.get("eventId"))
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id is required")
 
+    user = _extract_user_from_token(authorization)
+    vendor_email = _as_str(user.get("email"))
+    vendor_id = user.get("vendor_id") or user.get("id") or user.get("sub")
+
     for app in _iter_dict_values(_applications_store()):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id != event_id:
+            continue
+
+        if vendor_email and _as_str(app.get("vendor_email")).lower() != vendor_email.lower():
             continue
 
         if _current_status(app) in {"", "draft"}:
@@ -691,6 +729,8 @@ def create_vendor_application(payload: Dict[str, Any] = Body(default_factory=dic
     app = {
         "id": new_id,
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
+        "vendor_id": vendor_id,
+        "vendor_email": vendor_email or None,
         "status": "draft",
         "payment_status": "unpaid",
         "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
