@@ -539,7 +539,12 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
     expire_reservations_if_needed()
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _as_str(user.get("email")).lower()
+    app_email = _as_str(app.get("vendor_email")).lower()
+
+# If we have a vendor identity → filter
+if vendor_email:
+    if app_email != vendor_email:
+        continue
 
     filtered_apps: List[Dict[str, Any]] = []
 
