@@ -134,6 +134,12 @@ def _extract_vendor_email_from_user(user: Dict[str, Any]) -> str:
     ).strip().lower()
 
 
+def _extract_vendor_identity(user: Dict[str, Any]) -> tuple[Optional[str], str]:
+    vendor_id = _normalize_id(user.get("vendor_id") or user.get("id") or user.get("sub"))
+    vendor_email = _extract_vendor_email_from_user(user)
+    return vendor_id, vendor_email
+
+
 def _iter_dict_values(value: Any) -> List[Dict[str, Any]]:
     if isinstance(value, dict):
         out: List[Dict[str, Any]] = []
@@ -565,7 +571,10 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
     expire_reservations_if_needed()
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _extract_vendor_email_from_user(user)
+    vendor_id, vendor_email = _extract_vendor_identity(user)
+
+    if not vendor_id and not vendor_email:
+        return []
 
     filtered_apps: List[Dict[str, Any]] = []
 
@@ -575,9 +584,16 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
             if not event:
                 continue
 
+            app_vendor_id = _normalize_id(app.get("vendor_id"))
             app_email = _as_str(app.get("vendor_email")).lower()
 
-            if vendor_email and app_email != vendor_email:
+            matches_vendor = False
+            if vendor_id and app_vendor_id and app_vendor_id == vendor_id:
+                matches_vendor = True
+            elif vendor_email and app_email and app_email == vendor_email:
+                matches_vendor = True
+
+            if not matches_vendor:
                 continue
 
             filtered_apps.append(_serialize_application(app))
@@ -748,15 +764,23 @@ def create_vendor_application(
         raise HTTPException(status_code=400, detail="event_id is required")
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _extract_vendor_email_from_user(user)
-    vendor_id = user.get("vendor_id") or user.get("id") or user.get("sub")
+    vendor_id, vendor_email = _extract_vendor_identity(user)
 
     for app in _iter_dict_values(_applications_store()):
         existing_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
         if existing_event_id != event_id:
             continue
 
-        if vendor_email and _as_str(app.get("vendor_email")).lower() != vendor_email.lower():
+        app_vendor_id = _normalize_id(app.get("vendor_id"))
+        app_vendor_email = _as_str(app.get("vendor_email")).lower()
+
+        same_vendor = False
+        if vendor_id and app_vendor_id and app_vendor_id == vendor_id:
+            same_vendor = True
+        elif vendor_email and app_vendor_email and app_vendor_email == vendor_email:
+            same_vendor = True
+
+        if not same_vendor:
             continue
 
         if _current_status(app) in {"", "draft"}:
@@ -1111,3 +1135,4 @@ def vendor_confirm_payment(
     _save_store()
 
     return {"ok": True, "application": _serialize_application(app)}
+
