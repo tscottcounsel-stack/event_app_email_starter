@@ -580,6 +580,9 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
 
     for app in _iter_dict_values(_applications_store()):
         try:
+            if app.get("archived") is True:
+                continue
+
             app_vendor_id = _normalize_id(
                 app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or app.get("userId")
             )
@@ -814,6 +817,7 @@ def create_vendor_application(
         "requested_booth_id": payload.get("booth_id") or None,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
+        "archived": False,
     }
 
     booth_price = payload.get("booth_price")
@@ -1145,4 +1149,40 @@ def vendor_confirm_payment(
     _save_store()
 
     return {"ok": True, "application": _serialize_application(app)}
+@router.delete("/vendor/applications/{app_id}")
+def delete_vendor_application(
+    app_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    user = _extract_user_from_token(authorization)
+    vendor_id, vendor_email = _extract_vendor_identity(user)
 
+    app = _get_application_or_404(app_id)
+
+    app_vendor_id = _normalize_id(
+        app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or app.get("userId")
+    )
+    app_vendor_email = _as_str(app.get("vendor_email")).lower()
+
+    matches_vendor = False
+    if vendor_id and app_vendor_id and app_vendor_id == vendor_id:
+        matches_vendor = True
+    elif vendor_email and app_vendor_email and app_vendor_email == vendor_email:
+        matches_vendor = True
+
+    if not matches_vendor:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    status = _current_status(app)
+    app_key = _normalize_id(app.get("id")) or _normalize_id(app_id)
+
+    if status in {"approved", "paid"}:
+        app["archived"] = True
+    else:
+        if app_key and app_key in _applications_store():
+            _applications_store().pop(app_key, None)
+        elif app_key and app_key.isdigit():
+            _applications_store().pop(int(app_key), None)
+
+    _save_store()
+    return {"ok": True}
