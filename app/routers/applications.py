@@ -539,12 +539,9 @@ def list_vendor_applications(authorization: Optional[str] = Header(default=None)
     expire_reservations_if_needed()
 
     user = _extract_user_from_token(authorization)
-    app_email = _as_str(app.get("vendor_email")).lower()
-
-# If we have a vendor identity → filter
-if vendor_email:
-    if app_email != vendor_email:
-        continue
+    vendor_email = _as_str(
+        user.get("email") or user.get("sub") or user.get("username")
+    ).lower()
 
     filtered_apps: List[Dict[str, Any]] = []
 
@@ -560,7 +557,6 @@ if vendor_email:
                 continue
 
             filtered_apps.append(_serialize_application(app))
-
         except Exception as e:
             print("Skipping bad application record:", e)
             continue
@@ -609,6 +605,13 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
             app["booth_price_cents"] = cents
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
+
+    vendor_name = _as_str(payload.get("vendor_name"))
+    vendor_email = _as_str(payload.get("vendor_email"))
+    if vendor_name:
+        app["vendor_name"] = vendor_name
+    if vendor_email:
+        app["vendor_email"] = vendor_email
 
     app["updated_at"] = _now_iso()
     _save_store()
@@ -721,7 +724,9 @@ def create_vendor_application(
         raise HTTPException(status_code=400, detail="event_id is required")
 
     user = _extract_user_from_token(authorization)
-    vendor_email = _as_str(user.get("email"))
+    vendor_email = _as_str(
+        user.get("email") or user.get("sub") or user.get("username")
+    )
     vendor_id = user.get("vendor_id") or user.get("id") or user.get("sub")
 
     for app in _iter_dict_values(_applications_store()):
