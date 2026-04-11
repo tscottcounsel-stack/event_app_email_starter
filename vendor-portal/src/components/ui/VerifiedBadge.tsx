@@ -1,20 +1,14 @@
-import React from "react";
-
-type VerifiedBadgeProps = {
+type Props = {
   label?: string;
   className?: string;
 };
 
-export default function VerifiedBadge({ label = "Verified", className = "" }: VerifiedBadgeProps) {
+export default function VerifiedBadge({ label = "Verified", className = "" }: Props) {
   return (
-    <span
-      className={[
-        "inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700",
-        className,
-      ].join(" ")}
+    <div
+      className={`inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-600 ${className}`}
     >
-      <span aria-hidden="true">✓</span>
-      {label}
-    </span>
+      ✓ {label}
+    </div>
   );
 }
