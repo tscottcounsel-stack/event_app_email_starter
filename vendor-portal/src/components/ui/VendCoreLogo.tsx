@@ -1,17 +1,19 @@
-import React from "react";
-
-type VendCoreLogoProps = {
+type Props = {
   size?: number;
   className?: string;
 };
 
-export default function VendCoreLogo({ size = 160, className = "" }: VendCoreLogoProps) {
+export default function VendCoreLogo({ size = 220, className = "" }: Props) {
   return (
-    <img
-      src="/logo/vendcore-logo.png"
-      alt="VendCore"
+    <div
       style={{ width: size }}
-      className={`h-auto object-contain ${className}`.trim()}
-    />
+      className={`flex items-center justify-center overflow-hidden ${className}`}
+    >
+      <img
+        src="/logo/vendcore-logo.png"
+        alt="VendCore"
+        className="block h-auto w-full object-contain"
+      />
+    </div>
   );
 }

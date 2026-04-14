@@ -55,6 +55,7 @@ def _load_store_if_available() -> None:
 def _init_db_if_available() -> None:
     try:
         from app.db import init_db
+
         _safe_call(init_db, "db")
     except Exception as exc:
         logger.warning("DB init unavailable: %s", exc)
@@ -72,10 +73,15 @@ app = FastAPI(title="Vendor Connect API")
 frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 allowed_origins = [
+    # Local development
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
+    # Current production domains
+    "https://vendcore.co",
+    "https://www.vendcore.co",
+    # Existing Vercel deployments kept for previews / rollback safety
     "https://event-app-frontend.vercel.app",
     "https://event-app-frontend-xi.vercel.app",
     "https://event-app-frontend-7dhxwkwbm-tscottcounsel-stacks-projects.vercel.app",
