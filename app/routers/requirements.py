@@ -1,4 +1,3 @@
-# app/routers/requirements.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,24 +6,16 @@ from typing import Any, Dict, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from app.store import _EVENTS, _REQUIREMENTS
+from app.store import _EVENTS, _REQUIREMENTS, save_store
 
 router = APIRouter(tags=["Requirements"])
 
 
 class RequirementsSavePayload(BaseModel):
-    """
-    Accepts BOTH:
-      A) { "requirements": {...}, "version": 2 }
-      B) a model-like dict (organizer UI may send fields directly)
-
-    We keep extra="allow" so frontend payload drift doesn't 422.
-    """
-
     model_config = ConfigDict(extra="allow")
 
     requirements: Optional[Dict[str, Any]] = None
-    version: Optional[Any] = None  # backend wants int, but we normalize
+    version: Optional[Any] = None
 
 
 def _utc_now_iso() -> str:
@@ -38,68 +29,79 @@ def _ensure_event(event_id: int) -> Dict[str, Any]:
     return e
 
 
-def _normalize_save_body(
-    payload: RequirementsSavePayload,
-) -> Tuple[Dict[str, Any], int]:
-    """
-    Returns (requirements_dict, version_int)
-    """
+def _empty_requirements_shape() -> Dict[str, Any]:
+    return {
+        "global": {"compliance": [], "documents": []},
+        "categories": {
+            "Food & Beverage": {"compliance": [], "documents": []},
+            "Art": {"compliance": [], "documents": []},
+            "Clothing": {"compliance": [], "documents": []},
+            "Beauty": {"compliance": [], "documents": []},
+            "Services": {"compliance": [], "documents": []},
+            "Tech": {"compliance": [], "documents": []},
+            "Other": {"compliance": [], "documents": []},
+        },
+    }
+
+
+def _normalize_save_body(payload: RequirementsSavePayload) -> Tuple[Dict[str, Any], int]:
     raw = payload.model_dump()
 
-    # If wrapped { requirements: {...}, version: ... } use it.
     if isinstance(raw.get("requirements"), dict):
         req = raw["requirements"] or {}
         ver_raw = raw.get("version")
     else:
-        # Otherwise the organizer sent a model-like dict directly
         req = raw
         ver_raw = raw.get("version")
 
-    # Normalize version to an int if possible, else default to 1
     try:
         ver = int(ver_raw) if ver_raw is not None else 1
     except Exception:
         ver = 1
 
-    return req, ver
+    normalized = _empty_requirements_shape()
+
+    if isinstance(req.get("global"), dict):
+        normalized["global"] = {
+            "compliance": list(req.get("global", {}).get("compliance", []) or []),
+            "documents": list(req.get("global", {}).get("documents", []) or []),
+        }
+
+    if isinstance(req.get("categories"), dict):
+        for key, value in req.get("categories", {}).items():
+            if isinstance(value, dict):
+                normalized["categories"][key] = {
+                    "compliance": list(value.get("compliance", []) or []),
+                    "documents": list(value.get("documents", []) or []),
+                }
+
+    return normalized, ver
 
 
 def _mark_event_requirements_saved(event_id: int, version: int) -> None:
-    """
-    Persist simple progress flags onto the event object so the organizer
-    dashboard (events list) can reflect step completion.
-
-    We do NOT auto-publish the event here.
-    """
     e = _ensure_event(event_id)
-
-    # Progress flags the UI can use (optional)
     e["requirements_published"] = True
     e["requirements_version"] = version
     e["requirements_updated_at"] = _utc_now_iso()
 
-    # Optional: If you want a single combined "ready" indicator
-    # (requires layout_published to be set by the map editor save route):
-    # e["ready_to_publish"] = bool(e.get("requirements_published") and e.get("layout_published"))
 
+def _saved_payload(event_id: int) -> Dict[str, Any]:
+    saved = _REQUIREMENTS.get(event_id)
+    if not saved:
+        return {"requirements": _empty_requirements_shape(), "version": 1}
 
-# ---------------------------------------------------------
-# Organizer endpoints (canonical)
-# ---------------------------------------------------------
+    req = saved.get("requirements") if isinstance(saved.get("requirements"), dict) else _empty_requirements_shape()
+    ver = saved.get("version", 1)
+    return {
+        "requirements": req,
+        "version": int(ver) if str(ver).isdigit() else 1,
+    }
 
 
 @router.get("/organizer/events/{event_id}/requirements")
 def organizer_get_event_requirements(event_id: int):
     _ensure_event(event_id)
-    saved = _REQUIREMENTS.get(event_id)
-
-    if not saved:
-        return {"requirements": {}, "version": 0}
-
-    return {
-        "requirements": saved.get("requirements", {}) or {},
-        "version": saved.get("version", 0) or 0,
-    }
+    return _saved_payload(event_id)
 
 
 @router.put("/organizer/events/{event_id}/requirements")
@@ -108,34 +110,18 @@ def organizer_put_event_requirements(event_id: int, payload: RequirementsSavePay
     req, ver = _normalize_save_body(payload)
 
     _REQUIREMENTS[event_id] = {"requirements": req, "version": ver}
-
-    # Update the event record so organizer dashboard can reflect progress
     _mark_event_requirements_saved(event_id, ver)
+    save_store()
 
-    return {"ok": True, "version": ver}
+    return {"ok": True, "version": ver, "requirements": req}
 
 
 @router.post("/organizer/events/{event_id}/requirements")
 def organizer_post_event_requirements(event_id: int, payload: RequirementsSavePayload):
-    # behave same as PUT for now
     return organizer_put_event_requirements(event_id, payload)
-
-
-# ---------------------------------------------------------
-# Public/Vendor-facing endpoint
-# ---------------------------------------------------------
 
 
 @router.get("/events/{event_id}/requirements")
 def public_get_event_requirements(event_id: int):
     _ensure_event(event_id)
-    saved = _REQUIREMENTS.get(event_id)
-
-    if not saved:
-        # IMPORTANT: return {} not null so vendor UI can render empty state cleanly
-        return {"requirements": {}, "version": 0}
-
-    return {
-        "requirements": saved.get("requirements", {}) or {},
-        "version": saved.get("version", 0) or 0,
-    }
+    return _saved_payload(event_id)
