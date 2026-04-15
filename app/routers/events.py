@@ -979,12 +979,6 @@ def public_get_event_alias(event_id: int):
     return public_get_event(event_id)
 
 
-@router.get("/events/{event_id}/requirements")
-def public_get_event_requirements(event_id: int):
-    _get_event_or_404(event_id)
-    raw = _REQUIREMENTS.get(int(event_id))
-    return _normalize_public_requirements_payload(raw or {})
-
 
 @router.get("/events/{event_id}/diagram")
 def public_get_event_diagram(event_id: int):
