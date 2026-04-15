@@ -331,6 +331,10 @@ def _default_verification(email: str, role: str) -> Dict[str, Any]:
         "documents": [],
         "business_license_url": None,
         "government_id_url": None,
+        "certificate_of_insurance_url": None,
+        "w9_document_url": None,
+        "business_registration_url": None,
+        "sales_tax_permit_url": None,
         "last_session_id": None,
     }
 
@@ -369,6 +373,10 @@ def _get_verification(
         record.setdefault("documents", [])
         record.setdefault("business_license_url", None)
         record.setdefault("government_id_url", None)
+        record.setdefault("certificate_of_insurance_url", None)
+        record.setdefault("w9_document_url", None)
+        record.setdefault("business_registration_url", None)
+        record.setdefault("sales_tax_permit_url", None)
         if user_id is not None and not record.get("user_id"):
             record["user_id"] = user_id
         return record
@@ -891,6 +899,10 @@ def verification_submit(
     notes: str = Form(""),
     business_license: UploadFile = File(...),
     government_id: UploadFile = File(...),
+    certificate_of_insurance: Optional[UploadFile] = File(None),
+    w9_document: Optional[UploadFile] = File(None),
+    business_registration: Optional[UploadFile] = File(None),
+    sales_tax_permit: Optional[UploadFile] = File(None),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     role = str(user.get("role") or "vendor")
@@ -915,27 +927,48 @@ def verification_submit(
     if not str(business_name or "").strip():
         raise HTTPException(status_code=400, detail="Business name is required")
 
-    _, business_license_url, business_license_name = _save_upload(
-        business_license, "business_license"
-    )
-    _, government_id_url, government_id_name = _save_upload(
-        government_id, "government_id"
-    )
+    documents: List[Dict[str, Any]] = []
 
-    documents = [
-        {
-            "label": "Business License",
-            "name": business_license.filename or business_license_name,
-            "type": business_license.content_type or "application/octet-stream",
-            "url": business_license_url,
-        },
-        {
-            "label": "Government ID",
-            "name": government_id.filename or government_id_name,
-            "type": government_id.content_type or "application/octet-stream",
-            "url": government_id_url,
-        },
-    ]
+    def add_doc(file: Optional[UploadFile], label: str, prefix: str) -> Optional[str]:
+        if not file:
+            return None
+        _, file_url, file_name = _save_upload(file, prefix)
+        documents.append(
+            {
+                "label": label,
+                "name": file.filename or file_name,
+                "type": file.content_type or "application/octet-stream",
+                "url": file_url,
+            }
+        )
+        return file_url
+
+    business_license_url = add_doc(
+        business_license, "Business License", "business_license"
+    )
+    government_id_url = add_doc(
+        government_id, "Government ID", "government_id"
+    )
+    certificate_of_insurance_url = add_doc(
+        certificate_of_insurance,
+        "Certificate of Insurance",
+        "certificate_of_insurance",
+    )
+    w9_document_url = add_doc(
+        w9_document,
+        "W-9",
+        "w9_document",
+    )
+    business_registration_url = add_doc(
+        business_registration,
+        "Business Registration / DBA",
+        "business_registration",
+    )
+    sales_tax_permit_url = add_doc(
+        sales_tax_permit,
+        "Sales Tax / Resale Permit",
+        "sales_tax_permit",
+    )
 
     record["user_id"] = user.get("id")
     record["email"] = email
@@ -948,6 +981,10 @@ def verification_submit(
     record["documents"] = documents
     record["business_license_url"] = business_license_url
     record["government_id_url"] = government_id_url
+    record["certificate_of_insurance_url"] = certificate_of_insurance_url
+    record["w9_document_url"] = w9_document_url
+    record["business_registration_url"] = business_registration_url
+    record["sales_tax_permit_url"] = sales_tax_permit_url
     record["status"] = "pending"
     record["submitted_at"] = int(time.time())
     record["reviewed_at"] = None

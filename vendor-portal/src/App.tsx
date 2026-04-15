@@ -22,6 +22,7 @@ import PublicEventsListPage from "./pages/PublicEventsListPage";
 import PublicEventDetailPage from "./pages/PublicEventDetailPage";
 import AdminPaymentsPage from "./pages/AdminPaymentsPage";
 
+
 /* ---------------- AUTH ---------------- */
 
 import RequireAuth from "./components/auth/RequireAuth";
