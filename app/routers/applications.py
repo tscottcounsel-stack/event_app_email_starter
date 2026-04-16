@@ -553,6 +553,49 @@ def _resolve_category_bucket(
     return {"name": selected_category, "bucket": {"compliance": [], "documents": []}}
 
 
+
+def _normalize_document_entry(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_normalize_document_entry(item) for item in value if item is not None]
+    if not isinstance(value, dict):
+        return value
+
+    normalized = dict(value)
+
+    secure_url = _as_str(
+        normalized.get("secure_url")
+        or normalized.get("url")
+        or normalized.get("href")
+        or normalized.get("path")
+        or normalized.get("dataUrl")
+    )
+    if secure_url:
+        normalized["url"] = secure_url
+        normalized["href"] = secure_url
+
+    public_id = _as_str(normalized.get("public_id") or normalized.get("provider_public_id"))
+    if public_id:
+        normalized["public_id"] = public_id
+
+    provider = _as_str(normalized.get("provider"))
+    if provider:
+        normalized["provider"] = provider
+
+    return normalized
+
+
+def _normalize_documents_payload(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        key_text = _as_str(key)
+        if not key_text:
+            continue
+        out[key_text] = _normalize_document_entry(value)
+    return out
+
+
 def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
     event = _get_event_for_app(app)
     req_root = _extract_requirement_root(event)
@@ -622,6 +665,23 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
         enriched["booth_price"] = booth_price
         enriched["amount_due"] = booth_price
         enriched["total_price"] = booth_price
+
+    if isinstance(enriched.get("documents"), dict):
+        enriched["documents"] = _normalize_documents_payload(enriched.get("documents"))
+        enriched["docs"] = enriched["documents"]
+    elif isinstance(enriched.get("docs"), dict):
+        enriched["docs"] = _normalize_documents_payload(enriched.get("docs"))
+        enriched["documents"] = enriched["docs"]
+
+    requirement_status = _compute_requirement_status(enriched)
+    enriched["booth_selected"] = requirement_status["booth_selected"]
+    enriched["compliance_complete"] = requirement_status["compliance_complete"]
+    enriched["documents_complete"] = requirement_status["documents_complete"]
+    enriched["requirements_complete"] = requirement_status["requirements_complete"]
+    enriched["progress_percent"] = requirement_status["progress_percent"]
+    enriched["requirements_total_items"] = requirement_status["requirements_total_items"]
+    enriched["requirements_completed_items"] = requirement_status["requirements_completed_items"]
+    enriched["requirements_category"] = requirement_status["requirements_category"]
 
     return enriched
 
@@ -900,12 +960,14 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
         app["notes"] = payload.get("notes") or ""
 
     if "documents" in payload and isinstance(payload.get("documents"), dict):
-        app["documents"] = payload["documents"]
-        app["docs"] = payload["documents"]
+        normalized_docs = _normalize_documents_payload(payload["documents"])
+        app["documents"] = normalized_docs
+        app["docs"] = normalized_docs
 
     if "docs" in payload and isinstance(payload.get("docs"), dict):
-        app["documents"] = payload["docs"]
-        app["docs"] = payload["docs"]
+        normalized_docs = _normalize_documents_payload(payload["docs"])
+        app["documents"] = normalized_docs
+        app["docs"] = normalized_docs
 
     booth_price = payload.get("booth_price")
     if booth_price is not None:
@@ -1092,8 +1154,8 @@ def create_vendor_application(
         "payment_status": "unpaid",
         "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
         "notes": payload.get("notes") or "",
-        "documents": payload.get("documents") if isinstance(payload.get("documents"), dict) else {},
-        "docs": payload.get("docs") if isinstance(payload.get("docs"), dict) else {},
+        "documents": _normalize_documents_payload(payload.get("documents")) if isinstance(payload.get("documents"), dict) else (_normalize_documents_payload(payload.get("docs")) if isinstance(payload.get("docs"), dict) else {}),
+        "docs": _normalize_documents_payload(payload.get("docs")) if isinstance(payload.get("docs"), dict) else (_normalize_documents_payload(payload.get("documents")) if isinstance(payload.get("documents"), dict) else {}),
         "requested_booth_id": payload.get("booth_id") or None,
         "booth_id": payload.get("booth_id") or None,
         "booth_category": payload.get("booth_category") or payload.get("requested_booth_category") or None,
