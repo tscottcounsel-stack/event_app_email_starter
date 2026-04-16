@@ -18,28 +18,116 @@ class RequirementsSavePayload(BaseModel):
     version: Optional[Any] = None
 
 
+CATEGORY_DEFAULTS: Dict[str, Dict[str, list[dict[str, Any]]]] = {
+    "Food & Beverage": {
+        "compliance": [
+            {
+                "id": "food_safety_certification",
+                "text": "Food staff must follow food safety handling requirements",
+                "required": True,
+            }
+        ],
+        "documents": [
+            {
+                "id": "health_permit",
+                "name": "Health permit",
+                "required": True,
+            }
+        ],
+    },
+    "Art": {
+        "compliance": [],
+        "documents": [],
+    },
+    "Clothing": {
+        "compliance": [],
+        "documents": [],
+    },
+    "Beauty": {
+        "compliance": [
+            {
+                "id": "product_safety_disclosure",
+                "text": "Beauty vendors must disclose any regulated or restricted product use",
+                "required": True,
+            }
+        ],
+        "documents": [],
+    },
+    "Services": {
+        "compliance": [],
+        "documents": [],
+    },
+    "Tech": {
+        "compliance": [
+            {
+                "id": "electrical_equipment_safety",
+                "text": "Electrical equipment must meet safety requirements",
+                "required": True,
+            }
+        ],
+        "documents": [
+            {
+                "id": "demo_or_activation_plan",
+                "name": "Demo or activation plan",
+                "required": True,
+            }
+        ],
+    },
+    "Other": {
+        "compliance": [],
+        "documents": [],
+    },
+}
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_event(event_id: int) -> Dict[str, Any]:
-    e = _EVENTS.get(event_id)
-    if not e:
+    event = _EVENTS.get(event_id)
+    if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    return e
+    return event
+
+
+def _clone_items(values: list[Any]) -> list[Any]:
+    out: list[Any] = []
+    for item in values or []:
+        if isinstance(item, dict):
+            out.append(dict(item))
+        else:
+            out.append(item)
+    return out
+
+
+def _bucket_from_raw(raw: Any) -> Dict[str, list[Any]]:
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "compliance": _clone_items(list(source.get("compliance", []) or [])),
+        "documents": _clone_items(list(source.get("documents", []) or [])),
+    }
+
+
+def _default_bucket(category: str) -> Dict[str, list[Any]]:
+    source = CATEGORY_DEFAULTS.get(category, {"compliance": [], "documents": []})
+    return {
+        "compliance": _clone_items(source.get("compliance", [])),
+        "documents": _clone_items(source.get("documents", [])),
+    }
 
 
 def _empty_requirements_shape() -> Dict[str, Any]:
     return {
         "global": {"compliance": [], "documents": []},
         "categories": {
-            "Food & Beverage": {"compliance": [], "documents": []},
-            "Art": {"compliance": [], "documents": []},
-            "Clothing": {"compliance": [], "documents": []},
-            "Beauty": {"compliance": [], "documents": []},
-            "Services": {"compliance": [], "documents": []},
-            "Tech": {"compliance": [], "documents": []},
-            "Other": {"compliance": [], "documents": []},
+            "Food & Beverage": _default_bucket("Food & Beverage"),
+            "Art": _default_bucket("Art"),
+            "Clothing": _default_bucket("Clothing"),
+            "Beauty": _default_bucket("Beauty"),
+            "Services": _default_bucket("Services"),
+            "Tech": _default_bucket("Tech"),
+            "Other": _default_bucket("Other"),
         },
     }
 
@@ -62,27 +150,21 @@ def _normalize_save_body(payload: RequirementsSavePayload) -> Tuple[Dict[str, An
     normalized = _empty_requirements_shape()
 
     if isinstance(req.get("global"), dict):
-        normalized["global"] = {
-            "compliance": list(req.get("global", {}).get("compliance", []) or []),
-            "documents": list(req.get("global", {}).get("documents", []) or []),
-        }
+        normalized["global"] = _bucket_from_raw(req.get("global"))
 
     if isinstance(req.get("categories"), dict):
         for key, value in req.get("categories", {}).items():
             if isinstance(value, dict):
-                normalized["categories"][key] = {
-                    "compliance": list(value.get("compliance", []) or []),
-                    "documents": list(value.get("documents", []) or []),
-                }
+                normalized["categories"][key] = _bucket_from_raw(value)
 
     return normalized, ver
 
 
 def _mark_event_requirements_saved(event_id: int, version: int) -> None:
-    e = _ensure_event(event_id)
-    e["requirements_published"] = True
-    e["requirements_version"] = version
-    e["requirements_updated_at"] = _utc_now_iso()
+    event = _ensure_event(event_id)
+    event["requirements_published"] = True
+    event["requirements_version"] = version
+    event["requirements_updated_at"] = _utc_now_iso()
 
 
 def _saved_payload(event_id: int) -> Dict[str, Any]:
@@ -107,13 +189,13 @@ def organizer_get_event_requirements(event_id: int):
 @router.put("/organizer/events/{event_id}/requirements")
 def organizer_put_event_requirements(event_id: int, payload: RequirementsSavePayload):
     _ensure_event(event_id)
-    req, ver = _normalize_save_body(payload)
+    requirements, version = _normalize_save_body(payload)
 
-    _REQUIREMENTS[event_id] = {"requirements": req, "version": ver}
-    _mark_event_requirements_saved(event_id, ver)
+    _REQUIREMENTS[event_id] = {"requirements": requirements, "version": version}
+    _mark_event_requirements_saved(event_id, version)
     save_store()
 
-    return {"ok": True, "version": ver, "requirements": req}
+    return {"ok": True, "version": version, "requirements": requirements}
 
 
 @router.post("/organizer/events/{event_id}/requirements")
