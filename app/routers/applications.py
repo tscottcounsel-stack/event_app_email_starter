@@ -668,9 +668,20 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
         raise HTTPException(status_code=400, detail="Application is locked and cannot be modified.")
 
     booth_id = _as_str(payload.get("booth_id"))
+    booth_category = _as_str(
+        payload.get("booth_category")
+        or payload.get("requested_booth_category")
+        or payload.get("category")
+    )
     if booth_id:
         app["requested_booth_id"] = booth_id
         app["booth_id"] = booth_id
+
+    if booth_category:
+        app["booth_category"] = booth_category
+        app["requested_booth_category"] = booth_category
+
+    if booth_id and not booth_category:
         _persist_booth_category(app)
 
     if "checked" in payload and isinstance(payload.get("checked"), dict):
@@ -852,6 +863,9 @@ def create_vendor_application(
         "documents": payload.get("documents") if isinstance(payload.get("documents"), dict) else {},
         "docs": payload.get("docs") if isinstance(payload.get("docs"), dict) else {},
         "requested_booth_id": payload.get("booth_id") or None,
+        "booth_id": payload.get("booth_id") or None,
+        "booth_category": payload.get("booth_category") or payload.get("requested_booth_category") or None,
+        "requested_booth_category": payload.get("booth_category") or payload.get("requested_booth_category") or None,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
         "archived": False,
@@ -865,6 +879,9 @@ def create_vendor_application(
             app["amount_cents"] = cents
             app["resolved_price_cents"] = cents
             app["booth_price"] = round(cents / 100, 2)
+
+    if app.get("booth_id") and not app.get("booth_category"):
+        _persist_booth_category(app)
 
     _applications_store()[new_id] = app
     _save_store()
@@ -970,6 +987,8 @@ def organizer_reserve_booth(
     app = _get_application_or_404(app_id)
     if payload.booth_id:
         app["booth_id"] = payload.booth_id
+        app["requested_booth_id"] = payload.booth_id
+        _persist_booth_category(app)
     app["status"] = "approved"
     app["payment_status"] = app.get("payment_status") or "unpaid"
     minutes = payload.hold_minutes or 60 * 24
@@ -991,6 +1010,8 @@ def organizer_change_booth(
     if not payload.booth_id:
         raise HTTPException(status_code=400, detail="booth_id is required")
     app["booth_id"] = payload.booth_id
+    app["requested_booth_id"] = payload.booth_id
+    _persist_booth_category(app)
     _persist_resolved_booth_price(app)
     _save_store()
     return {"ok": True, "application": _serialize_application(app)}
