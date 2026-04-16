@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -400,6 +401,214 @@ def _persist_resolved_booth_price(app: Dict[str, Any]) -> Optional[int]:
     return cents
 
 
+def _slugify(value: Any) -> str:
+    text = _as_str(value).lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _pick_first_list(source: Any, keys: List[str]) -> List[Any]:
+    if not isinstance(source, dict):
+        return []
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _normalize_docs_map(raw: Any) -> Dict[str, List[Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, List[Any]] = {}
+    for key, value in raw.items():
+        key_text = _as_str(key)
+        if not key_text or value is None:
+            continue
+        out[key_text] = value if isinstance(value, list) else [value]
+    return out
+
+
+def _normalize_bucket(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
+    if not isinstance(raw, dict):
+        return {"compliance": [], "documents": []}
+    compliance = _pick_first_list(raw, ["compliance", "compliance_items", "complianceItems"])
+    documents = _pick_first_list(
+        raw,
+        ["documents", "document_requirements", "required_documents", "requiredDocuments"],
+    )
+    return {
+        "compliance": [item for item in compliance if isinstance(item, dict)],
+        "documents": [item for item in documents if isinstance(item, dict)],
+    }
+
+
+def _extract_requirement_root(event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    raw = event.get("requirements")
+    if isinstance(raw, dict) and isinstance(raw.get("requirements"), dict):
+        return raw.get("requirements") or {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _extract_requirement_categories(req_root: Dict[str, Any]) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+    source = req_root.get("categories") or req_root.get("categoryRequirements") or {}
+    if not isinstance(source, dict):
+        return {}
+    out: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for key, value in source.items():
+        out[_as_str(key)] = _normalize_bucket(value if isinstance(value, dict) else {})
+    return out
+
+
+def _dedupe_requirement_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        dedupe_key = _as_str(
+            item.get("id")
+            or item.get("key")
+            or item.get("name")
+            or item.get("title")
+            or item.get("label")
+            or item.get("text")
+        ).lower()
+        if dedupe_key and dedupe_key in seen:
+            continue
+        if dedupe_key:
+            seen.add(dedupe_key)
+        out.append(item)
+    return out
+
+
+def _item_key(item: Dict[str, Any], fallback: str) -> str:
+    return _as_str(
+        item.get("id")
+        or item.get("key")
+        or item.get("name")
+        or item.get("title")
+        or item.get("label")
+        or item.get("text")
+        or fallback
+    )
+
+
+def _resolve_selected_booth_category(
+    app: Dict[str, Any],
+    booth_categories: List[Any],
+    categories_map: Dict[str, Dict[str, List[Dict[str, Any]]]],
+) -> str:
+    direct_candidates = [
+        app.get("booth_category"),
+        app.get("vendor_category"),
+        app.get("category"),
+        app.get("requested_booth_category"),
+        app.get("selected_booth_category"),
+    ]
+    for candidate in direct_candidates:
+        candidate_text = _as_str(candidate)
+        if candidate_text:
+            return candidate_text
+
+    derived = _find_event_booth_category(app)
+    if derived:
+        return derived
+
+    selected_booth_id = _normalize_id(app.get("booth_id") or app.get("requested_booth_id") or "")
+    if selected_booth_id:
+        for item in booth_categories:
+            if not isinstance(item, dict):
+                continue
+            item_id = _as_str(item.get("id") or item.get("booth_id") or item.get("value") or item.get("code"))
+            if item_id and item_id == selected_booth_id:
+                return _as_str(item.get("name") or item.get("label") or item.get("title") or item.get("category"))
+
+    category_keys = [key for key in categories_map.keys() if _as_str(key)]
+    if len(category_keys) == 1:
+        return category_keys[0]
+
+    return ""
+
+
+def _resolve_category_bucket(
+    categories: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    selected_category: str,
+) -> Dict[str, Any]:
+    if not selected_category:
+        return {"name": "", "bucket": {"compliance": [], "documents": []}}
+
+    for key in categories.keys():
+        if key.lower() == selected_category.lower():
+            return {"name": key, "bucket": categories[key]}
+
+    selected_slug = _slugify(selected_category)
+    for key in categories.keys():
+        if _slugify(key) == selected_slug:
+            return {"name": key, "bucket": categories[key]}
+
+    return {"name": selected_category, "bucket": {"compliance": [], "documents": []}}
+
+
+def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
+    event = _get_event_for_app(app)
+    req_root = _extract_requirement_root(event)
+
+    booth_categories = _pick_first_list(req_root, ["booth_categories", "boothCategories"])
+    global_bucket = _normalize_bucket(req_root.get("global") or req_root.get("globalRequirements") or req_root)
+    categories_map = _extract_requirement_categories(req_root)
+
+    selected_category = _resolve_selected_booth_category(app, booth_categories, categories_map)
+    matched_category = _resolve_category_bucket(categories_map, selected_category)
+
+    compliance_items = _dedupe_requirement_items(
+        list(global_bucket.get("compliance") or []) + list(matched_category["bucket"].get("compliance") or [])
+    )
+    document_items = _dedupe_requirement_items(
+        list(global_bucket.get("documents") or []) + list(matched_category["bucket"].get("documents") or [])
+    )
+
+    checked_map = app.get("checked") if isinstance(app.get("checked"), dict) else {}
+    docs_map = _normalize_docs_map(app.get("documents") or app.get("docs"))
+
+    completed_compliance_count = 0
+    for idx, item in enumerate(compliance_items, start=1):
+        key = _item_key(item, f"compliance_{idx}")
+        if bool(checked_map.get(key)):
+            completed_compliance_count += 1
+
+    uploaded_document_count = 0
+    for idx, item in enumerate(document_items, start=1):
+        key = _item_key(item, f"document_{idx}")
+        if len(docs_map.get(key) or []) > 0:
+            uploaded_document_count += 1
+
+    booth_selected = bool(_normalize_id(app.get("booth_id") or app.get("requested_booth_id")))
+
+    total_items = len(compliance_items) + len(document_items) + 1
+    completed_items = completed_compliance_count + uploaded_document_count + (1 if booth_selected else 0)
+
+    compliance_complete = completed_compliance_count >= len(compliance_items)
+    documents_complete = uploaded_document_count >= len(document_items)
+    requirements_complete = booth_selected and compliance_complete and documents_complete
+    progress_percent = int(round((completed_items / max(total_items, 1)) * 100))
+
+    return {
+        "booth_selected": booth_selected,
+        "compliance_complete": compliance_complete,
+        "documents_complete": documents_complete,
+        "requirements_complete": requirements_complete,
+        "progress_percent": max(0, min(100, progress_percent)),
+        "requirements_total_items": total_items,
+        "requirements_completed_items": completed_items,
+        "requirements_category": matched_category.get("name") or selected_category or "",
+    }
+
+
+
 def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
     cents = _persist_resolved_booth_price(app)
     booth_price = round(cents / 100, 2) if cents else None
@@ -713,6 +922,16 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     if vendor_email:
         app["vendor_email"] = vendor_email
 
+    if app.get("booth_id") and not app.get("booth_category"):
+        _persist_booth_category(app)
+
+    requirement_status = _compute_requirement_status(app)
+    app["booth_selected"] = requirement_status["booth_selected"]
+    app["compliance_complete"] = requirement_status["compliance_complete"]
+    app["documents_complete"] = requirement_status["documents_complete"]
+    app["requirements_complete"] = requirement_status["requirements_complete"]
+    app["progress_percent"] = requirement_status["progress_percent"]
+
     app["updated_at"] = _now_iso()
     _save_store()
     return {"ok": True, "application": _serialize_application(app)}
@@ -738,6 +957,19 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="You must select a booth before submitting.")
 
     _persist_booth_category(app)
+
+    requirement_status = _compute_requirement_status(app)
+    if not requirement_status.get("requirements_complete"):
+        raise HTTPException(
+            status_code=400,
+            detail="Application requirements incomplete. Select a booth, complete all compliance items, and upload all required documents before submitting.",
+        )
+
+    app["booth_selected"] = requirement_status["booth_selected"]
+    app["compliance_complete"] = requirement_status["compliance_complete"]
+    app["documents_complete"] = requirement_status["documents_complete"]
+    app["requirements_complete"] = requirement_status["requirements_complete"]
+    app["progress_percent"] = requirement_status["progress_percent"]
     app["status"] = "submitted"
     app["submitted_at"] = _now_iso()
     app["updated_at"] = _now_iso()
