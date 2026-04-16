@@ -290,6 +290,40 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     return deduped
 
 
+
+
+def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
+    event = _get_event_for_app(app)
+    if not event:
+        return None
+
+    booth_keys = _app_booth_candidates(app)
+    if not booth_keys:
+        return None
+
+    booths = _extract_booths_from_event(event)
+    for booth in booths:
+        match_values = _booth_match_values(booth)
+        if booth_keys and match_values and booth_keys.intersection(match_values):
+            category = _as_str(
+                booth.get("category")
+                or booth.get("booth_category")
+                or booth.get("category_name")
+                or booth.get("categoryName")
+            )
+            if category:
+                return category
+
+    return None
+
+
+def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
+    category = _find_event_booth_category(app)
+    if category:
+        app["booth_category"] = category
+        app["requested_booth_category"] = category
+    return category
+
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
     event = _get_event_for_app(app)
     if not event:
@@ -636,6 +670,8 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     booth_id = _as_str(payload.get("booth_id"))
     if booth_id:
         app["requested_booth_id"] = booth_id
+        app["booth_id"] = booth_id
+        _persist_booth_category(app)
 
     if "checked" in payload and isinstance(payload.get("checked"), dict):
         app["checked"] = payload["checked"]
@@ -690,6 +726,7 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
     if not booth_id:
         raise HTTPException(status_code=400, detail="You must select a booth before submitting.")
 
+    _persist_booth_category(app)
     app["status"] = "submitted"
     app["submitted_at"] = _now_iso()
     app["updated_at"] = _now_iso()
@@ -1032,6 +1069,7 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             "payment_status": app.get("payment_status"),
             "booth_id": app.get("booth_id"),
             "requested_booth_id": app.get("requested_booth_id"),
+            "booth_category": app.get("booth_category") or app.get("requested_booth_category"),
             "vendor_id": app.get("vendor_id"),
             "vendor_email": app.get("vendor_email"),
             "vendor_name": app.get("vendor_name"),
