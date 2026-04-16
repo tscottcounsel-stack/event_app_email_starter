@@ -592,9 +592,15 @@ def _normalize_documents_payload(raw: Any) -> Dict[str, Any]:
         key_text = _as_str(key)
         if not key_text:
             continue
-        out[key_text] = _normalize_document_entry(value)
-    return out
 
+        normalized = _normalize_document_entry(value)
+
+        if isinstance(normalized, list):
+            out[key_text] = normalized[0] if normalized else {}
+        else:
+            out[key_text] = normalized
+
+    return out
 
 def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
     event = _get_event_for_app(app)
