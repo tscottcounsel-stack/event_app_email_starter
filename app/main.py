@@ -142,7 +142,6 @@ for module_name in [
     "app.routers.requirements",
     "app.routers.requirements_alias",
     "app.routers.requirement_templates",
-    "app.routers.reviews",
     "app.routers.seed",
     "app.routers.slots",
     "app.routers.stats",
