@@ -120,8 +120,13 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    from app.store import _DATA_PATH
 
+    return {
+        "ok": True,
+        "data_path": str(_DATA_PATH),
+        "exists": _DATA_PATH.exists(),
+    }
 
 for module_name in [
     "app.routers.admin",
