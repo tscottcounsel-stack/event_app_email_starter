@@ -16,8 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.permissions import require_event_limit
 from app.db import get_db
-from app.models.diagrams import Diagram
-from app.models.event import Event
+from app.models.diagram import Diagram
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
 from app.store import _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
