@@ -1,12 +1,15 @@
-# app/routers/diagrams.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-from app.store import _APPLICATIONS, _DIAGRAMS, _EVENTS, save_store
+from app.db import get_db
+from app.models.diagram import Diagram
+from app.models.event import Event
+from app.routers.applications import _APPLICATIONS
 
 router = APIRouter(tags=["Diagrams"])
 
@@ -15,8 +18,8 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_event_or_404(event_id: int) -> Dict[str, Any]:
-    ev = _EVENTS.get(int(event_id))
+def get_event_or_404(db: Session, event_id: int) -> Event:
+    ev = db.query(Event).filter(Event.id == int(event_id)).first()
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
     return ev
@@ -79,9 +82,6 @@ def _expire_reservations_for_event(event_id: int) -> int:
             app["updated_at"] = utc_now_iso()
             changed += 1
 
-    if changed:
-        save_store()
-
     return changed
 
 
@@ -124,33 +124,40 @@ def _build_booth_state_by_id(event_id: int) -> Dict[str, Dict[str, Any]]:
     return idx
 
 
-def ensure_slot(event_id: int) -> Dict[str, Any]:
-    """
-    Persisted slot:
-      _DIAGRAMS[event_id] = {
-        "diagram": {"elements": [...], "meta": {...}},
-        "version": int,
-        "updated_at": iso
-      }
-    """
+def ensure_slot(db: Session, event_id: int) -> Diagram:
     eid = int(event_id)
-    slot = _DIAGRAMS.get(eid)
+    get_event_or_404(db, eid)
 
-    if not isinstance(slot, dict):
-        _DIAGRAMS[eid] = {
-            "diagram": {"elements": [], "meta": {}},
-            "version": 0,
-            "updated_at": utc_now_iso(),
-        }
-        save_store()
-        slot = _DIAGRAMS[eid]
+    slot = (
+        db.query(Diagram)
+        .filter(Diagram.event_id == eid)
+        .order_by(Diagram.id.desc())
+        .first()
+    )
 
-    if slot.get("diagram") is None:
-        slot["diagram"] = {"elements": [], "meta": {}}
-    if slot.get("version") is None:
-        slot["version"] = 0
-    if slot.get("updated_at") is None:
-        slot["updated_at"] = utc_now_iso()
+    if not isinstance(slot, Diagram):
+        slot = Diagram(
+            event_id=eid,
+            diagram={"elements": [], "meta": {}},
+            version=0,
+        )
+        db.add(slot)
+        db.commit()
+        db.refresh(slot)
+        return slot
+
+    dirty = False
+    if slot.diagram is None:
+        slot.diagram = {"elements": [], "meta": {}}
+        dirty = True
+    if slot.version is None:
+        slot.version = 0
+        dirty = True
+
+    if dirty:
+        db.add(slot)
+        db.commit()
+        db.refresh(slot)
 
     return slot
 
@@ -165,92 +172,86 @@ def _read_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"diagram": diagram, "version": version}
 
 
-def _save_diagram(event_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Canonical write helper. Persists and updates event progress flags.
-    """
+def _save_diagram(db: Session, event_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     eid = int(event_id)
-    get_event_or_404(eid)
+    ev = get_event_or_404(db, eid)
 
     parsed = _read_payload(payload)
     diagram = parsed["diagram"]
     version = parsed["version"]
 
-    _DIAGRAMS[eid] = {
-        "diagram": diagram,
-        "version": version,
+    slot = (
+        db.query(Diagram)
+        .filter(Diagram.event_id == eid)
+        .order_by(Diagram.id.desc())
+        .first()
+    )
+
+    if not isinstance(slot, Diagram):
+        slot = Diagram(event_id=eid)
+
+    slot.diagram = diagram
+    slot.version = version
+    db.add(slot)
+
+    ev.layout_published = True
+    db.add(ev)
+
+    db.commit()
+    db.refresh(slot)
+
+    return {
+        "diagram": slot.diagram,
+        "version": int(slot.version or 0),
         "updated_at": utc_now_iso(),
     }
 
-    ev = _EVENTS.get(eid)
-    if ev is not None:
-        ev["layout_published"] = True
-        ev["updated_at"] = utc_now_iso()
-
-    save_store()
-
-    return {
-        "diagram": diagram,
-        "version": version,
-        "updated_at": _DIAGRAMS[eid]["updated_at"],
-    }
-
-
-# -------------------------------------------------------------------
-# Public/Vendor reads (used by VendorEventMapLayoutPage)
-# -------------------------------------------------------------------
-
 
 @router.get("/events/{event_id}/diagram")
-def get_event_diagram_public(event_id: int):
-    """
-    Must return: { diagram: any, version: number, updated_at?: string, booth_state_by_id?: object }
-    """
-    get_event_or_404(event_id)
+def get_event_diagram_public(event_id: int, db: Session = Depends(get_db)):
+    get_event_or_404(db, event_id)
     _expire_reservations_for_event(event_id)
-    slot = ensure_slot(event_id)
+    slot = ensure_slot(db, event_id)
     return {
-        "diagram": slot["diagram"],
-        "version": int(slot.get("version", 0) or 0),
-        "updated_at": slot.get("updated_at"),
+        "diagram": slot.diagram or {"elements": [], "meta": {}},
+        "version": int(slot.version or 0),
+        "updated_at": utc_now_iso(),
         "booth_state_by_id": _build_booth_state_by_id(int(event_id)),
     }
 
 
 @router.get("/vendor/events/{event_id}/diagram")
-def get_event_diagram_vendor(event_id: int):
-    """
-    Same as public; separate path because vendor client may probe it first.
-    """
-    return get_event_diagram_public(event_id)
-
-
-# -------------------------------------------------------------------
-# Organizer canonical endpoints (preferred for organizer map editor)
-# -------------------------------------------------------------------
+def get_event_diagram_vendor(event_id: int, db: Session = Depends(get_db)):
+    return get_event_diagram_public(event_id, db)
 
 
 @router.get("/organizer/events/{event_id}/diagram")
-def get_event_diagram_organizer(event_id: int):
-    return get_event_diagram_public(event_id)
+def get_event_diagram_organizer(event_id: int, db: Session = Depends(get_db)):
+    return get_event_diagram_public(event_id, db)
 
 
 @router.put("/organizer/events/{event_id}/diagram")
-def save_event_diagram_organizer(event_id: int, payload: Dict[str, Any] = Body(...)):
-    return _save_diagram(event_id, payload)
-
-
-# -------------------------------------------------------------------
-# Dev-compatible write aliases (keep during stabilization to avoid breaking clients)
-# If you want stricter separation later, delete these.
-# -------------------------------------------------------------------
+def save_event_diagram_organizer(
+    event_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    return _save_diagram(db, event_id, payload)
 
 
 @router.put("/events/{event_id}/diagram")
-def save_event_diagram_public(event_id: int, payload: Dict[str, Any] = Body(...)):
-    return _save_diagram(event_id, payload)
+def save_event_diagram_public(
+    event_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    return _save_diagram(db, event_id, payload)
 
 
 @router.put("/vendor/events/{event_id}/diagram")
-def save_event_diagram_vendor(event_id: int, payload: Dict[str, Any] = Body(...)):
-    return _save_diagram(event_id, payload)
+def save_event_diagram_vendor(
+    event_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    return _save_diagram(db, event_id, payload)
