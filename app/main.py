@@ -5,9 +5,16 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+_load_store_if_available()
+
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+from app.models.event import Event
+from app.models.application import Application
+from app.models.booth import Booth
+from app.models.diagram import Diagram
+
+_init_db_if_available()
 
 logger = logging.getLogger(__name__)
 
