@@ -55,7 +55,6 @@ def _load_store_if_available() -> None:
 def _init_db_if_available() -> None:
     try:
         from app.db import init_db
-
         _safe_call(init_db, "db")
     except Exception as exc:
         logger.warning("DB init unavailable: %s", exc)
