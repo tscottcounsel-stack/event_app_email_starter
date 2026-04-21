@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.diagram import Diagram
 from app.models.event import Event
+from app.routers.applications import _APPLICATIONS
 
 router = APIRouter(tags=["Diagrams"])
 
@@ -215,7 +216,8 @@ def get_event_diagram_public(event_id: int, db: Session = Depends(get_db)):
         "diagram": slot.diagram or {"elements": [], "meta": {}},
         "version": int(slot.version or 0),
         "updated_at": utc_now_iso(),
-        "booth_state_by_id": {},
+        "booth_state_by_id": _build_booth_state_by_id(int(event_id)),
+    }
 
 
 @router.get("/vendor/events/{event_id}/diagram")
