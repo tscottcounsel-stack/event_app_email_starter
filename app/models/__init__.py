@@ -1,7 +1,5 @@
-﻿from .application import Application
-from .event import Event
-from .review import Review
-from .slot import Slot
+﻿# app/models/__init__.py
 
-__all__ = ["Event", "Application", "Slot", "Review"]
+# ⚠️ Intentionally left minimal to avoid circular imports
 
+# Import models ONLY where needed instead of globally here
