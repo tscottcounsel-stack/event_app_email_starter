@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
 
-from app.store import _EVENTS, _REQUIREMENTS, save_store
+from app.db import get_db
+from app.models.event import Event
+from app.store import _REQUIREMENTS, save_store
 
 router = APIRouter(tags=["Requirements"])
 
@@ -35,14 +38,8 @@ CATEGORY_DEFAULTS: Dict[str, Dict[str, list[dict[str, Any]]]] = {
             }
         ],
     },
-    "Art": {
-        "compliance": [],
-        "documents": [],
-    },
-    "Clothing": {
-        "compliance": [],
-        "documents": [],
-    },
+    "Art": {"compliance": [], "documents": []},
+    "Clothing": {"compliance": [], "documents": []},
     "Beauty": {
         "compliance": [
             {
@@ -53,10 +50,7 @@ CATEGORY_DEFAULTS: Dict[str, Dict[str, list[dict[str, Any]]]] = {
         ],
         "documents": [],
     },
-    "Services": {
-        "compliance": [],
-        "documents": [],
-    },
+    "Services": {"compliance": [], "documents": []},
     "Tech": {
         "compliance": [
             {
@@ -73,10 +67,7 @@ CATEGORY_DEFAULTS: Dict[str, Dict[str, list[dict[str, Any]]]] = {
             }
         ],
     },
-    "Other": {
-        "compliance": [],
-        "documents": [],
-    },
+    "Other": {"compliance": [], "documents": []},
 }
 
 
@@ -84,8 +75,8 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ensure_event(event_id: int) -> Dict[str, Any]:
-    event = _EVENTS.get(event_id)
+def _ensure_event(db: Session, event_id: int) -> Event:
+    event = db.query(Event).filter(Event.id == int(event_id)).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
     return event
@@ -160,50 +151,71 @@ def _normalize_save_body(payload: RequirementsSavePayload) -> Tuple[Dict[str, An
     return normalized, ver
 
 
-def _mark_event_requirements_saved(event_id: int, version: int) -> None:
-    event = _ensure_event(event_id)
-    event["requirements_published"] = True
-    event["requirements_version"] = version
-    event["requirements_updated_at"] = _utc_now_iso()
+def _mark_event_requirements_saved(db: Session, event_id: int, version: int) -> None:
+    event = _ensure_event(db, event_id)
+    event.requirements_published = True
+    db.add(event)
+    db.commit()
+    db.refresh(event)
 
 
 def _saved_payload(event_id: int) -> Dict[str, Any]:
-    saved = _REQUIREMENTS.get(event_id)
+    saved = _REQUIREMENTS.get(int(event_id))
     if not saved:
         return {"requirements": _empty_requirements_shape(), "version": 1}
 
-    req = saved.get("requirements") if isinstance(saved.get("requirements"), dict) else _empty_requirements_shape()
-    ver = saved.get("version", 1)
+    req = (
+        saved.get("requirements")
+        if isinstance(saved, dict) and isinstance(saved.get("requirements"), dict)
+        else _empty_requirements_shape()
+    )
+    ver = saved.get("version", 1) if isinstance(saved, dict) else 1
+
+    try:
+        version = int(ver)
+    except Exception:
+        version = 1
+
     return {
         "requirements": req,
-        "version": int(ver) if str(ver).isdigit() else 1,
+        "version": version,
     }
 
 
 @router.get("/organizer/events/{event_id}/requirements")
-def organizer_get_event_requirements(event_id: int):
-    _ensure_event(event_id)
+def organizer_get_event_requirements(event_id: int, db: Session = Depends(get_db)):
+    _ensure_event(db, event_id)
     return _saved_payload(event_id)
 
 
 @router.put("/organizer/events/{event_id}/requirements")
-def organizer_put_event_requirements(event_id: int, payload: RequirementsSavePayload):
-    _ensure_event(event_id)
+def organizer_put_event_requirements(
+    event_id: int,
+    payload: RequirementsSavePayload,
+    db: Session = Depends(get_db),
+):
+    _ensure_event(db, event_id)
     requirements, version = _normalize_save_body(payload)
 
-    _REQUIREMENTS[event_id] = {"requirements": requirements, "version": version}
-    _mark_event_requirements_saved(event_id, version)
+    _REQUIREMENTS[int(event_id)] = {"requirements": requirements, "version": version}
+    _mark_event_requirements_saved(db, event_id, version)
     save_store()
 
     return {"ok": True, "version": version, "requirements": requirements}
 
 
 @router.post("/organizer/events/{event_id}/requirements")
-def organizer_post_event_requirements(event_id: int, payload: RequirementsSavePayload):
-    return organizer_put_event_requirements(event_id, payload)
+def organizer_post_event_requirements(
+    event_id: int,
+    payload: RequirementsSavePayload,
+    db: Session = Depends(get_db),
+):
+    return organizer_put_event_requirements(event_id, payload, db)
 
 
 @router.get("/events/{event_id}/requirements")
-def public_get_event_requirements(event_id: int):
-    _ensure_event(event_id)
+def public_get_event_requirements(event_id: int, db: Session = Depends(get_db)):
+    event = _ensure_event(db, event_id)
+    if not bool(event.published) or bool(event.archived):
+        raise HTTPException(status_code=404, detail="Event not found")
     return _saved_payload(event_id)
