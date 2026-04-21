@@ -59,14 +59,6 @@ def _init_db_if_available() -> None:
     except Exception as exc:
         logger.warning("DB init unavailable: %s", exc)
 
-    # TEMP: run migration once AFTER DB is ready
-    try:
-    from app.scripts.migrate_store_to_postgres import migrate
-    migrate()
-    print("✅ Migration executed")
-except Exception as e:
-    print("Migration skipped:", e)
-
 def _env_csv(name: str) -> list[str]:
     raw = os.getenv(name, "")
     if not raw.strip():
