@@ -93,25 +93,20 @@ def _diagram_payload(src: Any) -> tuple[dict, int]:
 
 def migrate() -> None:
     print(f"Reading store from: {DATA_PATH}")
-    store = _read_store() 
+    store = _read_store()
 
-print("STORE KEYS:", list(store.keys()))
-
-events = store.get("events", {}) or {}
-diagrams = store.get("diagrams", {}) or {}
-
-print("EVENTS TYPE:", type(events).__name__)
-print("DIAGRAMS TYPE:", type(diagrams).__name__)
-
-if isinstance(events, dict):
-    print("EVENT COUNT:", len(events))
-    print("EVENT SAMPLE KEYS:", list(events.keys())[:10])
-
-if isinstance(diagrams, dict):
-    print("DIAGRAM COUNT:", len(diagrams))
-    print("DIAGRAM SAMPLE KEYS:", list(diagrams.keys())[:10])
+    print("STORE KEYS:", list(store.keys()))
 
     events = store.get("events", {}) or {}
+    diagrams = store.get("diagrams", {}) or {}
+
+    print("EVENTS TYPE:", type(events).__name__)
+    print("DIAGRAMS TYPE:", type(diagrams).__name__)
+
+   
+    if isinstance(diagrams, dict):
+        print("DIAGRAM COUNT:", len(diagrams))
+        print("DIAGRAM SAMPLE KEYS:", list(diagrams.keys())[:10])    events = store.get("events", {}) or {}
     diagrams = store.get("diagrams", {}) or {}
 
     if not isinstance(events, dict):
