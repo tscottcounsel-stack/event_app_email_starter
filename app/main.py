@@ -114,16 +114,6 @@ from app.models.diagram import Diagram  # noqa: F401
 
 _init_db_if_available()
 
-# TEMP: run migration once AFTER DB is ready
-print(">>> ABOUT TO RUN MIGRATION")
-
-try:
-    from app.scripts.migrate_store_to_postgres import migrate
-    print(">>> MIGRATION IMPORTED")
-    migrate()
-    print(">>> MIGRATION EXECUTED")
-except Exception as e:
-    print(">>> MIGRATION FAILED:", repr(e))
 
 @app.get("/")
 def root():
