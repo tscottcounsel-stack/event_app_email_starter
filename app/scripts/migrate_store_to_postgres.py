@@ -106,7 +106,9 @@ def migrate() -> None:
    
     if isinstance(diagrams, dict):
         print("DIAGRAM COUNT:", len(diagrams))
-        print("DIAGRAM SAMPLE KEYS:", list(diagrams.keys())[:10])    events = store.get("events", {}) or {}
+        print("DIAGRAM SAMPLE KEYS:", list(diagrams.keys())[:10])    
+
+    events = store.get("events", {}) or {}
     diagrams = store.get("diagrams", {}) or {}
 
     if not isinstance(events, dict):
