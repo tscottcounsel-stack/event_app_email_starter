@@ -100,6 +100,11 @@ def migrate() -> None:
     events = store.get("events", {}) or {}
     diagrams = store.get("diagrams", {}) or {}
 
+    print("EVENT COUNT:", len(events) if isinstance(events, dict) else "not-   dict")
+    print("DIAGRAM COUNT:", len(diagrams) if isinstance(diagrams, dict) else "not-dict")
+    if isinstance(events, dict):
+    print("EVENT SAMPLE KEYS:", list(events.keys())[:10])
+
     print("EVENTS TYPE:", type(events).__name__)
     print("DIAGRAMS TYPE:", type(diagrams).__name__)
 
