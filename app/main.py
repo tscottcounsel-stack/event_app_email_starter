@@ -5,16 +5,9 @@ import logging
 import os
 from pathlib import Path
 
-_load_store_if_available()
-
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-
-from app.models.event import Event
-from app.models.application import Application
-from app.models.booth import Booth
-from app.models.diagram import Diagram
-
-_init_db_if_available()
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +73,13 @@ app = FastAPI(title="Vendor Connect API")
 frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 allowed_origins = [
-    # Local development
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-    # Current production domains
     "https://vendcore.co",
     "https://www.vendcore.co",
-    # Existing Vercel deployments kept for previews / rollback safety
+    "https://api.vendcore.co",
     "https://event-app-frontend.vercel.app",
     "https://event-app-frontend-xi.vercel.app",
     "https://event-app-frontend-7dhxwkwbm-tscottcounsel-stacks-projects.vercel.app",
@@ -117,6 +108,12 @@ _load_store_if_available()
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
+# Import models BEFORE DB init so SQLAlchemy registers tables before create_all().
+from app.models.event import Event  # noqa: F401
+from app.models.application import Application  # noqa: F401
+from app.models.booth import Booth  # noqa: F401
+from app.models.diagram import Diagram  # noqa: F401
+
 _init_db_if_available()
 
 
@@ -135,6 +132,7 @@ def health():
         "exists": _DATA_PATH.exists(),
     }
 
+
 for module_name in [
     "app.routers.admin",
     "app.routers.applications",
@@ -149,6 +147,7 @@ for module_name in [
     "app.routers.requirements",
     "app.routers.requirements_alias",
     "app.routers.requirement_templates",
+    # "app.routers.reviews",  # temporarily disabled while import issues are resolved
     "app.routers.seed",
     "app.routers.slots",
     "app.routers.stats",
