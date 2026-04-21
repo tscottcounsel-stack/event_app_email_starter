@@ -65,4 +65,6 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     if engine is not None:
+        print(">>> DB ENGINE URL:", engine.url)
         Base.metadata.create_all(bind=engine)
+    
