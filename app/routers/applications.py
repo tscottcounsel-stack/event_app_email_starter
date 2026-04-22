@@ -347,21 +347,50 @@ def _extract_booths_from_diagram(diagram: Optional[Dict[str, Any]]) -> List[Dict
 
 
 def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
-    booth_keys = _app_booth_candidates(app)
-    if not booth_keys:
+    booth_id = _normalize_id(
+        app.get("booth_id")
+        or app.get("boothId")
+        or app.get("requested_booth_id")
+        or app.get("requestedBoothId")
+        or app.get("selected_booth_id")
+        or app.get("selectedBoothId")
+        or app.get("booth")
+    )
+    if not booth_id:
         return None
 
-    event = _get_event_for_app(app)
     diagram = _get_diagram_for_event(app)
-
-    booths: List[Dict[str, Any]] = []
-    if event:
-        booths.extend(_extract_booths_from_event(event))
-    booths.extend(_extract_booths_from_diagram(diagram))
+    booths = _extract_booths_from_diagram(diagram)
 
     for booth in booths:
-        match_values = _booth_match_values(booth)
-        if booth_keys and match_values and booth_keys.intersection(match_values):
+        booth_match_id = _normalize_id(
+            booth.get("id")
+            or booth.get("booth_id")
+            or booth.get("boothId")
+        )
+        if booth_match_id != booth_id:
+            continue
+
+        category = _as_str(
+            booth.get("category")
+            or booth.get("booth_category")
+            or booth.get("category_name")
+            or booth.get("categoryName")
+        )
+        if category:
+            return category
+
+    event = _get_event_for_app(app)
+    if isinstance(event, dict):
+        for booth in _extract_booths_from_event(event):
+            booth_match_id = _normalize_id(
+                booth.get("id")
+                or booth.get("booth_id")
+                or booth.get("boothId")
+            )
+            if booth_match_id != booth_id:
+                continue
+
             category = _as_str(
                 booth.get("category")
                 or booth.get("booth_category")
@@ -382,18 +411,29 @@ def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
     return category
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
-    booth_keys = _app_booth_candidates(app)
+    booth_id = _normalize_id(
+        app.get("booth_id")
+        or app.get("boothId")
+        or app.get("requested_booth_id")
+        or app.get("requestedBoothId")
+        or app.get("selected_booth_id")
+        or app.get("selectedBoothId")
+        or app.get("booth")
+    )
+
     event = _get_event_for_app(app)
     diagram = _get_diagram_for_event(app)
 
-    booths: List[Dict[str, Any]] = []
-    if event:
-        booths.extend(_extract_booths_from_event(event))
-    booths.extend(_extract_booths_from_diagram(diagram))
+    if booth_id:
+        for booth in _extract_booths_from_diagram(diagram):
+            booth_match_id = _normalize_id(
+                booth.get("id")
+                or booth.get("booth_id")
+                or booth.get("boothId")
+            )
+            if booth_match_id != booth_id:
+                continue
 
-    for booth in booths:
-        match_values = _booth_match_values(booth)
-        if booth_keys and match_values and booth_keys.intersection(match_values):
             for key in (
                 "price_cents",
                 "priceCents",
@@ -405,6 +445,28 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
                 cents = _price_to_cents(booth.get(key))
                 if cents:
                     return cents
+
+        if isinstance(event, dict):
+            for booth in _extract_booths_from_event(event):
+                booth_match_id = _normalize_id(
+                    booth.get("id")
+                    or booth.get("booth_id")
+                    or booth.get("boothId")
+                )
+                if booth_match_id != booth_id:
+                    continue
+
+                for key in (
+                    "price_cents",
+                    "priceCents",
+                    "amount_cents",
+                    "amountCents",
+                    "price",
+                    "amount",
+                ):
+                    cents = _price_to_cents(booth.get(key))
+                    if cents:
+                        return cents
 
     if isinstance(event, dict):
         for root_key in ("payment_settings", "paymentSettings"):
