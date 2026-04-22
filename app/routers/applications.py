@@ -185,6 +185,24 @@ def _get_event_for_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return event if isinstance(event, dict) else None
 
 
+def _get_diagram_for_event(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    event_id = (
+        app.get("event_id")
+        or app.get("eventId")
+        or app.get("event")
+        or app.get("eventID")
+    )
+    event_key = _normalize_id(event_id)
+    if not event_key:
+        return None
+
+    diagrams = getattr(store, "_DIAGRAMS", {})
+    diagram = diagrams.get(event_key)
+    if diagram is None and event_key.isdigit():
+        diagram = diagrams.get(int(event_key))
+    return diagram if isinstance(diagram, dict) else None
+
+
 def _booth_match_values(booth: Dict[str, Any]) -> set[str]:
     values: set[str] = set()
     keys = [
@@ -275,8 +293,14 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
     for root in possible_roots:
         if isinstance(root, dict):
-            for key in ("booths", "items", "nodes", "elements"):
-                candidates.extend(_iter_dict_values(root.get(key)))
+            for key in ("booths", "items", "nodes", "elements", "levels"):
+                value = root.get(key)
+                if key == "levels" and isinstance(value, list):
+                    for level in value:
+                        if isinstance(level, dict):
+                            candidates.extend(_iter_dict_values(level.get("booths")))
+                else:
+                    candidates.extend(_iter_dict_values(value))
             candidates.extend(_iter_dict_values(root))
         elif isinstance(root, list):
             candidates.extend(_iter_dict_values(root))
@@ -291,18 +315,50 @@ def _extract_booths_from_event(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     return deduped
 
 
+def _extract_booths_from_diagram(diagram: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(diagram, dict):
+        return []
+
+    root = diagram.get("diagram") if isinstance(diagram.get("diagram"), dict) else diagram
+    candidates: List[Dict[str, Any]] = []
+
+    for key in ("booths", "items", "nodes", "elements"):
+        candidates.extend(_iter_dict_values(root.get(key)))
+
+    levels = root.get("levels")
+    if isinstance(levels, list):
+        for level in levels:
+            if not isinstance(level, dict):
+                continue
+            candidates.extend(_iter_dict_values(level.get("booths")))
+            candidates.extend(_iter_dict_values(level.get("items")))
+            candidates.extend(_iter_dict_values(level.get("nodes")))
+
+    deduped: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for booth in candidates:
+        ident = id(booth)
+        if ident not in seen:
+            seen.add(ident)
+            deduped.append(booth)
+    return deduped
+
+
 
 
 def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
-    event = _get_event_for_app(app)
-    if not event:
-        return None
-
     booth_keys = _app_booth_candidates(app)
     if not booth_keys:
         return None
 
-    booths = _extract_booths_from_event(event)
+    event = _get_event_for_app(app)
+    diagram = _get_diagram_for_event(app)
+
+    booths: List[Dict[str, Any]] = []
+    if event:
+        booths.extend(_extract_booths_from_event(event))
+    booths.extend(_extract_booths_from_diagram(diagram))
+
     for booth in booths:
         match_values = _booth_match_values(booth)
         if booth_keys and match_values and booth_keys.intersection(match_values):
@@ -326,12 +382,14 @@ def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
     return category
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
-    event = _get_event_for_app(app)
-    if not event:
-        return None
-
     booth_keys = _app_booth_candidates(app)
-    booths = _extract_booths_from_event(event)
+    event = _get_event_for_app(app)
+    diagram = _get_diagram_for_event(app)
+
+    booths: List[Dict[str, Any]] = []
+    if event:
+        booths.extend(_extract_booths_from_event(event))
+    booths.extend(_extract_booths_from_diagram(diagram))
 
     for booth in booths:
         match_values = _booth_match_values(booth)
@@ -348,20 +406,21 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
                 if cents:
                     return cents
 
-    for root_key in ("payment_settings", "paymentSettings"):
-        payment_settings = event.get(root_key)
-        if isinstance(payment_settings, dict):
-            for key in (
-                "booth_price_cents",
-                "boothPriceCents",
-                "default_booth_price_cents",
-                "defaultBoothPriceCents",
-                "booth_price",
-                "boothPrice",
-            ):
-                cents = _price_to_cents(payment_settings.get(key))
-                if cents:
-                    return cents
+    if isinstance(event, dict):
+        for root_key in ("payment_settings", "paymentSettings"):
+            payment_settings = event.get(root_key)
+            if isinstance(payment_settings, dict):
+                for key in (
+                    "booth_price_cents",
+                    "boothPriceCents",
+                    "default_booth_price_cents",
+                    "defaultBoothPriceCents",
+                    "booth_price",
+                    "boothPrice",
+                ):
+                    cents = _price_to_cents(payment_settings.get(key))
+                    if cents:
+                        return cents
 
     return None
 
@@ -659,6 +718,7 @@ def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
+    _persist_booth_category(app)
     cents = _persist_resolved_booth_price(app)
     booth_price = round(cents / 100, 2) if cents else None
 
@@ -713,36 +773,6 @@ def _payment_exists_for_application(app_id: str) -> bool:
             return True
 
     return False
-
-
-def _delete_application_record(app_id: Any) -> bool:
-    key = _normalize_id(app_id)
-    if not key:
-        return False
-
-    store_map = _applications_store()
-    removed = False
-
-    direct_candidates = [key]
-    if key.isdigit():
-        direct_candidates.append(int(key))
-
-    for candidate in direct_candidates:
-        if candidate in store_map:
-            store_map.pop(candidate, None)
-            removed = True
-
-    if removed:
-        return True
-
-    for stored_key, app in list(store_map.items()):
-        if not isinstance(app, dict):
-            continue
-        if _normalize_id(stored_key) == key or _normalize_id(app.get("id")) == key:
-            store_map.pop(stored_key, None)
-            removed = True
-
-    return removed
 
 
 def _current_status(app: Dict[str, Any]) -> str:
@@ -863,7 +893,7 @@ def _get_frontend_base_url() -> str:
         text = _as_str(value)
         if text:
             return text.rstrip("/")
-    return "https://vendcore.co"
+    return "http://localhost:5173"
 
 
 def expire_reservations_if_needed() -> int:
@@ -1407,9 +1437,6 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
     event_id_str = str(event_id)
     apps = []
     for app in _iter_dict_values(_applications_store()):
-        if app.get("archived") is True:
-            continue
-
         aid = _normalize_id(app.get("event_id") or app.get("eventId"))
         if aid != event_id_str:
             continue
@@ -1444,9 +1471,6 @@ def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
-    if app.get("archived") is True:
-        raise HTTPException(status_code=404, detail="Application not found")
-
     app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
     if app_event_id != str(event_id):
         raise HTTPException(status_code=404, detail="Application not found for this event")
@@ -1468,32 +1492,6 @@ def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     app["status"] = "rejected"
     _save_store()
     return _serialize_application(app)
-
-
-@router.delete("/organizer/events/{event_id}/applications/{app_id}")
-def organizer_delete_application_for_event(event_id: str, app_id: str) -> Dict[str, Any]:
-    app = _get_application_or_404(app_id)
-
-    app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
-    if app_event_id != str(event_id):
-        raise HTTPException(status_code=404, detail="Application not found for this event")
-
-    deleted = _delete_application_record(app_id)
-    if not deleted:
-        return {"ok": True, "already_deleted": True}
-
-    _save_store()
-    return {"ok": True}
-
-
-@router.delete("/organizer/applications/{app_id}")
-def organizer_delete_application(app_id: str) -> Dict[str, Any]:
-    deleted = _delete_application_record(app_id)
-    if not deleted:
-        return {"ok": True, "already_deleted": True}
-
-    _save_store()
-    return {"ok": True}
 
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
@@ -1594,9 +1592,16 @@ def delete_vendor_application(
     if not matches_vendor:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    deleted = _delete_application_record(app_id)
-    if not deleted:
-        return {"ok": True, "already_deleted": True}
+    status = _current_status(app)
+    app_key = _normalize_id(app.get("id")) or _normalize_id(app_id)
+
+    if status in {"approved", "paid"}:
+        app["archived"] = True
+    else:
+        if app_key and app_key in _applications_store():
+            _applications_store().pop(app_key, None)
+        elif app_key and app_key.isdigit():
+            _applications_store().pop(int(app_key), None)
 
     _save_store()
     return {"ok": True}
