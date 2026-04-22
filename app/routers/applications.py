@@ -775,6 +775,36 @@ def _payment_exists_for_application(app_id: str) -> bool:
     return False
 
 
+def _delete_application_record(app_id: Any) -> bool:
+    key = _normalize_id(app_id)
+    if not key:
+        return False
+
+    store_map = _applications_store()
+    removed = False
+
+    direct_candidates = [key]
+    if key.isdigit():
+        direct_candidates.append(int(key))
+
+    for candidate in direct_candidates:
+        if candidate in store_map:
+            store_map.pop(candidate, None)
+            removed = True
+
+    if removed:
+        return True
+
+    for stored_key, app in list(store_map.items()):
+        if not isinstance(app, dict):
+            continue
+        if _normalize_id(stored_key) == key or _normalize_id(app.get("id")) == key:
+            store_map.pop(stored_key, None)
+            removed = True
+
+    return removed
+
+
 def _current_status(app: Dict[str, Any]) -> str:
     return _as_str(app.get("status")).lower()
 
@@ -893,7 +923,7 @@ def _get_frontend_base_url() -> str:
         text = _as_str(value)
         if text:
             return text.rstrip("/")
-    return "http://localhost:5173"
+    return "https://vendcore.co"
 
 
 def expire_reservations_if_needed() -> int:
@@ -1437,6 +1467,9 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
     event_id_str = str(event_id)
     apps = []
     for app in _iter_dict_values(_applications_store()):
+        if app.get("archived") is True:
+            continue
+
         aid = _normalize_id(app.get("event_id") or app.get("eventId"))
         if aid != event_id_str:
             continue
@@ -1471,6 +1504,9 @@ def organizer_get_application(event_id: str, app_id: str) -> Dict[str, Any]:
     expire_reservations_if_needed()
 
     app = _get_application_or_404(app_id)
+    if app.get("archived") is True:
+        raise HTTPException(status_code=404, detail="Application not found")
+
     app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
     if app_event_id != str(event_id):
         raise HTTPException(status_code=404, detail="Application not found for this event")
@@ -1492,6 +1528,32 @@ def organizer_reject_application(app_id: str) -> Dict[str, Any]:
     app["status"] = "rejected"
     _save_store()
     return _serialize_application(app)
+
+
+@router.delete("/organizer/events/{event_id}/applications/{app_id}")
+def organizer_delete_application_for_event(event_id: str, app_id: str) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+
+    app_event_id = _normalize_id(app.get("event_id") or app.get("eventId"))
+    if app_event_id != str(event_id):
+        raise HTTPException(status_code=404, detail="Application not found for this event")
+
+    deleted = _delete_application_record(app_id)
+    if not deleted:
+        return {"ok": True, "already_deleted": True}
+
+    _save_store()
+    return {"ok": True}
+
+
+@router.delete("/organizer/applications/{app_id}")
+def organizer_delete_application(app_id: str) -> Dict[str, Any]:
+    deleted = _delete_application_record(app_id)
+    if not deleted:
+        return {"ok": True, "already_deleted": True}
+
+    _save_store()
+    return {"ok": True}
 
 
 @router.post("/vendor/applications/{app_id}/confirm-payment")
@@ -1592,16 +1654,9 @@ def delete_vendor_application(
     if not matches_vendor:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    status = _current_status(app)
-    app_key = _normalize_id(app.get("id")) or _normalize_id(app_id)
-
-    if status in {"approved", "paid"}:
-        app["archived"] = True
-    else:
-        if app_key and app_key in _applications_store():
-            _applications_store().pop(app_key, None)
-        elif app_key and app_key.isdigit():
-            _applications_store().pop(int(app_key), None)
+    deleted = _delete_application_record(app_id)
+    if not deleted:
+        return {"ok": True, "already_deleted": True}
 
     _save_store()
     return {"ok": True}
