@@ -9,6 +9,14 @@ export type UploadedDocMeta = {
   size: number;
   type?: string;
   lastModified?: number;
+  url?: string;
+  href?: string;
+  secure_url?: string;
+  dataUrl?: string;
+  path?: string;
+  public_id?: string;
+  provider?: string;
+  provider_public_id?: string;
 };
 
 export type ServerApplication = {
@@ -166,6 +174,19 @@ function normalizeDocumentsShape(
     const normalized = items
       .map((item: any) => {
         if (!item || typeof item !== "object") return null;
+        const url =
+          item?.url != null
+            ? String(item.url)
+            : item?.href != null
+            ? String(item.href)
+            : item?.secure_url != null
+            ? String(item.secure_url)
+            : item?.path != null
+            ? String(item.path)
+            : item?.dataUrl != null
+            ? String(item.dataUrl)
+            : undefined;
+
         return {
           name: String(item?.name || item?.filename || key || "file"),
           size: Number(item?.size || 0),
@@ -176,6 +197,15 @@ function normalizeDocumentsShape(
               : item?.last_modified != null
               ? Number(item.last_modified)
               : 0,
+          url,
+          href: item?.href != null ? String(item.href) : url,
+          secure_url: item?.secure_url != null ? String(item.secure_url) : url,
+          dataUrl: item?.dataUrl != null ? String(item.dataUrl) : undefined,
+          path: item?.path != null ? String(item.path) : undefined,
+          public_id: item?.public_id != null ? String(item.public_id) : undefined,
+          provider: item?.provider != null ? String(item.provider) : undefined,
+          provider_public_id:
+            item?.provider_public_id != null ? String(item.provider_public_id) : undefined,
         } as UploadedDocMeta;
       })
       .filter(Boolean) as UploadedDocMeta[];
