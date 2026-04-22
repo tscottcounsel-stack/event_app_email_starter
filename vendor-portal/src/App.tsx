@@ -298,10 +298,6 @@ export default function App() {
             element={<OrganizerApplicationsPage />}
           />
           <Route
-            path="events/:eventId/application/:applicationId"
-            element={<OrganizerApplicationViewPage />}
-          />
-          <Route
             path="events/:eventId/applications/:appId"
             element={<OrganizerApplicationViewPage />}
           />
