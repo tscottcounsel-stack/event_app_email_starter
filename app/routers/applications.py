@@ -871,8 +871,26 @@ def _current_status(app: Dict[str, Any]) -> str:
     return _as_str(app.get("status")).lower()
 
 
-def _is_locked_for_vendor_edits(app: Dict[str, Any]) -> bool:
-    return _current_status(app) in {"submitted", "approved", "paid"}
+def _is_locked_for_vendor_edits(
+    app: Dict[str, Any],
+    payload: Optional[Dict[str, Any]] = None,
+) -> bool:
+    status = _current_status(app)
+    if status in {"paid", "rejected"}:
+        return True
+
+    if status in {"submitted", "approved"}:
+        incoming = payload if isinstance(payload, dict) else {}
+        allowed_keys = {
+            "checked",
+            "documents",
+            "docs",
+            "notes",
+        }
+        changed_keys = {str(key).strip() for key in incoming.keys() if str(key).strip()}
+        return not changed_keys.issubset(allowed_keys)
+
+    return False
 
 
 def _create_payment_record(
@@ -1091,8 +1109,11 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
 
     app = _get_application_or_404(app_id)
 
-    if _is_locked_for_vendor_edits(app):
-        raise HTTPException(status_code=400, detail="Application is locked and cannot be modified.")
+    if _is_locked_for_vendor_edits(app, payload):
+        raise HTTPException(
+            status_code=400,
+            detail="This application is locked for booth/category edits. You can still update requirement checkboxes and document uploads while it is submitted or approved.",
+        )
 
     booth_id = _as_str(payload.get("booth_id"))
     booth_category = _as_str(
