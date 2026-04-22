@@ -1041,9 +1041,97 @@ def expire_reservations_if_needed() -> int:
     return expired_count
 
 
+def _can_access_messages(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
+    role = _as_str(user.get("role")).lower()
+    if role in {"admin", "organizer"}:
+        return True
+
+    vendor_id, vendor_email = _extract_vendor_identity(user)
+    app_vendor_id = _normalize_id(
+        app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or app.get("userId")
+    )
+    app_vendor_email = _as_str(app.get("vendor_email")).lower()
+
+    if vendor_id and app_vendor_id and vendor_id == app_vendor_id:
+        return True
+    if vendor_email and app_vendor_email and vendor_email == app_vendor_email:
+        return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@router.get("/applications/{app_id}/messages")
+def get_application_messages(
+    app_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+    user = _extract_user_from_token(authorization)
+
+    if not _can_access_messages(app, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    messages = app.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+
+    cleaned: List[Dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        cleaned.append(
+            {
+                "id": _as_str(msg.get("id")) or str(int(time.time() * 1000)),
+                "sender": _as_str(msg.get("sender")) or "unknown",
+                "text": _as_str(msg.get("text")),
+                "created_at": _as_str(msg.get("created_at")) or _now_iso(),
+            }
+        )
+
+    return {"messages": cleaned}
+
+
+@router.post("/applications/{app_id}/messages")
+def post_application_message(
+    app_id: str,
+    payload: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+    user = _extract_user_from_token(authorization)
+
+    if not _can_access_messages(app, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    text = _as_str(payload.get("text"))
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    role = _as_str(user.get("role")).lower()
+    if role not in {"organizer", "vendor", "admin"}:
+        role = "vendor" if _can_access_messages(app, user) else "unknown"
+
+    message = {
+        "id": str(int(time.time() * 1000)),
+        "sender": role,
+        "text": text,
+        "created_at": _now_iso(),
+    }
+
+    existing = app.get("messages")
+    if not isinstance(existing, list):
+        existing = []
+        app["messages"] = existing
+
+    existing.append(message)
+    app["updated_at"] = _now_iso()
+    _save_store()
+    return {"ok": True, "message": message, "messages": existing}
+
 
 @router.get("/vendor/applications")
 def list_vendor_applications(authorization: Optional[str] = Header(default=None)) -> List[Dict[str, Any]]:
