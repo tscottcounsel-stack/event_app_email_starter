@@ -5,8 +5,8 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
-from fastapi import APIRouter, Body, Header, HTTPException, Request
+ 
+from fastapi import APIRouter, Body, Header, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 try:
@@ -1833,45 +1833,53 @@ def delete_vendor_application(
     return {"ok": True}
 
 @router.get("/messages/inbox")
-async def get_messages_inbox(current_user=Depends(get_current_user)):
-    user_email = current_user.get("email")
+def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
+    user = _extract_user_from_token(authorization)
+    user_email = _extract_vendor_email_from_user(user)
 
-    # Find all applications where this user is involved
-    apps = await db.applications.find({
-        "$or": [
-            {"organizer_email": user_email},
-            {"vendor_email": user_email},
-        ]
-    }).to_list(1000)
+    if not user_email:
+        return {"conversations": []}
 
     conversations = []
 
-    for app in apps:
-        messages = app.get("messages", [])
+    for app in _iter_dict_values(_applications_store()):
+        messages = app.get("messages")
+        if not isinstance(messages, list) or not messages:
+            continue
 
-        last_message = messages[-1] if messages else None
+        vendor_email = _as_str(app.get("vendor_email")).lower()
+        organizer_email = _as_str(
+            (_get_event_for_app(app) or {}).get("organizer_email")
+        ).lower()
+
+        # Only include conversations user is part of
+        if user_email not in {vendor_email, organizer_email}:
+            continue
+
+        last_message = messages[-1]
 
         unread_count = 0
         for msg in messages:
-            if user_email not in msg.get("read_by", []):
-                if msg.get("sender") != user_email:
-                    unread_count += 1
+            read_by = msg.get("read_by", [])
+            sender = _as_str(msg.get("sender"))
+
+            if user_email not in read_by and sender != user_email:
+                unread_count += 1
 
         conversations.append({
-            "application_id": str(app.get("_id")),
-            "event_id": app.get("event_id"),
+            "application_id": _normalize_id(app.get("id")),
+            "event_id": _normalize_id(app.get("event_id")),
             "vendor_name": app.get("vendor_name"),
-            "vendor_email": app.get("vendor_email"),
+            "vendor_email": vendor_email,
             "booth_id": app.get("booth_id"),
             "status": app.get("status"),
             "payment_status": app.get("payment_status"),
             "message_count": len(messages),
             "unread_count": unread_count,
-            "updated_at": last_message.get("created_at") if last_message else None,
+            "updated_at": last_message.get("created_at"),
             "last_message": last_message,
         })
 
-    # Sort by most recent message
     conversations.sort(
         key=lambda x: x["updated_at"] or "",
         reverse=True
@@ -1879,15 +1887,20 @@ async def get_messages_inbox(current_user=Depends(get_current_user)):
 
     return {"conversations": conversations}
 
+
 @router.post("/applications/{app_id}/messages/read")
-async def mark_messages_read(app_id: str, current_user=Depends(get_current_user)):
-    user_email = current_user.get("email")
+def mark_messages_read(
+    app_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _extract_user_from_token(authorization)
+    user_email = _extract_vendor_email_from_user(user)
 
-    app = await db.applications.find_one({"_id": ObjectId(app_id)})
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
+    app = _get_application_or_404(app_id)
 
-    messages = app.get("messages", [])
+    messages = app.get("messages")
+    if not isinstance(messages, list):
+        return {"success": True}
 
     for msg in messages:
         read_by = msg.get("read_by", [])
@@ -1895,9 +1908,5 @@ async def mark_messages_read(app_id: str, current_user=Depends(get_current_user)
             read_by.append(user_email)
             msg["read_by"] = read_by
 
-    await db.applications.update_one(
-        {"_id": ObjectId(app_id)},
-        {"$set": {"messages": messages}}
-    )
-
+    _save_store()
     return {"success": True}
