@@ -1836,8 +1836,9 @@ def delete_vendor_application(
 def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
     user = _extract_user_from_token(authorization)
     user_email = _extract_vendor_email_from_user(user)
+    user_role = _as_str(user.get("role")).lower()
 
-    if not user_email:
+    if not user_email and user_role != "organizer":
         return {"conversations": []}
 
     conversations = []
@@ -1853,8 +1854,11 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
         ).lower()
 
         # Only include conversations user is part of
-        if user_email not in {vendor_email, organizer_email}:
-            continue
+        # Allow organizer by role OR email match
+    if user_role == "organizer":
+        pass
+    elif user_email not in {vendor_email, organizer_email}:
+        continue
 
         last_message = messages[-1]
 
