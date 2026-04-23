@@ -196,15 +196,15 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
     merged.setdefault("company_name", organizer_name)
     merged.setdefault("host_name", organizer_name)
 
-    title = str(
-        merged.get("title")
-        or merged.get("name")
-        or merged.get("event_title")
-        or f"Event #{event_id}"
-    ).strip()
+    title = _clean_event_title(
+        merged.get("title"),
+        merged.get("name"),
+        merged.get("event_title"),
+        event_id=event_id,
+    )
     merged["title"] = title
-    merged.setdefault("name", title)
-    merged.setdefault("event_title", title)
+    merged["name"] = title
+    merged["event_title"] = title
 
     organizer_email = _norm_email(
         merged.get("organizer_email")
@@ -290,6 +290,37 @@ def _safe_float(value: Any) -> float:
         return float(s or 0)
     except Exception:
         return 0.0
+
+
+def _is_bad_event_title(value: Any) -> bool:
+    text = str(value or "").strip()
+    return not text or text.lower() in {"untitled", "untitled event", "none", "null"}
+
+
+def _clean_event_title(*values: Any, event_id: Any = None) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text and not _is_bad_event_title(text):
+            return text
+
+    event_id_text = str(event_id or "").strip()
+    return f"Event #{event_id_text}" if event_id_text else "Event"
+
+
+def _lookup_event_title_from_db(db: Session, event_id: Any) -> str:
+    try:
+        eid = int(event_id or 0)
+    except Exception:
+        return ""
+
+    if not eid:
+        return ""
+
+    try:
+        row = db.query(Event).filter(Event.id == eid).first()
+        return str(getattr(row, "title", "") or "").strip() if row else ""
+    except Exception:
+        return ""
 
 
 def _coerce_payment_status(value: Any) -> str:
@@ -521,7 +552,15 @@ def organizer_earnings(
         else:
             payouts_owed += payout
 
-        title = payment.get("event_title") or (event_row or {}).get("title") or f"Event {event_id}"
+        db_event_title = _lookup_event_title_from_db(db, event_id)
+        title = _clean_event_title(
+            db_event_title,
+            (event_row or {}).get("title"),
+            (event_row or {}).get("event_title"),
+            (event_row or {}).get("name"),
+            payment.get("event_title"),
+            event_id=event_id,
+        )
 
         if event_id not in event_totals:
             event_totals[event_id] = {
@@ -612,7 +651,13 @@ def admin_list_payouts():
 
         event_id = int(payment.get("event_id") or 0)
         event_row = events.get(str(event_id)) or events.get(event_id) or {}
-        event_title = payment.get("event_title") or (event_row or {}).get("title") or f"Event {event_id}"
+        event_title = _clean_event_title(
+            (event_row or {}).get("title"),
+            (event_row or {}).get("event_title"),
+            (event_row or {}).get("name"),
+            payment.get("event_title"),
+            event_id=event_id,
+        )
 
         row = {
             "payment_id": payment_id,
