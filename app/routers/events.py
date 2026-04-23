@@ -510,7 +510,9 @@ def organizer_earnings(
 
     event_totals: Dict[int, Dict[str, Any]] = {}
 
-    for payment in payments.values():
+    payout_rows: list[Dict[str, Any]] = []
+
+    for payment_key, payment in payments.items():
         if not isinstance(payment, dict):
             continue
         if str(payment.get("status", "")).lower() != "paid":
@@ -562,6 +564,29 @@ def organizer_earnings(
             event_id=event_id,
         )
 
+        try:
+            payment_id = int(payment_key)
+        except Exception:
+            try:
+                payment_id = int(payment.get("id") or 0)
+            except Exception:
+                payment_id = 0
+
+        payout_rows.append({
+            "payment_id": payment_id,
+            "event_id": event_id,
+            "event_title": title,
+            "application_id": payment.get("application_id"),
+            "vendor_name": payment.get("vendor_name"),
+            "vendor_email": payment.get("vendor_email"),
+            "amount": round(amount, 2),
+            "platform_fee": round(fee, 2),
+            "organizer_payout": round(payout, 2),
+            "payout_status": payout_status or "unpaid",
+            "payout_sent_at": payment.get("payout_sent_at"),
+            "paid_at": payment.get("paid_at") or payment.get("updated_at") or payment.get("created_at"),
+        })
+
         if event_id not in event_totals:
             event_totals[event_id] = {
                 "event_id": event_id,
@@ -602,6 +627,15 @@ def organizer_earnings(
         reverse=True,
     )
 
+    payout_rows.sort(
+        key=lambda row: (
+            str(row.get("payout_status") or "") != "unpaid",
+            str(row.get("paid_at") or ""),
+            int(row.get("payment_id") or 0),
+        ),
+        reverse=True,
+    )
+
     return {
         "summary": {
             "gross_sales": round(gross_sales, 2),
@@ -611,6 +645,7 @@ def organizer_earnings(
             "payouts_owed": round(payouts_owed, 2),
         },
         "events": event_rows,
+        "payouts": payout_rows,
     }
 
 
@@ -713,7 +748,13 @@ def admin_list_payouts():
 
 @router.patch("/admin/payout/{payment_id}")
 def admin_mark_payout_paid(payment_id: int):
-    payment = _PAYMENTS.get(int(payment_id))
+    payment = _PAYMENTS.get(int(payment_id)) or _PAYMENTS.get(str(payment_id))
+    if not payment:
+        for candidate in _PAYMENTS.values():
+            if isinstance(candidate, dict) and str(candidate.get("id")) == str(payment_id):
+                payment = candidate
+                break
+
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
 
