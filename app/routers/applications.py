@@ -1831,3 +1831,73 @@ def delete_vendor_application(
 
     _save_store()
     return {"ok": True}
+
+@router.get("/messages/inbox")
+async def get_messages_inbox(current_user=Depends(get_current_user)):
+    user_email = current_user.get("email")
+
+    # Find all applications where this user is involved
+    apps = await db.applications.find({
+        "$or": [
+            {"organizer_email": user_email},
+            {"vendor_email": user_email},
+        ]
+    }).to_list(1000)
+
+    conversations = []
+
+    for app in apps:
+        messages = app.get("messages", [])
+
+        last_message = messages[-1] if messages else None
+
+        unread_count = 0
+        for msg in messages:
+            if user_email not in msg.get("read_by", []):
+                if msg.get("sender") != user_email:
+                    unread_count += 1
+
+        conversations.append({
+            "application_id": str(app.get("_id")),
+            "event_id": app.get("event_id"),
+            "vendor_name": app.get("vendor_name"),
+            "vendor_email": app.get("vendor_email"),
+            "booth_id": app.get("booth_id"),
+            "status": app.get("status"),
+            "payment_status": app.get("payment_status"),
+            "message_count": len(messages),
+            "unread_count": unread_count,
+            "updated_at": last_message.get("created_at") if last_message else None,
+            "last_message": last_message,
+        })
+
+    # Sort by most recent message
+    conversations.sort(
+        key=lambda x: x["updated_at"] or "",
+        reverse=True
+    )
+
+    return {"conversations": conversations}
+
+@router.post("/applications/{app_id}/messages/read")
+async def mark_messages_read(app_id: str, current_user=Depends(get_current_user)):
+    user_email = current_user.get("email")
+
+    app = await db.applications.find_one({"_id": ObjectId(app_id)})
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    messages = app.get("messages", [])
+
+    for msg in messages:
+        read_by = msg.get("read_by", [])
+        if user_email not in read_by:
+            read_by.append(user_email)
+            msg["read_by"] = read_by
+
+    await db.applications.update_one(
+        {"_id": ObjectId(app_id)},
+        {"$set": {"messages": messages}}
+    )
+
+    return {"success": True}
