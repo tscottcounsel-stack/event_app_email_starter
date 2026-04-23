@@ -1853,21 +1853,26 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             (_get_event_for_app(app) or {}).get("organizer_email")
         ).lower()
 
-        # Only include conversations user is part of
-        # Allow organizer by role OR email match
-    if user_role == "organizer":
-        pass
-    elif user_email not in {vendor_email, organizer_email}:
-        continue
+        if user_role != "organizer" and user_email not in {vendor_email, organizer_email}:
+            continue
 
         last_message = messages[-1]
 
         unread_count = 0
         for msg in messages:
             read_by = msg.get("read_by", [])
-            sender = _as_str(msg.get("sender"))
+            sender = _as_str(msg.get("sender")).lower()
 
-            if user_email not in read_by and sender != user_email:
+            if user_role == "organizer":
+                if sender in {"organizer", "admin"}:
+                    continue
+            else:
+                if user_email and sender == user_email:
+                    continue
+                if sender == "vendor":
+                    continue
+
+            if user_email not in read_by:
                 unread_count += 1
 
         conversations.append({
@@ -1890,7 +1895,6 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
     )
 
     return {"conversations": conversations}
-
 
 @router.post("/applications/{app_id}/messages/read")
 def mark_messages_read(
