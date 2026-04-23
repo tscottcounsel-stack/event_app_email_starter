@@ -59,6 +59,78 @@ def _init_db_if_available() -> None:
     except Exception as exc:
         logger.warning("DB init unavailable: %s", exc)
 
+def _sync_events_store_from_db_if_available() -> None:
+    try:
+        from app.db import SessionLocal  # type: ignore
+        from app.models.event import Event  # type: ignore
+        from app.store import _EVENTS, save_store  # type: ignore
+
+        db = SessionLocal()
+        try:
+            rows = db.query(Event).all()
+            synced = 0
+            for ev in rows:
+                organizer_name = (
+                    getattr(ev, "organizer_name", None)
+                    or getattr(ev, "company_name", None)
+                    or getattr(ev, "host_name", None)
+                    or getattr(ev, "title", None)
+                    or getattr(ev, "organizer_email", None)
+                    or getattr(ev, "owner_email", None)
+                    or "Organizer"
+                )
+                title = (
+                    getattr(ev, "title", None)
+                    or getattr(ev, "name", None)
+                    or getattr(ev, "event_title", None)
+                    or f"Event #{getattr(ev, 'id', '')}"
+                )
+
+                _EVENTS[int(ev.id)] = {
+                    **(_EVENTS.get(int(ev.id), {}) if isinstance(_EVENTS.get(int(ev.id)), dict) else {}),
+                    "id": ev.id,
+                    "title": title,
+                    "name": title,
+                    "event_title": title,
+                    "description": getattr(ev, "description", None),
+                    "start_date": getattr(ev, "start_date", None).isoformat() if getattr(ev, "start_date", None) else None,
+                    "end_date": getattr(ev, "end_date", None).isoformat() if getattr(ev, "end_date", None) else None,
+                    "venue_name": getattr(ev, "venue_name", None),
+                    "street_address": getattr(ev, "street_address", None),
+                    "city": getattr(ev, "city", None),
+                    "state": getattr(ev, "state", None),
+                    "zip_code": getattr(ev, "zip_code", None),
+                    "ticket_sales_url": getattr(ev, "ticket_sales_url", None),
+                    "google_maps_url": getattr(ev, "google_maps_url", None),
+                    "category": getattr(ev, "category", None),
+                    "heroImageUrl": getattr(ev, "hero_image_url", None),
+                    "imageUrls": list(getattr(ev, "image_urls", None) or []),
+                    "videoUrls": list(getattr(ev, "video_urls", None) or []),
+                    "published": bool(getattr(ev, "published", False)),
+                    "archived": bool(getattr(ev, "archived", False)),
+                    "requirements_published": bool(getattr(ev, "requirements_published", False)),
+                    "layout_published": bool(getattr(ev, "layout_published", False)),
+                    "organizer_name": organizer_name,
+                    "company_name": organizer_name,
+                    "host_name": organizer_name,
+                    "organizer_email": getattr(ev, "organizer_email", None),
+                    "owner_email": getattr(ev, "owner_email", None),
+                    "email": getattr(ev, "organizer_email", None) or getattr(ev, "owner_email", None),
+                    "organizer_id": getattr(ev, "organizer_id", None),
+                    "owner_id": getattr(ev, "owner_id", None),
+                    "created_by": getattr(ev, "created_by", None),
+                    "created_at": getattr(ev, "created_at", None).isoformat() if getattr(ev, "created_at", None) else None,
+                    "updated_at": getattr(ev, "updated_at", None).isoformat() if getattr(ev, "updated_at", None) else None,
+                }
+                synced += 1
+
+            save_store()
+            logger.info("Synced %s events from DB into JSON store", synced)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Event store sync unavailable: %s", exc)
+
 def _env_csv(name: str) -> list[str]:
     raw = os.getenv(name, "")
     if not raw.strip():
@@ -113,6 +185,7 @@ from app.models.booth import Booth  # noqa: F401
 from app.models.diagram import Diagram  # noqa: F401
 
 _init_db_if_available()
+_sync_events_store_from_db_if_available()
 
 
 @app.get("/")
