@@ -917,26 +917,16 @@ def _create_payment_record(
     )
     vendor_email = app.get("vendor_email") or "unknown@email.com"
 
-    organizer_name = _as_str(
-    event.get("organizer_name")
-    or event.get("company_name")
-    or event.get("host_name")
-    or event.get("organizer_email")
-    or event.get("email")
-    or "Organizer"
-)
-
-organizer_email = _as_str(
-    event.get("organizer_email")
-    or event.get("email")
-).lower()
-
-event_title = _as_str(
-    event.get("title")
-    or event.get("name")
-    or event.get("event_title")
-    or f"Event #{app.get('event_id')}"
-)
+    organizer_name = (
+        event.get("organizer_name")
+        or event.get("company_name")
+        or event.get("host_name")
+        or event.get("organizer_email")
+        or event.get("email")
+        or "Organizer"
+    )
+    organizer_email = event.get("organizer_email") or event.get("email") or "unknown@email.com"
+    organizer_id = event.get("organizer_id") or event.get("owner_id") or event.get("created_by")
 
     booth_id = app.get("booth_id") or app.get("selected_booth_id") or app.get("requested_booth_id")
     booth_label = app.get("booth_label") or app.get("booth_number") or booth_id
@@ -1862,28 +1852,25 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
 
         event = _get_event_for_app(app) or {}
 
-       vendor_email = _as_str(app.get("vendor_email")).lower()
-       vendor_key = vendor_email or _as_str(app.get("vendor_id")).lower()
+        vendor_email = _as_str(app.get("vendor_email")).lower()
+        vendor_key = vendor_email or _as_str(app.get("vendor_id")).lower()
+        vendor_profile = store._VENDORS.get(vendor_key, {}) if vendor_key else {}
 
-       vendor_profile = store._VENDORS.get(vendor_key, {}) if vendor_key else {}
-
-       vendor_name = _as_str(
-           vendor_profile.get("business_name")
-           or vendor_profile.get("contact_name")
-           or app.get("vendor_name")
-           or app.get("business_name")
-           or app.get("company_name")
-           or app.get("name")
-           or app.get("vendor_display_name")
-           or vendor_email
-)
+        vendor_name = _as_str(
+            vendor_profile.get("business_name")
+            or vendor_profile.get("contact_name")
+            or app.get("vendor_name")
+            or app.get("business_name")
+            or app.get("company_name")
+            or app.get("name")
+            or app.get("vendor_display_name")
+            or vendor_email
+        )
 
         organizer_name = _as_str(
             event.get("organizer_name")
             or event.get("company_name")
             or event.get("host_name")
-            or event.get("name")
-            or event.get("title")
             or event.get("organizer_email")
             or event.get("email")
             or "Organizer"
