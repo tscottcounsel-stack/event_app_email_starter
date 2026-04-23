@@ -17,7 +17,7 @@ from app.db import get_db
 from app.models.event import Event
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
-from app.store import _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
+from app.store import _EVENTS, _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
 
 logger = logging.getLogger(__name__)
 logger.warning("🔥 app.routers.events loaded (postgres)")
@@ -160,6 +160,84 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "created_at": _dt_to_iso(ev.created_at),
         "updated_at": _dt_to_iso(ev.updated_at),
     }
+
+
+def _event_organizer_display_name(user: Optional[Dict[str, Any]], event_data: Optional[Dict[str, Any]] = None) -> str:
+    event_data = event_data or {}
+    user = user or {}
+
+    return str(
+        event_data.get("organizer_name")
+        or event_data.get("company_name")
+        or event_data.get("host_name")
+        or user.get("company_name")
+        or user.get("organizer_name")
+        or user.get("name")
+        or user.get("full_name")
+        or user.get("display_name")
+        or user.get("email")
+        or "Organizer"
+    ).strip()
+
+
+def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    event_id = int(event_data.get("id") or 0)
+    if not event_id:
+        return event_data
+
+    existing = _EVENTS.get(event_id, {}) if isinstance(_EVENTS.get(event_id), dict) else {}
+    merged = {
+        **existing,
+        **dict(event_data or {}),
+    }
+
+    organizer_name = _event_organizer_display_name(user, merged)
+    merged["organizer_name"] = organizer_name
+    merged.setdefault("company_name", organizer_name)
+    merged.setdefault("host_name", organizer_name)
+
+    title = str(
+        merged.get("title")
+        or merged.get("name")
+        or merged.get("event_title")
+        or f"Event #{event_id}"
+    ).strip()
+    merged["title"] = title
+    merged.setdefault("name", title)
+    merged.setdefault("event_title", title)
+
+    organizer_email = _norm_email(
+        merged.get("organizer_email")
+        or merged.get("owner_email")
+        or (user or {}).get("email")
+    )
+    if organizer_email:
+        merged["organizer_email"] = organizer_email
+        merged.setdefault("owner_email", organizer_email)
+        merged.setdefault("email", organizer_email)
+
+    organizer_id = (
+        merged.get("organizer_id")
+        or merged.get("owner_id")
+        or merged.get("created_by")
+        or (user or {}).get("organizer_id")
+        or (user or {}).get("id")
+        or (user or {}).get("sub")
+    )
+    if organizer_id is not None:
+        organizer_id = str(organizer_id)
+        merged["organizer_id"] = organizer_id
+        merged.setdefault("owner_id", organizer_id)
+        merged.setdefault("created_by", organizer_id)
+
+    _EVENTS[event_id] = merged
+    save_store()
+    return merged
+
+
+def _remove_event_from_store(event_id: int) -> None:
+    _EVENTS.pop(int(event_id), None)
+    save_store()
 
 
 def _owned_events_for_user(db: Session, user: Dict[str, Any]) -> list[Event]:
@@ -312,7 +390,9 @@ def organizer_create_event(
     db.commit()
     db.refresh(event)
 
-    return _serialize_event_model(event)
+    serialized = _serialize_event_model(event)
+    _sync_event_to_store(serialized, user)
+    return serialized
 
 
 @router.get("/organizer/events/{event_id}")
@@ -336,7 +416,9 @@ def organizer_patch_event(
     db.add(ev)
     db.commit()
     db.refresh(ev)
-    return _serialize_event_model(ev)
+    serialized = _serialize_event_model(ev)
+    _sync_event_to_store(serialized, user)
+    return serialized
 
 
 @router.delete("/organizer/events/{event_id}")
@@ -351,6 +433,7 @@ def organizer_delete_event(
     db.commit()
 
     _REQUIREMENTS.pop(eid, None)
+    _remove_event_from_store(eid)
     save_store()
     return {"ok": True}
 
@@ -367,7 +450,9 @@ def organizer_publish_event(
     db.add(ev)
     db.commit()
     db.refresh(ev)
-    return _serialize_event_model(ev)
+    serialized = _serialize_event_model(ev)
+    _sync_event_to_store(serialized, user)
+    return serialized
 
 
 @router.get("/organizer/earnings")
@@ -651,7 +736,9 @@ def public_patch_event_alias(
     db.add(ev)
     db.commit()
     db.refresh(ev)
-    return _serialize_event_model(ev)
+    serialized = _serialize_event_model(ev)
+    _sync_event_to_store(serialized)
+    return serialized
 
 
 @router.get("/events/{event_id}/stats")
