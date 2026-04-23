@@ -1849,6 +1849,7 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             continue
 
         event = _get_event_for_app(app) or {}
+
         vendor_email = _as_str(app.get("vendor_email")).lower()
         vendor_name = _as_str(
             app.get("vendor_name")
@@ -1856,6 +1857,7 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             or app.get("company_name")
             or app.get("name")
             or app.get("vendor_display_name")
+            or vendor_email
         )
 
         organizer_name = _as_str(
@@ -1864,7 +1866,9 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             or event.get("host_name")
             or event.get("name")
             or event.get("title")
+            or event.get("organizer_email")
             or event.get("email")
+            or "Organizer"
         )
         organizer_email = _as_str(
             event.get("organizer_email")
@@ -1874,6 +1878,7 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             event.get("title")
             or event.get("name")
             or event.get("event_title")
+            or f"Event #{app.get('event_id')}"
         )
 
         if user_role != "organizer" and user_email not in {vendor_email, organizer_email}:
@@ -1883,16 +1888,16 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
 
         unread_count = 0
         for msg in messages:
-            read_by = msg.get("read_by", [])
+            read_by = [str(v).strip().lower() for v in (msg.get("read_by", []) or [])]
             sender = _as_str(msg.get("sender")).lower()
 
             if user_role == "organizer":
                 if sender in {"organizer", "admin"}:
                     continue
                 organizer_has_read = (
-                    "organizer" in [str(v).strip().lower() for v in read_by]
-                    or "admin" in [str(v).strip().lower() for v in read_by]
-                    or (user_email and user_email in [str(v).strip().lower() for v in read_by])
+                    "organizer" in read_by
+                    or "admin" in read_by
+                    or (user_email and user_email in read_by)
                 )
                 if not organizer_has_read:
                     unread_count += 1
@@ -1900,8 +1905,8 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
                 if sender == "vendor" or (user_email and sender == user_email):
                     continue
                 vendor_has_read = (
-                    "vendor" in [str(v).strip().lower() for v in read_by]
-                    or (user_email and user_email in [str(v).strip().lower() for v in read_by])
+                    "vendor" in read_by
+                    or (user_email and user_email in read_by)
                 )
                 if not vendor_has_read:
                     unread_count += 1
