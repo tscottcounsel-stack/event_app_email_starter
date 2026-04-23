@@ -1848,10 +1848,33 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
         if not isinstance(messages, list) or not messages:
             continue
 
+        event = _get_event_for_app(app) or {}
         vendor_email = _as_str(app.get("vendor_email")).lower()
+        vendor_name = _as_str(
+            app.get("vendor_name")
+            or app.get("business_name")
+            or app.get("company_name")
+            or app.get("name")
+            or app.get("vendor_display_name")
+        )
+
+        organizer_name = _as_str(
+            event.get("organizer_name")
+            or event.get("company_name")
+            or event.get("host_name")
+            or event.get("name")
+            or event.get("title")
+            or event.get("email")
+        )
         organizer_email = _as_str(
-            (_get_event_for_app(app) or {}).get("organizer_email")
+            event.get("organizer_email")
+            or event.get("email")
         ).lower()
+        event_title = _as_str(
+            event.get("title")
+            or event.get("name")
+            or event.get("event_title")
+        )
 
         if user_role != "organizer" and user_email not in {vendor_email, organizer_email}:
             continue
@@ -1866,20 +1889,31 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             if user_role == "organizer":
                 if sender in {"organizer", "admin"}:
                     continue
+                organizer_has_read = (
+                    "organizer" in [str(v).strip().lower() for v in read_by]
+                    or "admin" in [str(v).strip().lower() for v in read_by]
+                    or (user_email and user_email in [str(v).strip().lower() for v in read_by])
+                )
+                if not organizer_has_read:
+                    unread_count += 1
             else:
-                if user_email and sender == user_email:
+                if sender == "vendor" or (user_email and sender == user_email):
                     continue
-                if sender == "vendor":
-                    continue
-
-            if user_email not in read_by:
-                unread_count += 1
+                vendor_has_read = (
+                    "vendor" in [str(v).strip().lower() for v in read_by]
+                    or (user_email and user_email in [str(v).strip().lower() for v in read_by])
+                )
+                if not vendor_has_read:
+                    unread_count += 1
 
         conversations.append({
             "application_id": _normalize_id(app.get("id")),
             "event_id": _normalize_id(app.get("event_id")),
-            "vendor_name": app.get("vendor_name"),
+            "event_title": event_title,
+            "vendor_name": vendor_name,
             "vendor_email": vendor_email,
+            "organizer_name": organizer_name,
+            "organizer_email": organizer_email,
             "booth_id": app.get("booth_id"),
             "status": app.get("status"),
             "payment_status": app.get("payment_status"),
