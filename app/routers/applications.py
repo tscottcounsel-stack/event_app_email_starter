@@ -96,6 +96,23 @@ def _normalize_id(value: Any) -> Optional[str]:
     return text or None
 
 
+def _normalize_string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [_as_str(item) for item in value if _as_str(item)]
+    if isinstance(value, str):
+        text = _as_str(value)
+        return [text] if text else []
+    return []
+
+
+def _first_vendor_category(payload: Dict[str, Any]) -> str:
+    direct = _as_str(payload.get("vendor_category"))
+    if direct:
+        return direct
+    categories = _normalize_string_list(payload.get("vendor_categories"))
+    return categories[0] if categories else ""
+
+
 def _extract_user_from_token(auth_header: Optional[str]) -> Dict[str, Any]:
     if not auth_header:
         return {}
@@ -626,10 +643,9 @@ def _resolve_selected_booth_category(
 ) -> str:
     direct_candidates = [
         app.get("booth_category"),
-        app.get("vendor_category"),
-        app.get("category"),
         app.get("requested_booth_category"),
         app.get("selected_booth_category"),
+        app.get("category"),
     ]
     for candidate in direct_candidates:
         candidate_text = _as_str(candidate)
@@ -887,6 +903,8 @@ def _is_locked_for_vendor_edits(
             "documents",
             "docs",
             "notes",
+            "vendor_category",
+            "vendor_categories",
         }
         changed_keys = {str(key).strip() for key in incoming.keys() if str(key).strip()}
         return not changed_keys.issubset(allowed_keys)
@@ -944,6 +962,8 @@ def _create_payment_record(
         "event_title": event_title,
         "vendor_name": vendor_name,
         "vendor_email": vendor_email,
+        "vendor_category": app.get("vendor_category"),
+        "vendor_categories": app.get("vendor_categories") or [],
         "organizer_name": organizer_name,
         "organizer_email": organizer_email,
         "organizer_id": organizer_id,
@@ -1248,10 +1268,19 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
 
     vendor_name = _as_str(payload.get("vendor_name"))
     vendor_email = _as_str(payload.get("vendor_email"))
+    vendor_category = _first_vendor_category(payload)
+    vendor_categories = _normalize_string_list(payload.get("vendor_categories"))
+
     if vendor_name:
         app["vendor_name"] = vendor_name
     if vendor_email:
         app["vendor_email"] = vendor_email
+    if vendor_category:
+        app["vendor_category"] = vendor_category
+    if vendor_categories:
+        app["vendor_categories"] = vendor_categories
+    elif vendor_category and not isinstance(app.get("vendor_categories"), list):
+        app["vendor_categories"] = [vendor_category]
 
     if app.get("booth_id") and not app.get("booth_category"):
         _persist_booth_category(app)
@@ -1408,9 +1437,19 @@ def create_vendor_application(
             continue
 
         if _current_status(app) in {"", "draft"}:
+            vendor_category = _first_vendor_category(payload)
+            vendor_categories = _normalize_string_list(payload.get("vendor_categories"))
+            if vendor_category:
+                app["vendor_category"] = vendor_category
+            if vendor_categories:
+                app["vendor_categories"] = vendor_categories
+            elif vendor_category and not isinstance(app.get("vendor_categories"), list):
+                app["vendor_categories"] = [vendor_category]
+
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
                 app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
+            _save_store()
             return {"ok": True, "application": _serialize_application(app)}
 
     new_id = str(int(time.time() * 1000))
@@ -1419,8 +1458,8 @@ def create_vendor_application(
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
         "vendor_id": vendor_id,
         "vendor_email": vendor_email or None,
-        "vendor_category": payload.get("vendor_category"),
-        "vendor_categories": payload.get("vendor_categories") or [],
+        "vendor_category": _first_vendor_category(payload) or None,
+        "vendor_categories": _normalize_string_list(payload.get("vendor_categories")) or ([_first_vendor_category(payload)] if _first_vendor_category(payload) else []),
         "status": "draft",
         "payment_status": "unpaid",
         "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
@@ -1659,6 +1698,9 @@ def organizer_list_applications(event_id: str) -> Dict[str, Any]:
             "booth_id": app.get("booth_id"),
             "requested_booth_id": app.get("requested_booth_id"),
             "booth_category": app.get("booth_category") or app.get("requested_booth_category"),
+            "requested_booth_category": app.get("requested_booth_category"),
+            "vendor_category": app.get("vendor_category"),
+            "vendor_categories": app.get("vendor_categories") or [],
             "vendor_id": app.get("vendor_id"),
             "vendor_email": app.get("vendor_email"),
             "vendor_name": app.get("vendor_name"),
