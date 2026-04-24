@@ -1419,6 +1419,8 @@ def create_vendor_application(
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
         "vendor_id": vendor_id,
         "vendor_email": vendor_email or None,
+        "vendor_category": payload.get("vendor_category"),
+        "vendor_categories": payload.get("vendor_categories") or [],
         "status": "draft",
         "payment_status": "unpaid",
         "checked": payload.get("checked") if isinstance(payload.get("checked"), dict) else {},
