@@ -912,6 +912,101 @@ def _is_locked_for_vendor_edits(
     return False
 
 
+
+def _is_active_paid_organizer_plan(plan: Any, status: Any) -> bool:
+    normalized_plan = _as_str(plan).lower()
+    normalized_status = _as_str(status).lower()
+
+    if normalized_status not in {"active", "trialing"}:
+        return False
+
+    return normalized_plan in {
+        "enterprise_organizer",
+        "enterprise",
+        "growth_organizer",
+        "organizer_growth",
+        "pro_organizer",
+        "pro",
+        "paid",
+        "premium",
+        "plus",
+    }
+
+
+def _lookup_organizer_billing_account(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    organizer_id = _normalize_id(
+        event.get("organizer_id")
+        or event.get("owner_id")
+        or event.get("created_by")
+        or event.get("user_id")
+    )
+    organizer_email = _as_str(
+        event.get("organizer_email")
+        or event.get("owner_email")
+        or event.get("email")
+    ).lower()
+
+    try:
+        from app.routers.auth import _USERS, _USERS_BY_EMAIL  # type: ignore
+    except Exception:
+        return None
+
+    if organizer_id:
+        for candidate_key in (organizer_id, int(organizer_id) if organizer_id.isdigit() else None):
+            if candidate_key is None:
+                continue
+            user = _USERS.get(candidate_key)
+            if isinstance(user, dict):
+                return user
+
+    if organizer_email:
+        matched_user_id = _USERS_BY_EMAIL.get(organizer_email)
+        if matched_user_id is not None:
+            user = _USERS.get(matched_user_id)
+            if isinstance(user, dict):
+                return user
+
+        for user in _USERS.values():
+            if isinstance(user, dict) and _as_str(user.get("email")).lower() == organizer_email:
+                return user
+
+    return None
+
+
+def _get_platform_fee_percent(event: Dict[str, Any]) -> float:
+    """
+    Organizer-only platform fee policy.
+    Starter / inactive organizer accounts: 5%.
+    Active paid organizer accounts: 3%.
+    Vendors pay the booth price only; this fee is deducted from organizer payout.
+    """
+    user = _lookup_organizer_billing_account(event)
+    if isinstance(user, dict) and _is_active_paid_organizer_plan(
+        user.get("plan"),
+        user.get("subscription_status"),
+    ):
+        return 0.03
+
+    event_plan = (
+        event.get("subscription_plan")
+        or event.get("subscriptionPlan")
+        or event.get("organizer_plan")
+        or event.get("organizerPlan")
+        or event.get("plan")
+    )
+    event_status = (
+        event.get("subscription_status")
+        or event.get("subscriptionStatus")
+        or event.get("organizer_subscription_status")
+        or event.get("organizerSubscriptionStatus")
+        or event.get("status")
+    )
+
+    if _is_active_paid_organizer_plan(event_plan, event_status):
+        return 0.03
+
+    return 0.05
+
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
@@ -951,9 +1046,15 @@ def _create_payment_record(
 
     amount_cents = int(amount)
     amount_dollars = round(amount_cents / 100, 2)
-    platform_fee_cents = int(amount_cents * 0.10)
+
+    # Organizer-only platform fee: vendors pay the booth price, then VendCore
+    # deducts 5% for starter organizers or 3% for active paid organizers
+    # from the organizer payout record.
+    platform_fee_percent = _get_platform_fee_percent(event)
+    platform_fee_cents = int(round(amount_cents * platform_fee_percent))
     platform_fee = round(platform_fee_cents / 100, 2)
-    organizer_payout = round((amount_cents - platform_fee_cents) / 100, 2)
+    organizer_payout_cents = max(amount_cents - platform_fee_cents, 0)
+    organizer_payout = round(organizer_payout_cents / 100, 2)
 
     record = {
         "id": payment_id,
@@ -971,6 +1072,8 @@ def _create_payment_record(
         "booth_label": booth_label,
         "amount_cents": amount_cents,
         "amount": amount_dollars,
+        "platform_fee_percent": platform_fee_percent,
+        "platform_fee_rate": platform_fee_percent,
         "platform_fee": platform_fee,
         "organizer_payout": organizer_payout,
         "session_id": session_id,
