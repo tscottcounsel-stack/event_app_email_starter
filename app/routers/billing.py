@@ -63,6 +63,35 @@ def _price_id_to_plan(price_id: Optional[str]) -> str:
     return mapping.get(price_id, "starter")
 
 
+def is_active_paid_subscription(user: Dict[str, Any]) -> bool:
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+
+    return (
+        plan in {"pro_vendor", "enterprise_organizer"}
+        and status in {"active", "trialing", "paid"}
+    )
+
+
+def get_platform_fee_percent(user: Dict[str, Any]) -> float:
+    """
+    VendCore platform fee policy:
+    - Starter/free users: 5%
+    - Active paid subscribers: 3%
+
+    Return value is a decimal percentage, e.g. 0.05 = 5%.
+    """
+    return 0.03 if is_active_paid_subscription(user) else 0.05
+
+
+def get_platform_fee_basis_points(user: Dict[str, Any]) -> int:
+    return int(round(get_platform_fee_percent(user) * 10_000))
+
+
+def get_platform_fee_label(user: Dict[str, Any]) -> str:
+    return "3%" if is_active_paid_subscription(user) else "5%"
+
+
 def _to_iso(ts: Any) -> Optional[str]:
     try:
         if ts in (None, "", 0):
@@ -267,6 +296,26 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     return True
 
 
+@router.get("/platform-fee")
+def get_current_platform_fee(user: dict = Depends(get_current_user)):
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email")) or user
+    fee_percent = get_platform_fee_percent(lookup)
+
+    return {
+        "ok": True,
+        "plan": str(lookup.get("plan") or "starter"),
+        "subscription_status": str(lookup.get("subscription_status") or "inactive"),
+        "is_paid_subscriber": is_active_paid_subscription(lookup),
+        "platform_fee_percent": fee_percent,
+        "platform_fee_basis_points": get_platform_fee_basis_points(lookup),
+        "platform_fee_label": get_platform_fee_label(lookup),
+        "policy": {
+            "starter": "5% platform fee on paid booth transactions",
+            "paid_subscription": "3% platform fee on paid booth transactions",
+        },
+    }
+
+
 @router.post("/create-checkout-session")
 def create_checkout_session(
     payload: CheckoutSessionRequest,
@@ -301,6 +350,7 @@ def create_checkout_session(
             "email": str(lookup.get("email") or ""),
             "plan": plan,
             "role": str(lookup.get("role") or ""),
+            "platform_fee_policy": "paid_subscribers_3_percent_otherwise_5_percent",
         },
         "subscription_data": {
             "metadata": {
@@ -308,6 +358,7 @@ def create_checkout_session(
                 "email": str(lookup.get("email") or ""),
                 "plan": plan,
                 "role": str(lookup.get("role") or ""),
+                "platform_fee_policy": "paid_subscribers_3_percent_otherwise_5_percent",
             }
         },
         "allow_promotion_codes": True,
