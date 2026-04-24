@@ -27,6 +27,12 @@ try:
 except Exception:
     _shared_decode_token = None  # type: ignore
 
+try:
+    from app.routers.auth import _USERS, _USERS_BY_EMAIL  # type: ignore
+except Exception:
+    _USERS = {}  # type: ignore
+    _USERS_BY_EMAIL = {}  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Live store module import / compatibility exports
@@ -83,6 +89,99 @@ def _events_store() -> Dict[Any, Dict[str, Any]]:
 
 def _payments_store() -> Dict[Any, Dict[str, Any]]:
     return store._PAYMENTS
+
+
+def _lookup_billing_user(*, user_id: Any = None, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if user_id not in (None, ""):
+        try:
+            found = _USERS.get(int(user_id))
+            if isinstance(found, dict):
+                return found
+        except Exception:
+            pass
+
+    normalized_email = str(email or "").strip().lower()
+    if normalized_email:
+        try:
+            matched_user_id = _USERS_BY_EMAIL.get(normalized_email)
+            if matched_user_id is not None:
+                found = _USERS.get(int(matched_user_id))
+                if isinstance(found, dict):
+                    return found
+        except Exception:
+            pass
+
+        for candidate in getattr(_USERS, "values", lambda: [])():
+            if isinstance(candidate, dict) and str(candidate.get("email") or "").strip().lower() == normalized_email:
+                return candidate
+
+    return None
+
+
+def _is_active_paid_subscription(user: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(user, dict):
+        return False
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+    return plan in {"pro_vendor", "enterprise_organizer"} and status in {"active", "trialing", "paid"}
+
+
+def _get_organizer_user_for_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    organizer_id = (
+        event.get("organizer_id")
+        or event.get("owner_id")
+        or event.get("created_by")
+    )
+    organizer_email = (
+        event.get("organizer_email")
+        or event.get("owner_email")
+        or event.get("email")
+    )
+    return _lookup_billing_user(user_id=organizer_id, email=str(organizer_email or ""))
+
+
+def _get_organizer_platform_fee_percent(event: Dict[str, Any]) -> float:
+    organizer_user = _get_organizer_user_for_event(event)
+    if _is_active_paid_subscription(organizer_user):
+        return 0.03
+
+    plan = str(
+        event.get("subscription_plan")
+        or event.get("plan")
+        or event.get("organizer_plan")
+        or ""
+    ).strip().lower()
+    status = str(
+        event.get("subscription_status")
+        or event.get("organizer_subscription_status")
+        or ""
+    ).strip().lower()
+
+    if plan in {"pro_vendor", "enterprise_organizer", "pro", "paid", "premium", "plus"} and status in {"active", "trialing", "paid", ""}:
+        return 0.03
+
+    return 0.05
+
+
+def _get_organizer_stripe_connect_account_id(event: Dict[str, Any]) -> str:
+    direct = str(
+        event.get("stripe_connect_account_id")
+        or event.get("stripe_account_id")
+        or event.get("organizer_stripe_account_id")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+
+    organizer_user = _get_organizer_user_for_event(event)
+    if not isinstance(organizer_user, dict):
+        return ""
+
+    return str(
+        organizer_user.get("stripe_connect_account_id")
+        or organizer_user.get("stripe_account_id")
+        or ""
+    ).strip()
 
 
 def _as_str(value: Any) -> str:
@@ -912,101 +1011,6 @@ def _is_locked_for_vendor_edits(
     return False
 
 
-
-def _is_active_paid_organizer_plan(plan: Any, status: Any) -> bool:
-    normalized_plan = _as_str(plan).lower()
-    normalized_status = _as_str(status).lower()
-
-    if normalized_status not in {"active", "trialing"}:
-        return False
-
-    return normalized_plan in {
-        "enterprise_organizer",
-        "enterprise",
-        "growth_organizer",
-        "organizer_growth",
-        "pro_organizer",
-        "pro",
-        "paid",
-        "premium",
-        "plus",
-    }
-
-
-def _lookup_organizer_billing_account(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    organizer_id = _normalize_id(
-        event.get("organizer_id")
-        or event.get("owner_id")
-        or event.get("created_by")
-        or event.get("user_id")
-    )
-    organizer_email = _as_str(
-        event.get("organizer_email")
-        or event.get("owner_email")
-        or event.get("email")
-    ).lower()
-
-    try:
-        from app.routers.auth import _USERS, _USERS_BY_EMAIL  # type: ignore
-    except Exception:
-        return None
-
-    if organizer_id:
-        for candidate_key in (organizer_id, int(organizer_id) if organizer_id.isdigit() else None):
-            if candidate_key is None:
-                continue
-            user = _USERS.get(candidate_key)
-            if isinstance(user, dict):
-                return user
-
-    if organizer_email:
-        matched_user_id = _USERS_BY_EMAIL.get(organizer_email)
-        if matched_user_id is not None:
-            user = _USERS.get(matched_user_id)
-            if isinstance(user, dict):
-                return user
-
-        for user in _USERS.values():
-            if isinstance(user, dict) and _as_str(user.get("email")).lower() == organizer_email:
-                return user
-
-    return None
-
-
-def _get_platform_fee_percent(event: Dict[str, Any]) -> float:
-    """
-    Organizer-only platform fee policy.
-    Starter / inactive organizer accounts: 5%.
-    Active paid organizer accounts: 3%.
-    Vendors pay the booth price only; this fee is deducted from organizer payout.
-    """
-    user = _lookup_organizer_billing_account(event)
-    if isinstance(user, dict) and _is_active_paid_organizer_plan(
-        user.get("plan"),
-        user.get("subscription_status"),
-    ):
-        return 0.03
-
-    event_plan = (
-        event.get("subscription_plan")
-        or event.get("subscriptionPlan")
-        or event.get("organizer_plan")
-        or event.get("organizerPlan")
-        or event.get("plan")
-    )
-    event_status = (
-        event.get("subscription_status")
-        or event.get("subscriptionStatus")
-        or event.get("organizer_subscription_status")
-        or event.get("organizerSubscriptionStatus")
-        or event.get("status")
-    )
-
-    if _is_active_paid_organizer_plan(event_plan, event_status):
-        return 0.03
-
-    return 0.05
-
 def _create_payment_record(
     app: Dict[str, Any],
     amount: int,
@@ -1046,15 +1050,12 @@ def _create_payment_record(
 
     amount_cents = int(amount)
     amount_dollars = round(amount_cents / 100, 2)
-
-    # Organizer-only platform fee: vendors pay the booth price, then VendCore
-    # deducts 5% for starter organizers or 3% for active paid organizers
-    # from the organizer payout record.
-    platform_fee_percent = _get_platform_fee_percent(event)
+    platform_fee_percent = _get_organizer_platform_fee_percent(event)
     platform_fee_cents = int(round(amount_cents * platform_fee_percent))
     platform_fee = round(platform_fee_cents / 100, 2)
     organizer_payout_cents = max(amount_cents - platform_fee_cents, 0)
     organizer_payout = round(organizer_payout_cents / 100, 2)
+    organizer_stripe_account_id = _get_organizer_stripe_connect_account_id(event)
 
     record = {
         "id": payment_id,
@@ -1072,10 +1073,12 @@ def _create_payment_record(
         "booth_label": booth_label,
         "amount_cents": amount_cents,
         "amount": amount_dollars,
-        "platform_fee_percent": platform_fee_percent,
-        "platform_fee_rate": platform_fee_percent,
         "platform_fee": platform_fee,
+        "platform_fee_cents": platform_fee_cents,
+        "platform_fee_percent": platform_fee_percent,
         "organizer_payout": organizer_payout,
+        "organizer_payout_cents": organizer_payout_cents,
+        "organizer_stripe_account_id": organizer_stripe_account_id,
         "session_id": session_id,
         "source": source,
         "status": "paid",
@@ -1472,11 +1475,33 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     success_url = f"{frontend}/vendor/payment-success?appId={app_id_str}&session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{frontend}/vendor/payment-cancel?appId={app_id_str}"
 
+    event = _get_event_for_app(app) or {}
+    platform_fee_percent = _get_organizer_platform_fee_percent(event)
+    platform_fee_cents = int(round(int(amount_cents) * platform_fee_percent))
+    organizer_payout_cents = max(int(amount_cents) - platform_fee_cents, 0)
+    organizer_stripe_account_id = _get_organizer_stripe_connect_account_id(event)
+
+    payment_metadata = {
+        "application_id": str(app_id_str),
+        "event_id": str(app.get("event_id") or app.get("eventId") or ""),
+        "organizer_id": str(event.get("organizer_id") or event.get("owner_id") or event.get("created_by") or ""),
+        "organizer_email": str(event.get("organizer_email") or event.get("owner_email") or event.get("email") or ""),
+        "platform_fee_percent": str(platform_fee_percent),
+        "platform_fee_cents": str(platform_fee_cents),
+        "organizer_payout_cents": str(organizer_payout_cents),
+        "organizer_stripe_account_id": organizer_stripe_account_id,
+    }
+
+    payment_intent_data: Dict[str, Any] = {"metadata": payment_metadata}
+    if organizer_stripe_account_id:
+        payment_intent_data["application_fee_amount"] = platform_fee_cents
+        payment_intent_data["transfer_data"] = {"destination": organizer_stripe_account_id}
+
     session = stripe.checkout.Session.create(
         mode="payment",
         client_reference_id=str(app_id_str),
-        metadata={"application_id": str(app_id_str)},
-        payment_intent_data={"metadata": {"application_id": str(app_id_str)}},
+        metadata=payment_metadata,
+        payment_intent_data=payment_intent_data,
         line_items=[
             {
                 "quantity": 1,
@@ -1497,6 +1522,11 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     app["checkout_session_id"] = session_id
     app["checkout_created_at"] = _now_iso()
     app["checkout_amount_cents"] = int(amount_cents)
+    app["checkout_platform_fee_cents"] = int(platform_fee_cents)
+    app["checkout_platform_fee_percent"] = platform_fee_percent
+    app["checkout_organizer_payout_cents"] = int(organizer_payout_cents)
+    if organizer_stripe_account_id:
+        app["checkout_organizer_stripe_account_id"] = organizer_stripe_account_id
     _save_store()
 
     return {
@@ -1507,6 +1537,10 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
         "session_url": session_url,
         "session_id": session_id,
         "amount_cents": int(amount_cents),
+        "platform_fee_cents": int(platform_fee_cents),
+        "platform_fee_percent": platform_fee_percent,
+        "organizer_payout_cents": int(organizer_payout_cents),
+        "stripe_connect_enabled": bool(organizer_stripe_account_id),
     }
 
 

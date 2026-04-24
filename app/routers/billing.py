@@ -30,6 +30,27 @@ class PortalSessionRequest(BaseModel):
     return_url: str
 
 
+class ConnectAccountLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    return_url: Optional[str] = None
+    refresh_url: Optional[str] = None
+
+
+def _public_app_url() -> str:
+    for name in (
+        "PUBLIC_APP_URL",
+        "APP_BASE_URL",
+        "FRONTEND_BASE_URL",
+        "FRONTEND_URL",
+        "VITE_PUBLIC_APP_URL",
+        "VITE_FRONTEND_URL",
+    ):
+        value = (os.getenv(name) or "").strip().rstrip("/")
+        if value:
+            return value
+    return "https://vendcore.co"
+
+
 def _require_stripe() -> Any:
     if stripe is None:
         raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
@@ -313,6 +334,157 @@ def get_current_platform_fee(user: dict = Depends(get_current_user)):
             "starter": "5% platform fee on paid booth transactions",
             "paid_subscription": "3% platform fee on paid booth transactions",
         },
+    }
+
+
+@router.post("/connect/account")
+def create_connect_account(user: dict = Depends(get_current_user)):
+    stripe_sdk = _require_stripe()
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
+    if lookup is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if str(lookup.get("role") or "").strip().lower() != "organizer":
+        raise HTTPException(status_code=403, detail="Stripe Connect is only available for organizer accounts")
+
+    existing_account_id = str(
+        lookup.get("stripe_connect_account_id")
+        or lookup.get("stripe_account_id")
+        or ""
+    ).strip()
+
+    if existing_account_id:
+        try:
+            account = stripe_sdk.Account.retrieve(existing_account_id)
+            return {
+                "ok": True,
+                "account_id": existing_account_id,
+                "charges_enabled": bool(getattr(account, "charges_enabled", False)),
+                "payouts_enabled": bool(getattr(account, "payouts_enabled", False)),
+                "details_submitted": bool(getattr(account, "details_submitted", False)),
+            }
+        except Exception:
+            # If the account was deleted in Stripe, create a fresh one below.
+            pass
+
+    try:
+        account = stripe_sdk.Account.create(
+            type="express",
+            email=str(lookup.get("email") or "") or None,
+            country=(os.getenv("STRIPE_CONNECT_COUNTRY") or "US").strip() or "US",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+            metadata={
+                "user_id": str(lookup.get("id") or ""),
+                "email": str(lookup.get("email") or ""),
+                "role": str(lookup.get("role") or "organizer"),
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe Connect account failed: {exc}")
+
+    account_id = str(getattr(account, "id", "") or "").strip()
+    lookup["stripe_connect_account_id"] = account_id
+    lookup["stripe_account_id"] = account_id
+    lookup["stripe_connect_charges_enabled"] = bool(getattr(account, "charges_enabled", False))
+    lookup["stripe_connect_payouts_enabled"] = bool(getattr(account, "payouts_enabled", False))
+    lookup["stripe_connect_details_submitted"] = bool(getattr(account, "details_submitted", False))
+    _save_user_updates(lookup)
+
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "charges_enabled": lookup["stripe_connect_charges_enabled"],
+        "payouts_enabled": lookup["stripe_connect_payouts_enabled"],
+        "details_submitted": lookup["stripe_connect_details_submitted"],
+    }
+
+
+@router.post("/connect/onboarding-link")
+def create_connect_onboarding_link(
+    payload: ConnectAccountLinkRequest,
+    user: dict = Depends(get_current_user),
+):
+    stripe_sdk = _require_stripe()
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
+    if lookup is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if str(lookup.get("role") or "").strip().lower() != "organizer":
+        raise HTTPException(status_code=403, detail="Stripe Connect is only available for organizer accounts")
+
+    account_id = str(
+        lookup.get("stripe_connect_account_id")
+        or lookup.get("stripe_account_id")
+        or ""
+    ).strip()
+
+    if not account_id:
+        created = create_connect_account(user)
+        account_id = str(created.get("account_id") or "").strip()
+
+    base_url = _public_app_url()
+    return_url = str(payload.return_url or f"{base_url}/organizer/settings?stripe=connected").strip()
+    refresh_url = str(payload.refresh_url or f"{base_url}/organizer/settings?stripe=refresh").strip()
+
+    try:
+        link = stripe_sdk.AccountLink.create(
+            account=account_id,
+            refresh_url=refresh_url,
+            return_url=return_url,
+            type="account_onboarding",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe Connect onboarding failed: {exc}")
+
+    return {"ok": True, "url": link.url, "account_id": account_id}
+
+
+@router.get("/connect/status")
+def get_connect_status(user: dict = Depends(get_current_user)):
+    stripe_sdk = _require_stripe()
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
+    if lookup is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account_id = str(
+        lookup.get("stripe_connect_account_id")
+        or lookup.get("stripe_account_id")
+        or ""
+    ).strip()
+
+    if not account_id:
+        return {
+            "ok": True,
+            "connected": False,
+            "account_id": None,
+            "charges_enabled": False,
+            "payouts_enabled": False,
+            "details_submitted": False,
+        }
+
+    try:
+        account = stripe_sdk.Account.retrieve(account_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe Connect status failed: {exc}")
+
+    lookup["stripe_connect_charges_enabled"] = bool(getattr(account, "charges_enabled", False))
+    lookup["stripe_connect_payouts_enabled"] = bool(getattr(account, "payouts_enabled", False))
+    lookup["stripe_connect_details_submitted"] = bool(getattr(account, "details_submitted", False))
+    _save_user_updates(lookup)
+
+    return {
+        "ok": True,
+        "connected": True,
+        "account_id": account_id,
+        "charges_enabled": lookup["stripe_connect_charges_enabled"],
+        "payouts_enabled": lookup["stripe_connect_payouts_enabled"],
+        "details_submitted": lookup["stripe_connect_details_submitted"],
     }
 
 
