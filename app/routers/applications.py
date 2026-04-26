@@ -2062,24 +2062,6 @@ def delete_vendor_application(
     _save_store()
     return {"ok": True}
 
-@router.post("/admin/backfill-booth-categories")
-def admin_backfill_booth_categories() -> Dict[str, Any]:
-    updated = 0
-
-    for app in _iter_dict_values(_applications_store()):
-        if not isinstance(app, dict):
-            continue
-
-        before = _as_str(app.get("booth_category") or app.get("requested_booth_category"))
-        after = _persist_booth_category(app)
-
-        if after and before != after:
-            updated += 1
-
-    if updated:
-        _save_store()
-
-    return {"ok": True, "updated": updated}
 
 
 @router.get("/messages/inbox")

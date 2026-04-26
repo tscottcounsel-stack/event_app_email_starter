@@ -218,6 +218,7 @@ for module_name in [
     "app.routers.requirements",
     "app.routers.requirements_alias",
     "app.routers.requirement_templates",
+    "app.routers.organizers",
     # "app.routers.reviews",  # temporarily disabled while import issues are resolved
     "app.routers.seed",
     "app.routers.slots",
