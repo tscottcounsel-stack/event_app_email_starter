@@ -338,40 +338,85 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
     return get_public_organizer(email, db)
 
-@router.get("/verification/public")
-def get_public_organizers(db: Session = Depends(get_db)):
+def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
     profiles = _load_profiles()
-    results = []
+    reviews_store = _load_reviews()
+    rows_by_email: Dict[str, Dict[str, Any]] = {}
 
-    for email, profile in profiles.items():
+    for raw_email, profile in profiles.items():
         if not isinstance(profile, dict):
             continue
 
-        # Pull events for this organizer (this guarantees they exist publicly)
-        events = (
-            db.query(Event)
-            .filter(Event.organizer_email == email)
-            .all()
-        )
-
-        # Only show organizers that actually exist in system
-        if not profile and not events:
+        email = _norm_email(raw_email or profile.get("email"))
+        if not email:
             continue
 
+        organizer_reviews = list(reviews_store.get(email, []))
+        summary = _review_summary(organizer_reviews)
         name = (
             profile.get("organizationName")
             or profile.get("contactName")
             or email
         )
+        location = str(profile.get("location") or "").strip()
 
-        results.append({
+        rows_by_email[email] = {
             "email": email,
             "business_name": name,
-            "city": profile.get("location"),
+            "name": name,
+            "city": location,
+            "location": location,
             "status": "verified" if profile.get("verified") else "pending",
-            "categories": [],
-            "bio": f"{name} profile on VendCore",
-            "events_count": len(events),
-        })
+            "verified": bool(profile.get("verified", False)),
+            "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
+            "bio": profile.get("organizationType") or f"{name} profile on VendCore",
+            "rating": summary.get("rating", 0),
+            "review_count": summary.get("review_count", 0),
+            "events_count": 0,
+            "promoted": bool(profile.get("verified", False)),
+        }
 
-    return results
+    events = db.query(Event).order_by(Event.id.desc()).all()
+    for event in events:
+        email = _norm_email(getattr(event, "organizer_email", ""))
+        if not email:
+            continue
+
+        existing = rows_by_email.get(email)
+        if existing:
+            existing["events_count"] = int(existing.get("events_count") or 0) + 1
+            if not existing.get("city"):
+                existing["city"] = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
+                existing["location"] = existing["city"]
+            continue
+
+        location = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
+        rows_by_email[email] = {
+            "email": email,
+            "business_name": email,
+            "name": email,
+            "city": location,
+            "location": location,
+            "status": "pending",
+            "verified": False,
+            "categories": [getattr(event, "category", "")] if getattr(event, "category", "") else [],
+            "bio": "Organizer hosting events on VendCore",
+            "rating": 0,
+            "review_count": 0,
+            "events_count": 1,
+            "promoted": False,
+        }
+
+    rows = list(rows_by_email.values())
+    rows.sort(key=lambda row: (not bool(row.get("verified")), str(row.get("business_name") or row.get("email") or "").lower()))
+    return rows
+
+
+@router.get("/organizers/public-directory")
+def get_public_organizers_directory(db: Session = Depends(get_db)):
+    return _public_directory_rows(db)
+
+
+@router.get("/verification/public")
+def get_public_organizers(db: Session = Depends(get_db)):
+    return _public_directory_rows(db)
