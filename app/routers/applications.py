@@ -204,6 +204,25 @@ def _normalize_string_list(value: Any) -> List[str]:
     return []
 
 
+def _is_useful_category(value: Any) -> bool:
+    text = _as_str(value)
+    normalized = text.lower()
+    return bool(text and normalized not in {"uncategorized", "other", "booth"})
+
+
+def _app_vendor_category_fallback(app: Dict[str, Any]) -> str:
+    direct = _as_str(app.get("vendor_category") or app.get("category"))
+    if _is_useful_category(direct):
+        return direct
+
+    categories = _normalize_string_list(app.get("vendor_categories"))
+    for category in categories:
+        if _is_useful_category(category):
+            return category
+
+    return ""
+
+
 def _first_vendor_category(payload: Dict[str, Any]) -> str:
     direct = _as_str(payload.get("vendor_category"))
     if direct:
@@ -488,13 +507,23 @@ def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
         if booth_match_id != booth_id:
             continue
 
+        meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
         category = _as_str(
             booth.get("category")
             or booth.get("booth_category")
             or booth.get("category_name")
             or booth.get("categoryName")
+            or booth.get("category_label")
+            or booth.get("categoryLabel")
+            or booth.get("vendor_category")
+            or booth.get("vendorCategory")
+            or booth.get("vendor_type")
+            or booth.get("vendorType")
+            or meta.get("category")
+            or meta.get("booth_category")
+            or meta.get("categoryName")
         )
-        if category:
+        if _is_useful_category(category):
             return category
 
     event = _get_event_for_app(app)
@@ -522,9 +551,15 @@ def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
 
 def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
     category = _find_event_booth_category(app)
-    if category:
-        app["booth_category"] = category
-        app["requested_booth_category"] = category
+
+    if not _is_useful_category(category):
+        category = _app_vendor_category_fallback(app)
+
+    if not _is_useful_category(category):
+        category = "General"
+
+    app["booth_category"] = category
+    app["requested_booth_category"] = category
     return category
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
@@ -748,12 +783,12 @@ def _resolve_selected_booth_category(
     ]
     for candidate in direct_candidates:
         candidate_text = _as_str(candidate)
-        if candidate_text:
+        if _is_useful_category(candidate_text):
             return candidate_text
 
     derived = _find_event_booth_category(app)
-    if derived:
-        return derived
+    if _is_useful_category(derived):
+        return str(derived)
 
     selected_booth_id = _normalize_id(app.get("booth_id") or app.get("requested_booth_id") or "")
     if selected_booth_id:
@@ -762,13 +797,16 @@ def _resolve_selected_booth_category(
                 continue
             item_id = _as_str(item.get("id") or item.get("booth_id") or item.get("value") or item.get("code"))
             if item_id and item_id == selected_booth_id:
-                return _as_str(item.get("name") or item.get("label") or item.get("title") or item.get("category"))
+                category = _as_str(item.get("category") or item.get("name") or item.get("label") or item.get("title"))
+                if _is_useful_category(category):
+                    return category
 
     category_keys = [key for key in categories_map.keys() if _as_str(key)]
     if len(category_keys) == 1:
         return category_keys[0]
 
-    return ""
+    fallback = _app_vendor_category_fallback(app)
+    return fallback if _is_useful_category(fallback) else "General"
 
 
 def _resolve_category_bucket(
@@ -896,11 +934,14 @@ def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
-    _persist_booth_category(app)
+    category = _persist_booth_category(app)
     cents = _persist_resolved_booth_price(app)
     booth_price = round(cents / 100, 2) if cents else None
 
     enriched = dict(app)
+    if category:
+        enriched["booth_category"] = category
+        enriched["requested_booth_category"] = category
     if cents:
         enriched["resolved_price_cents"] = cents
         enriched["amount_cents"] = cents
@@ -1071,6 +1112,8 @@ def _create_payment_record(
         "organizer_id": organizer_id,
         "booth_id": booth_id,
         "booth_label": booth_label,
+        "booth_category": app.get("booth_category") or app.get("requested_booth_category"),
+        "requested_booth_category": app.get("requested_booth_category") or app.get("booth_category"),
         "amount_cents": amount_cents,
         "amount": amount_dollars,
         "platform_fee": platform_fee,
@@ -1388,7 +1431,7 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     elif vendor_category and not isinstance(app.get("vendor_categories"), list):
         app["vendor_categories"] = [vendor_category]
 
-    if app.get("booth_id") and not app.get("booth_category"):
+    if app.get("booth_id"):
         _persist_booth_category(app)
 
     requirement_status = _compute_requirement_status(app)
@@ -1621,7 +1664,7 @@ def create_vendor_application(
             app["resolved_price_cents"] = cents
             app["booth_price"] = round(cents / 100, 2)
 
-    if app.get("booth_id") and not app.get("booth_category"):
+    if app.get("booth_id"):
         _persist_booth_category(app)
 
     _applications_store()[new_id] = app
@@ -1729,7 +1772,9 @@ def organizer_reserve_booth(
     if payload.booth_id:
         app["booth_id"] = payload.booth_id
         app["requested_booth_id"] = payload.booth_id
-        _persist_booth_category(app)
+        category = _persist_booth_category(app)
+        if not category:
+            raise HTTPException(status_code=400, detail="Booth category could not be determined")
     app["status"] = "approved"
     app["payment_status"] = app.get("payment_status") or "unpaid"
     minutes = payload.hold_minutes or 60 * 24
@@ -1752,7 +1797,9 @@ def organizer_change_booth(
         raise HTTPException(status_code=400, detail="booth_id is required")
     app["booth_id"] = payload.booth_id
     app["requested_booth_id"] = payload.booth_id
-    _persist_booth_category(app)
+    category = _persist_booth_category(app)
+    if not category:
+        raise HTTPException(status_code=400, detail="Booth category could not be determined")
     _persist_resolved_booth_price(app)
     _save_store()
     return {"ok": True, "application": _serialize_application(app)}
@@ -2014,6 +2061,26 @@ def delete_vendor_application(
 
     _save_store()
     return {"ok": True}
+
+@router.post("/admin/backfill-booth-categories")
+def admin_backfill_booth_categories() -> Dict[str, Any]:
+    updated = 0
+
+    for app in _iter_dict_values(_applications_store()):
+        if not isinstance(app, dict):
+            continue
+
+        before = _as_str(app.get("booth_category") or app.get("requested_booth_category"))
+        after = _persist_booth_category(app)
+
+        if after and before != after:
+            updated += 1
+
+    if updated:
+        _save_store()
+
+    return {"ok": True, "updated": updated}
+
 
 @router.get("/messages/inbox")
 def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
