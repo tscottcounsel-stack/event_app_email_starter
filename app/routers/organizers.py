@@ -111,31 +111,57 @@ def get_organizer_profile(email: str):
     return {"profile": profile}
 
 
+
 @router.get("/organizers/public/{email}")
 def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
+
+    # Load stored profiles
     profiles = _load_profiles()
-    profile_data = profile or {}
+    profile = profiles.get(email) or {}
 
-return {
-    "organizer": {
-        "email": email,
-        "name": name,
-        "verified": True,
+    # Load events
+    events = (
+        db.query(Event)
+        .filter(Event.organizer_email == email)
+        .order_by(Event.id.desc())
+        .all()
+    )
 
-        # ✅ FLATTENED FIELDS (THIS FIXES EVERYTHING)
-        "yearsInBusiness": profile_data.get("yearsInBusiness"),
-        "eventTypes": profile_data.get("eventTypes"),
-        "eventSize": profile_data.get("eventSize"),
+    public_events = [
+        _event_to_public(event)
+        for event in events
+        if bool(event.published) and not bool(event.archived)
+    ]
 
-        "profile": profile_data,
-        "events_count": len(events),
-        "public_events_count": len(public_events),
-        "events": public_events,
+    if not profile and not events:
+        raise HTTPException(status_code=404, detail="Organizer not found")
+
+    # Name fallback
+    name = (
+        profile.get("organizationName")
+        or profile.get("contactName")
+        or (events[0].organizer_email if events else email)
+        or "Organizer"
+    )
+
+    return {
+        "organizer": {
+            "email": email,
+            "name": name,
+            "verified": True,
+
+            # ✅ FLAT FIELDS (this is what frontend should use)
+            "yearsInBusiness": profile.get("yearsInBusiness"),
+            "eventTypes": profile.get("eventTypes"),
+            "eventSize": profile.get("eventSize"),
+
+            # Keep full profile for flexibility
+            "profile": profile,
+
+            # Events
+            "events_count": len(events),
+            "public_events_count": len(public_events),
+            "events": public_events,
+        }
     }
-}
-
-
-@router.get("/organizers/{email}")
-def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
-    return get_public_organizer(email, db)
