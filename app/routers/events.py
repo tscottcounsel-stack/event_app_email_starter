@@ -3,7 +3,7 @@
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -52,8 +52,8 @@ class EventCreate(BaseModel):
     title: str = Field(min_length=1)
     description: Optional[str] = None
 
-    start_date: Optional[datetime] = None
-    end_date: Optional[datetime] = None
+    start_date: Optional[Any] = None
+    end_date: Optional[Any] = None
 
     venue_name: Optional[str] = None
     street_address: Optional[str] = None
@@ -63,6 +63,8 @@ class EventCreate(BaseModel):
 
     ticket_sales_url: Optional[str] = None
     google_maps_url: Optional[str] = None
+    ticketSalesUrl: Optional[str] = None
+    googleMapsLink: Optional[str] = None
     category: Optional[str] = None
 
     heroImageUrl: Optional[str] = None
@@ -91,6 +93,31 @@ def _dt_to_iso(value: Any) -> Optional[str]:
         return parsed.isoformat()
     except Exception:
         return str(value)
+
+
+def _ensure_datetime(value: Any) -> Optional[datetime]:
+    """Coerce frontend date payloads into real datetimes before SQLAlchemy save."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min).replace(tzinfo=timezone.utc)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            parsed_date = date.fromisoformat(raw)
+            return datetime.combine(parsed_date, time.min).replace(tzinfo=timezone.utc)
+
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.warning("Unable to parse event datetime value: %r", value)
+        return None
 
 
 def _event_owner_email(event: Dict[str, Any]) -> str:
@@ -270,12 +297,8 @@ def _apply_event_patch_model(ev: Event, patch: Dict[str, Any]) -> Event:
         attr = alias_map.get(key, key)
         if attr in ("image_urls", "video_urls"):
             setattr(ev, attr, list(value or []))
-        elif attr in ("start_date", "end_date") and isinstance(value, str) and value.strip():
-            try:
-                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                setattr(ev, attr, dt)
-            except Exception:
-                setattr(ev, attr, value)
+        elif attr in ("start_date", "end_date"):
+            setattr(ev, attr, _ensure_datetime(value))
         elif hasattr(ev, attr):
             setattr(ev, attr, value)
 
@@ -394,15 +417,15 @@ def organizer_create_event(
     event = Event(
         title=payload.title,
         description=payload.description,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
+        start_date=_ensure_datetime(payload.start_date),
+        end_date=_ensure_datetime(payload.end_date),
         venue_name=payload.venue_name,
         street_address=payload.street_address,
         city=payload.city,
         state=payload.state,
         zip_code=payload.zip_code,
-        ticket_sales_url=payload.ticket_sales_url,
-        google_maps_url=payload.google_maps_url,
+        ticket_sales_url=payload.ticket_sales_url or payload.ticketSalesUrl,
+        google_maps_url=payload.google_maps_url or payload.googleMapsLink,
         category=payload.category,
         hero_image_url=payload.heroImageUrl,
         image_urls=list(payload.imageUrls or []),

@@ -1,631 +1,314 @@
 from __future__ import annotations
 
+import importlib
+import logging
 import os
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from fastapi.staticfiles import StaticFiles
 
-# ======================================================================================
-# App setup
-# ======================================================================================
-from fastapi.middleware.cors import CORSMiddleware
+logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# Use Railway persistent volume for uploads
+UPLOADS_DIR = Path("/data/uploads")
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+logger.info("UPLOADS DIR: %s", UPLOADS_DIR)
+
+
+def _safe_call(func, label: str) -> None:
+    try:
+        func()
+        logger.info("%s initialized", label)
+    except Exception as exc:
+        logger.warning("%s init skipped: %s", label, exc)
+
+
+def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> None:
+    try:
+        module = importlib.import_module(module_name)
+        router = getattr(module, attr_name, None)
+        if router is None:
+            logger.warning("Module %s has no %s", module_name, attr_name)
+            return
+        app.include_router(router)
+        logger.info("Included router from %s", module_name)
+    except Exception as exc:
+        raise RuntimeError(f"FAILED TO LOAD ROUTER: {module_name} -> {exc}")
+
+
+def _load_store_if_available() -> None:
+    try:
+        from app.store import load_store
+        from app.store import _DATA_PATH  # type: ignore
+
+        logger.info("STORE DATA PATH: %s", _DATA_PATH)
+        _safe_call(load_store, "store")
+    except Exception as exc:
+        logger.warning("Store loader unavailable: %s", exc)
+
+
+def _init_db_if_available() -> None:
+    try:
+        from app.db import init_db
+        _safe_call(init_db, "db")
+    except Exception as exc:
+        logger.warning("DB init unavailable: %s", exc)
+
+def _sync_events_store_from_db_if_available() -> None:
+    try:
+        from app.db import SessionLocal  # type: ignore
+        from app.models.event import Event  # type: ignore
+        from app.store import _EVENTS, save_store  # type: ignore
+
+        db = SessionLocal()
+        try:
+            rows = db.query(Event).all()
+            synced = 0
+            for ev in rows:
+                organizer_name = (
+                    getattr(ev, "organizer_name", None)
+                    or getattr(ev, "company_name", None)
+                    or getattr(ev, "host_name", None)
+                    or getattr(ev, "title", None)
+                    or getattr(ev, "organizer_email", None)
+                    or getattr(ev, "owner_email", None)
+                    or "Organizer"
+                )
+                title = (
+                    getattr(ev, "title", None)
+                    or getattr(ev, "name", None)
+                    or getattr(ev, "event_title", None)
+                    or f"Event #{getattr(ev, 'id', '')}"
+                )
+
+                _EVENTS[int(ev.id)] = {
+                    **(_EVENTS.get(int(ev.id), {}) if isinstance(_EVENTS.get(int(ev.id)), dict) else {}),
+                    "id": ev.id,
+                    "title": title,
+                    "name": title,
+                    "event_title": title,
+                    "description": getattr(ev, "description", None),
+                    "start_date": getattr(ev, "start_date", None).isoformat() if getattr(ev, "start_date", None) else None,
+                    "end_date": getattr(ev, "end_date", None).isoformat() if getattr(ev, "end_date", None) else None,
+                    "venue_name": getattr(ev, "venue_name", None),
+                    "street_address": getattr(ev, "street_address", None),
+                    "city": getattr(ev, "city", None),
+                    "state": getattr(ev, "state", None),
+                    "zip_code": getattr(ev, "zip_code", None),
+                    "ticket_sales_url": getattr(ev, "ticket_sales_url", None),
+                    "google_maps_url": getattr(ev, "google_maps_url", None),
+                    "category": getattr(ev, "category", None),
+                    "heroImageUrl": getattr(ev, "hero_image_url", None),
+                    "imageUrls": list(getattr(ev, "image_urls", None) or []),
+                    "videoUrls": list(getattr(ev, "video_urls", None) or []),
+                    "published": bool(getattr(ev, "published", False)),
+                    "archived": bool(getattr(ev, "archived", False)),
+                    "requirements_published": bool(getattr(ev, "requirements_published", False)),
+                    "layout_published": bool(getattr(ev, "layout_published", False)),
+                    "organizer_name": organizer_name,
+                    "company_name": organizer_name,
+                    "host_name": organizer_name,
+                    "organizer_email": getattr(ev, "organizer_email", None),
+                    "owner_email": getattr(ev, "owner_email", None),
+                    "email": getattr(ev, "organizer_email", None) or getattr(ev, "owner_email", None),
+                    "organizer_id": getattr(ev, "organizer_id", None),
+                    "owner_id": getattr(ev, "owner_id", None),
+                    "created_by": getattr(ev, "created_by", None),
+                    "created_at": getattr(ev, "created_at", None).isoformat() if getattr(ev, "created_at", None) else None,
+                    "updated_at": getattr(ev, "updated_at", None).isoformat() if getattr(ev, "updated_at", None) else None,
+                }
+                synced += 1
+
+            save_store()
+            logger.info("Synced %s events from DB into JSON store", synced)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Event store sync unavailable: %s", exc)
+
+def _env_csv(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return []
+    return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+
+
+app = FastAPI(title="Vendor Connect API")
+
+frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "https://vendcore.co",
+    "https://www.vendcore.co",
+    "https://api.vendcore.co",
+    "https://event-app-frontend.vercel.app",
+    "https://event-app-frontend-xi.vercel.app",
+    "https://event-app-frontend-7dhxwkwbm-tscottcounsel-stacks-projects.vercel.app",
+    "https://event-app-frontend-1pju.vercel.app",
+]
+
+allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
+
+if frontend_origin:
+    allowed_origins.append(frontend_origin)
+
+allowed_origins = list(dict.fromkeys([o for o in allowed_origins if o]))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://eventappemailstarter-production.up.railway.app",
-        "http://localhost:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
-from fastapi import Request, Response
 
-@app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
-    response: Response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "https://eventappemailstarter-production.up.railway.app"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    return response
+logger.info("CORS configured. allow_origins=%s", allowed_origins)
 
-# --------------------------------------------------------------------------------------
-# Debug helpers: confirm weâ€™re hitting THIS file and list routes.
-# (We expose BOTH slash and no-slash to avoid 404 confusion.)
-# --------------------------------------------------------------------------------------
-@app.get("/__whoami")
-@app.get("/__whoami/")
-def whoami():
-    return {"file": __file__}
+_load_store_if_available()
+
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+# Import models BEFORE DB init so SQLAlchemy registers tables before create_all().
+from app.models.event import Event  # noqa: F401
+from app.models.application import Application  # noqa: F401
+from app.models.booth import Booth  # noqa: F401
+from app.models.diagram import Diagram  # noqa: F401
+
+_init_db_if_available()
+_sync_events_store_from_db_if_available()
 
 
-@app.get("/__routes")
-@app.get("/__routes/")
-def list_routes():
-    return sorted(getattr(r, "path", "?") for r in app.routes)
-
-
-# --------------------------------------------------------------------------------------
-# Health & Meta
-# --------------------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"message": "ok"}
-
-
-@app.get("/ping")
-def ping():
-    return "pong"
+    return {"status": "ok"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    from app.store import _DATA_PATH
+
+    return {
+        "ok": True,
+        "data_path": str(_DATA_PATH),
+        "exists": _DATA_PATH.exists(),
+    }
 
 
-# --------------------------------------------------------------------------------------
-# Email (simple echo endpoint) â€” registered with and without trailing slash
-# --------------------------------------------------------------------------------------
-class EmailIn(BaseModel):
-    to_email: EmailStr
-    subject: str
-    body: str
+@app.get("/organizers/public/{email}")
+def public_organizer_profile(email: str):
+    """Public organizer profile derived from the organizer's event records."""
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Organizer email is required")
 
+    try:
+        from app.db import SessionLocal
+        from app.models.event import Event
+    except Exception as exc:
+        logger.warning("Organizer profile dependencies unavailable: %s", exc)
+        raise HTTPException(status_code=500, detail="Organizer profile service unavailable")
 
-@app.post("/send-email", status_code=200)
-@app.post("/send-email/", status_code=200)
-def send_email(payload: EmailIn):
-    print(
-        f"[mail] to={payload.to_email} subj={payload.subject} body_len={len(payload.body)}"
-    )
-    return {"ok": True, "sent_to": payload.to_email}
-
-
-# ======================================================================================
-# Users
-# ======================================================================================
-@app.get("/users/")
-def list_users() -> List[dict]:
-    return []
-
-
-# ======================================================================================
-# Simple Auth (in-memory)
-# ======================================================================================
-_USERS: Dict[int, Dict[str, Any]] = {}
-_USERS_BY_EMAIL: Dict[str, int] = {}
-_USER_NEXT_ID = 1
-
-
-class RegisterRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    email: str
-    password: str
-    role: Optional[str] = None
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-@app.post("/auth/register", status_code=200)
-def auth_register(payload: RegisterRequest):
-    global _USER_NEXT_ID
-    uid = _USERS_BY_EMAIL.get(payload.email)
-    if uid is None:
-        uid = _USER_NEXT_ID
-        _USER_NEXT_ID += 1
-        _USERS[uid] = {
-            "id": uid,
-            "email": payload.email,
-            "role": payload.role or "vendor",
-        }
-        _USERS_BY_EMAIL[payload.email] = uid
-    return _USERS[uid]
-
-
-@app.post("/auth/login", response_model=TokenResponse)
-def auth_login(payload: RegisterRequest):
-    if payload.email not in _USERS_BY_EMAIL:
-        auth_register(payload)
-    return TokenResponse(access_token="test-token")
-
-
-@app.post("/auth/refresh", response_model=TokenResponse)
-def auth_refresh():
-    return TokenResponse(access_token="refreshed-token")
-
-
-# Auth dependency
-def require_auth(request: Request):
-    if "authorization" not in {k.lower(): v for k, v in request.headers.items()}:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
-        )
-    return True
-
-
-# ======================================================================================
-# Send Email (simple echo for now)
-# ======================================================================================
-class EmailIn(BaseModel):
-    to_email: EmailStr
-    subject: str
-    body: str
-
-
-# accept both with and without trailing slash
-@app.post("/send-email", status_code=200)
-@app.post("/send-email/", status_code=200)
-def send_email(payload: EmailIn):
-    # TODO: wire to your real mailer; for now just log & echo
-    print(
-        f"[mail] to={payload.to_email} subj={payload.subject} body_len={len(payload.body)}"
-    )
-    return {"ok": True, "sent_to": payload.to_email}
-
-
-# ======================================================================================
-# Events
-# ======================================================================================
-_EVENTS: Dict[int, Dict[str, Any]] = {}
-_EVENT_NEXT_ID = 1
-
-
-class EventCreateDate(BaseModel):
-    title: str = Field(min_length=1)
-    description: Optional[str] = None
-    date: str  # ISO string
-    location: str = Field(min_length=1)
-    model_config = ConfigDict(extra="ignore")
-
-
-class EventCreateRange(BaseModel):
-    title: str = Field(min_length=1)
-    description: Optional[str] = None
-    start_time: str
-    end_time: str
-    location: Optional[str] = None
-    model_config = ConfigDict(extra="ignore")
-
-
-@app.get("/events")
-def events_list():
-    return list(_EVENTS.values())
-
-
-@app.get("/events/")
-def events_list_slash():
-    return events_list()
-
-
-@app.get("/events/{event_id}")
-def events_get(event_id: int):
-    return _EVENTS.get(event_id) or {"id": event_id, "title": f"event-{event_id}"}
-
-
-def _parse_required_iso(s: str) -> str:
-    """Strict parse of ISO datetime strings with optional trailing Z; raises on invalid."""
-    if s.endswith("Z"):
-        s = s[:-1]
-    return datetime.fromisoformat(s).isoformat()
-
-
-def _build_event_record(raw: Dict[str, Any]) -> Dict[str, Any]:
-    title = (raw.get("title") or "").strip()
-    if not title:
-        raise HTTPException(
-            status_code=422, detail="title is required and must be non-empty"
-        )
-
-    # Variant A: single "date"
-    if "date" in raw:
-        try:
-            date_iso = _parse_required_iso(str(raw["date"]))
-        except Exception:
-            raise HTTPException(status_code=422, detail="invalid date")
-        location = (raw.get("location") or "").strip()
-        if not location:
-            raise HTTPException(status_code=422, detail="location is required")
-        return {
-            "variant": "date",
-            "title": title,
-            "description": raw.get("description"),
-            "date": date_iso,
-            "location": location,
-        }
-
-    # Variant B: start/end range
-    if "start_time" in raw and "end_time" in raw:
-        try:
-            start_iso = _parse_required_iso(str(raw["start_time"]))
-            end_iso = _parse_required_iso(str(raw["end_time"]))
-        except Exception:
-            raise HTTPException(
-                status_code=422, detail="invalid start_time or end_time"
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Event)
+            .filter(
+                (Event.organizer_email == normalized_email)
+                | (Event.owner_email == normalized_email)
             )
+            .order_by(Event.id.desc())
+            .all()
+        )
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="Organizer not found")
+
+        latest = rows[0]
+        public_events = [
+            ev for ev in rows
+            if bool(getattr(ev, "published", False)) and not bool(getattr(ev, "archived", False))
+        ]
+
+        display_name = (
+            getattr(latest, "organizer_name", None)
+            or getattr(latest, "company_name", None)
+            or getattr(latest, "host_name", None)
+            or normalized_email.split("@")[0].replace(".", " ").replace("_", " ").title()
+            or "Organizer"
+        )
+        description = (
+            f"{display_name} hosts vendor-ready events on VendCore. "
+            "View this organizer's public profile, verification status, and current event activity."
+        )
+
         return {
-            "variant": "range",
-            "title": title,
-            "description": raw.get("description"),
-            "start_time": start_iso,
-            "end_time": end_iso,
-            "location": raw.get("location"),
+            "organizer": {
+                "email": normalized_email,
+                "business_name": display_name,
+                "name": display_name,
+                "description": description,
+                "business_description": description,
+                "city": getattr(latest, "city", None) or "",
+                "state": getattr(latest, "state", None) or "",
+                "country": "United States",
+                "verified": True,
+                "verification_status": "verified",
+                "events_count": len(rows),
+                "public_events_count": len(public_events),
+                "rating": 0,
+                "review_count": 0,
+            },
+            "events": [
+                {
+                    "id": ev.id,
+                    "title": ev.title,
+                    "description": ev.description,
+                    "start_date": ev.start_date.isoformat() if getattr(ev, "start_date", None) else None,
+                    "end_date": ev.end_date.isoformat() if getattr(ev, "end_date", None) else None,
+                    "venue_name": ev.venue_name,
+                    "city": ev.city,
+                    "state": ev.state,
+                    "published": bool(ev.published),
+                }
+                for ev in public_events
+            ],
         }
-
-    raise HTTPException(status_code=422, detail="invalid event payload")
-
-
-def _events_create_impl(raw: Dict[str, Any]) -> JSONResponse:
-    global _EVENT_NEXT_ID
-    rec_core = _build_event_record(raw)
-    _EVENT_NEXT_ID += 1
-    eid = _EVENT_NEXT_ID - 1
-    rec = {"id": eid, **{k: v for k, v in rec_core.items() if k != "variant"}}
-    _EVENTS[eid] = rec
-
-    # Status rule:
-    # - date variant -> 200
-    # - start/end variant -> 201
-    code = 200 if rec_core.get("variant") == "date" else 201
-    return JSONResponse(status_code=code, content=rec)
-
-
-@app.post("/events")
-async def events_create(request: Request, _=Depends(require_auth)):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _events_create_impl(raw)
-
-
-@app.post("/events/")
-async def events_create_slash(request: Request, _=Depends(require_auth)):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _events_create_impl(raw)
-
-
-# ======================================================================================
-# Vendors
-# ======================================================================================
-_VENDORS: Dict[int, Dict[str, Any]] = {}
-_VENDOR_NEXT_ID = 1
-
-
-def _vendors_create_impl(raw: Dict[str, Any]) -> JSONResponse:
-    global _VENDOR_NEXT_ID
-    vid = _VENDOR_NEXT_ID
-    _VENDOR_NEXT_ID += 1
-
-    name = raw.get("name") or raw.get("display_name") or f"vendor-{vid}"
-    display_name = raw.get("display_name") or raw.get("name") or f"Vendor {vid}"
-    data = {
-        "id": vid,
-        "name": name,
-        "display_name": display_name,
-        "email": raw.get("email"),
-        **{
-            k: v
-            for k, v in raw.items()
-            if k not in {"id", "name", "display_name", "email"}
-        },
-    }
-    _VENDORS[vid] = data
-
-    # Status rule:
-    # - basic profile (no 'bio' and no extra custom fields beyond name/display_name/email) -> 200
-    # - richer profile (has 'bio' or other extras) -> 201
-    basic_keys = {"display_name", "name", "email"}
-    extra_keys = set(raw.keys()) - basic_keys
-    code = 201 if ("bio" in raw or len(extra_keys) > 0) else 200
-    return JSONResponse(status_code=code, content=data)
-
-
-@app.get("/vendors")
-def vendors_list(limit: int = 100):
-    return list(_VENDORS.values())[: max(1, min(limit, 1000))]
-
-
-@app.get("/vendors/")
-def vendors_list_slash(limit: int = 100):
-    return vendors_list(limit)
-
-
-@app.get("/vendors/health")
-def vendors_health():
-    return {"ok": True}
-
-
-@app.post("/vendors")
-async def vendors_create(request: Request):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _vendors_create_impl(raw)
-
-
-@app.post("/vendors/")
-async def vendors_create_slash(request: Request):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _vendors_create_impl(raw)
-
-
-@app.get("/vendors/{vendor_id}")
-def vendors_get(vendor_id: int):
-    v = _VENDORS.get(vendor_id)
-    if not v:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-    return v
-
-
-@app.get("/vendors/{vendor_id}/")
-def vendors_get_slash(vendor_id: int):
-    return vendors_get(vendor_id)
-
-
-# ======================================================================================
-# Applications
-# ======================================================================================
-_APPLICATIONS: Dict[int, Dict[str, Any]] = {}
-_APP_NEXT_ID = 1
-
-
-@app.get("/applications")
-def applications_list(event_id: Optional[int] = None, vendor_id: Optional[int] = None):
-    items = list(_APPLICATIONS.values())
-    if event_id is not None:
-        items = [a for a in items if a.get("event_id") == event_id]
-    if vendor_id is not None:
-        items = [a for a in items if a.get("vendor_id") == vendor_id]
-    return items
-
-
-@app.get("/applications/")
-def applications_list_slash(
-    event_id: Optional[int] = None, vendor_id: Optional[int] = None
-):
-    return applications_list(event_id, vendor_id)
-
-
-@app.get("/applications/mine")
-def applications_mine(_=Depends(require_auth)):
-    return list(_APPLICATIONS.values())
-
-
-@app.get("/applications/mine/")
-def applications_mine_slash(_=Depends(require_auth)):
-    return applications_mine()
-
-
-def _build_application_record(raw: Dict[str, Any], app_id: int) -> Dict[str, Any]:
-    data = {
-        "id": app_id,
-        "event_id": raw.get("event_id") or raw.get("eventId"),
-        "vendor_id": raw.get("vendor_id") or raw.get("vendorId"),
-        "price_cents": raw.get("price_cents", raw.get("priceCents")),
-        "notes": raw.get("notes"),
-        "message": raw.get("message"),
-        "status": "pending",
-    }
-    for k, v in raw.items():
-        if k not in data:
-            data[k] = v
-    return data
-
-
-def _applications_create_impl(raw: Dict[str, Any]) -> JSONResponse:
-    global _APP_NEXT_ID
-    _APP_NEXT_ID += 1
-    app_id = _APP_NEXT_ID - 1
-    data = _build_application_record(raw, app_id)
-    _APPLICATIONS[app_id] = data
-
-    # Status rule:
-    # - simple vendor apply (has "message") -> 200
-    # - richer payload (e.g., price/notes without message) -> 201
-    code = 200 if ("message" in raw and raw.get("message")) else 201
-    return JSONResponse(status_code=code, content=data)
-
-
-@app.post("/applications")
-async def applications_create(request: Request, _=Depends(require_auth)):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _applications_create_impl(raw)
-
-
-@app.post("/applications/")
-async def applications_create_slash(request: Request, _=Depends(require_auth)):
-    try:
-        raw = await request.json()
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    return _applications_create_impl(raw)
-
-
-@app.get("/applications/id/{application_id:int}")
-def applications_get(application_id: int):
-    a = _APPLICATIONS.get(application_id)
-    if not a:
-        raise HTTPException(status_code=404, detail="Application not found")
-    return a
-
-
-@app.get("/applications/id/{application_id:int}/")
-def applications_get_slash(application_id: int):
-    return applications_get(application_id)
-
-
-def _apply_decision(a: Dict[str, Any], patch: Dict[str, Any]) -> None:
-    status_in = patch.get("status")
-    decision = patch.get("decision")
-    approved_flag = patch.get("approved")
-
-    if isinstance(status_in, str) and status_in:
-        a["status"] = status_in.lower()
-        return
-
-    if isinstance(decision, str):
-        d = decision.lower()
-        if d in ("approve", "approved", "true", "yes"):
-            a["status"] = "approved"
-            return
-        if d in ("reject", "rejected", "false", "no"):
-            a["status"] = "rejected"
-            return
-
-    if isinstance(approved_flag, bool):
-        a["status"] = "approved" if approved_flag else "rejected"
-        return
-
-
-@app.patch("/applications/id/{application_id:int}")
-async def applications_patch(
-    application_id: int, request: Request, _=Depends(require_auth)
-):
-    a = _APPLICATIONS.get(application_id)
-    if not a:
-        raise HTTPException(status_code=404, detail="Application not found")
-    try:
-        patch = await request.json()
-        if not isinstance(patch, dict):
-            patch = {}
-    except Exception:
-        patch = {}
-    a.update({k: v for k, v in patch.items() if v is not None})
-    _apply_decision(a, patch)
-    return a
-
-
-@app.patch("/applications/id/{application_id:int}/")
-async def applications_patch_slash(
-    application_id: int, request: Request, _=Depends(require_auth)
-):
-    return await applications_patch(application_id, request)
-
-
-@app.put("/applications/id/{application_id:int}")
-async def applications_put(
-    application_id: int,
-    request: Request,
-    status: Optional[str] = None,
-    _=Depends(require_auth),
-):
-    a = _APPLICATIONS.get(application_id)
-    if not a:
-        raise HTTPException(status_code=404, detail="Application not found")
-    patch = {"status": status} if status else {}
-    a.update({k: v for k, v in patch.items() if v is not None})
-    _apply_decision(a, patch)
-    return a
-
-
-@app.put("/applications/id/{application_id:int}/")
-async def applications_put_slash(
-    application_id: int,
-    request: Request,
-    status: Optional[str] = None,
-    _=Depends(require_auth),
-):
-    return await applications_put(application_id, request, status)
-
-
-# Alias paths
-@app.get("/applications/{application_id}")
-def applications_get_alias(application_id: int):
-    return applications_get(application_id)
-
-
-@app.get("/applications/{application_id}/")
-def applications_get_alias_slash(application_id: int):
-    return applications_get_alias(application_id)
-
-
-@app.patch("/applications/{application_id:int}")
-async def applications_patch_alias(
-    application_id: int, request: Request, _=Depends(require_auth)
-):
-    return await applications_patch(application_id, request)
-
-
-@app.patch("/applications/{application_id:int}/")
-async def applications_patch_alias_slash(
-    application_id: int, request: Request, _=Depends(require_auth)
-):
-    return await applications_patch_alias(application_id, request)
-
-
-@app.put("/applications/{application_id:int}")
-async def applications_put_alias(
-    application_id: int,
-    request: Request,
-    status: Optional[str] = None,
-    _=Depends(require_auth),
-):
-    return await applications_put(application_id, request, status)
-
-
-@app.put("/applications/{application_id:int}/")
-async def applications_put_alias_slash(
-    application_id: int,
-    request: Request,
-    status: Optional[str] = None,
-    _=Depends(require_auth),
-):
-    return await applications_put_alias(application_id, request, status)
-
-
-# list applications by event id (used in flow)
-@app.get("/applications/event/{event_id}")
-def applications_list_by_event(event_id: int):
-    return [a for a in _APPLICATIONS.values() if a.get("event_id") == event_id]
-
-
-@app.get("/applications/event/{event_id}/")
-def applications_list_by_event_slash(event_id: int):
-    return applications_list_by_event(event_id)
-
-
-# ======================================================================================
-# Optional DB URL echo (harmless)
-# ======================================================================================
-db_url = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL") or ""
-if db_url:
-    print(f"[db] Effective DATABASE_URL = {db_url}")
-
-# ======================================================================================
-# Entrypoint
-# ======================================================================================
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    finally:
+        db.close()
+
+
+for module_name in [
+    "app.routers.admin",
+    "app.routers.applications",
+    "app.routers.auth",
+    "app.routers.billing",
+    "app.routers.booths",
+    "app.routers.diagrams",
+    "app.routers.events",
+    "app.routers.layout",
+    "app.routers.organizer_applications",
+   # "app.routers.organizer_diagram",
+    "app.routers.requirements",
+    "app.routers.requirements_alias",
+    "app.routers.requirement_templates",
+    # "app.routers.reviews",  # temporarily disabled while import issues are resolved
+    "app.routers.seed",
+    "app.routers.slots",
+    "app.routers.stats",
+    "app.routers.templates",
+    "app.routers.users",
+    "app.routers.vendors",
+    "app.routers.vendors_v2",
+    "app.routers.upload",
+]:
+    _try_include(app, module_name, "router")
