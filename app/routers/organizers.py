@@ -339,22 +339,39 @@ def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
     return get_public_organizer(email, db)
 
 @router.get("/verification/public")
-def get_public_organizers():
+def get_public_organizers(db: Session = Depends(get_db)):
     profiles = _load_profiles()
-
     results = []
 
     for email, profile in profiles.items():
         if not isinstance(profile, dict):
             continue
 
+        # Pull events for this organizer (this guarantees they exist publicly)
+        events = (
+            db.query(Event)
+            .filter(Event.organizer_email == email)
+            .all()
+        )
+
+        # Only show organizers that actually exist in system
+        if not profile and not events:
+            continue
+
+        name = (
+            profile.get("organizationName")
+            or profile.get("contactName")
+            or email
+        )
+
         results.append({
             "email": email,
-            "business_name": profile.get("organizationName"),
+            "business_name": name,
             "city": profile.get("location"),
             "status": "verified" if profile.get("verified") else "pending",
             "categories": [],
-            "bio": f"{profile.get('organizationName', 'Organizer')} profile on VendCore",
+            "bio": f"{name} profile on VendCore",
+            "events_count": len(events),
         })
 
     return results
