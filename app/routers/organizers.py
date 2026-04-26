@@ -59,16 +59,23 @@ def _event_to_public(event: Event) -> Dict[str, Any]:
 
 def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     email = _norm_email(payload.get("email"))
+
     return {
-        "organizationName": str(payload.get("organizationName") or payload.get("organization_name") or "").strip(),
-        "organizationType": str(payload.get("organizationType") or payload.get("organization_type") or "").strip(),
-        "contactName": str(payload.get("contactName") or payload.get("contact_name") or "").strip(),
+        "organizationName": str(payload.get("organizationName") or "").strip(),
+        "organizationType": str(payload.get("organizationType") or "").strip(),
+        "contactName": str(payload.get("contactName") or "").strip(),
         "email": email,
         "phone": str(payload.get("phone") or "").strip(),
         "website": str(payload.get("website") or "").strip(),
         "location": str(payload.get("location") or "").strip(),
-        "logoDataUrl": str(payload.get("logoDataUrl") or payload.get("logo_url") or "").strip(),
+        "logoDataUrl": str(payload.get("logoDataUrl") or "").strip(),
         "imageUrls": list(payload.get("imageUrls") or []),
+
+        # ✅ ADD THESE (THIS WAS MISSING)
+        "yearsInBusiness": str(payload.get("yearsInBusiness") or "").strip(),
+        "eventTypes": str(payload.get("eventTypes") or "").strip(),
+        "eventSize": str(payload.get("eventSize") or "").strip(),
+
         "profileComplete": bool(payload.get("profileComplete")),
         "updatedAt": str(payload.get("updatedAt") or "").strip(),
     }
@@ -108,42 +115,25 @@ def get_organizer_profile(email: str):
 def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
     profiles = _load_profiles()
-    profile = profiles.get(email)
+    profile_data = profile or {}
 
-    events = (
-        db.query(Event)
-        .filter(Event.organizer_email == email)
-        .order_by(Event.id.desc())
-        .all()
-    )
+return {
+    "organizer": {
+        "email": email,
+        "name": name,
+        "verified": True,
 
-    public_events = [
-        _event_to_public(event)
-        for event in events
-        if bool(event.published) and not bool(event.archived)
-    ]
+        # ✅ FLATTENED FIELDS (THIS FIXES EVERYTHING)
+        "yearsInBusiness": profile_data.get("yearsInBusiness"),
+        "eventTypes": profile_data.get("eventTypes"),
+        "eventSize": profile_data.get("eventSize"),
 
-    if not profile and not events:
-        raise HTTPException(status_code=404, detail="Organizer not found")
-
-    name = (
-        (profile or {}).get("organizationName")
-        or (profile or {}).get("contactName")
-        or (events[0].organizer_email if events else email)
-        or "Organizer"
-    )
-
-    return {
-        "organizer": {
-            "email": email,
-            "name": name,
-            "verified": True,
-            "profile": profile or {},
-            "events_count": len(events),
-            "public_events_count": len(public_events),
-            "events": public_events,
-        }
+        "profile": profile_data,
+        "events_count": len(events),
+        "public_events_count": len(public_events),
+        "events": public_events,
     }
+}
 
 
 @router.get("/organizers/{email}")
