@@ -380,6 +380,43 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
     }
 
 
+@router.get("/invites/{invite_id}")
+def get_invite(invite_id: str, db: Session = Depends(get_db)):
+    """Resolve a public vendor invite link into event data.
+
+    Current MVP invite links are generated client-side and only carry a short invite id.
+    Until invite records are stored server-side, this endpoint returns the most recent
+    published, non-archived event so the invite page can render a real event landing page
+    instead of an expired/invalid state.
+
+    Later, replace this fallback with a persisted invite table/store that maps:
+    invite_id -> event_id -> organizer_id/contact campaign.
+    """
+    invite = str(invite_id or "").strip()
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    event = (
+        db.query(Event)
+        .filter(Event.published == True)  # noqa: E712
+        .filter(Event.archived == False)  # noqa: E712
+        .order_by(Event.id.desc())
+        .first()
+    )
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    event_data = _serialize_event_model(event)
+    event_data.update(_event_marketplace_stats(event_data, _APPLICATIONS))
+
+    return {
+        "ok": True,
+        "invite_id": invite,
+        "event": event_data,
+    }
+
+
 @router.get("/events")
 async def get_events(db: Session = Depends(get_db)):
     rows = db.query(Event).order_by(Event.id.desc()).all()
