@@ -410,3 +410,32 @@ def create_vendor_review(
         "review": review,
         **_review_summary(vendor_key),
     }
+
+@router.post("/admin/backfill-categories")
+def backfill_categories():
+    updated = 0
+
+    for app in _APPLICATIONS.values():
+        vendor_email = (app.get("vendor_email") or "").lower()
+        vendor = _VENDORS.get(vendor_email)
+
+        if not vendor:
+            continue
+
+        categories = vendor.get("categories") or []
+        primary = categories[0] if categories else ""
+
+        if primary:
+            if not app.get("vendor_category"):
+                app["vendor_category"] = primary
+                updated += 1
+
+            if not app.get("vendor_categories"):
+                app["vendor_categories"] = categories
+
+            if not app.get("category"):
+                app["category"] = primary
+
+    save_store()
+
+    return {"updated": updated}
