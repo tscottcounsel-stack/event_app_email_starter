@@ -3,7 +3,7 @@
 import logging
 import os
 import re
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -52,6 +52,7 @@ class EventCreate(BaseModel):
     title: str = Field(min_length=1)
     description: Optional[str] = None
 
+    # Accept strings as well as datetimes so <input type="date"> values (YYYY-MM-DD) do not fail validation.
     start_date: Optional[Any] = None
     end_date: Optional[Any] = None
 
@@ -63,8 +64,6 @@ class EventCreate(BaseModel):
 
     ticket_sales_url: Optional[str] = None
     google_maps_url: Optional[str] = None
-    ticketSalesUrl: Optional[str] = None
-    googleMapsLink: Optional[str] = None
     category: Optional[str] = None
 
     heroImageUrl: Optional[str] = None
@@ -95,25 +94,29 @@ def _dt_to_iso(value: Any) -> Optional[str]:
         return str(value)
 
 
-def _ensure_datetime(value: Any) -> Optional[datetime]:
-    """Coerce frontend date payloads into real datetimes before SQLAlchemy save."""
+def _coerce_event_datetime(value: Any) -> Optional[datetime]:
+    """Normalize event date inputs before writing to the DB.
+
+    Frontend date inputs commonly send YYYY-MM-DD. The database column is a
+    timezone-aware DateTime, so convert date-only strings to midnight UTC.
+    Also accepts ISO datetime strings and existing datetime objects.
+    """
     if value is None:
         return None
+
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, date):
-        return datetime.combine(value, time.min).replace(tzinfo=timezone.utc)
 
-    raw = str(value).strip()
-    if not raw:
+    text = str(value).strip()
+    if not text:
         return None
 
     try:
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-            parsed_date = date.fromisoformat(raw)
-            return datetime.combine(parsed_date, time.min).replace(tzinfo=timezone.utc)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        normalized = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         logger.warning("Unable to parse event datetime value: %r", value)
@@ -298,7 +301,7 @@ def _apply_event_patch_model(ev: Event, patch: Dict[str, Any]) -> Event:
         if attr in ("image_urls", "video_urls"):
             setattr(ev, attr, list(value or []))
         elif attr in ("start_date", "end_date"):
-            setattr(ev, attr, _ensure_datetime(value))
+            setattr(ev, attr, _coerce_event_datetime(value))
         elif hasattr(ev, attr):
             setattr(ev, attr, value)
 
@@ -417,15 +420,15 @@ def organizer_create_event(
     event = Event(
         title=payload.title,
         description=payload.description,
-        start_date=_ensure_datetime(payload.start_date),
-        end_date=_ensure_datetime(payload.end_date),
+        start_date=_coerce_event_datetime(payload.start_date),
+        end_date=_coerce_event_datetime(payload.end_date),
         venue_name=payload.venue_name,
         street_address=payload.street_address,
         city=payload.city,
         state=payload.state,
         zip_code=payload.zip_code,
-        ticket_sales_url=payload.ticket_sales_url or payload.ticketSalesUrl,
-        google_maps_url=payload.google_maps_url or payload.googleMapsLink,
+        ticket_sales_url=payload.ticket_sales_url,
+        google_maps_url=payload.google_maps_url,
         category=payload.category,
         hero_image_url=payload.heroImageUrl,
         image_urls=list(payload.imageUrls or []),
