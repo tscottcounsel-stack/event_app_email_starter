@@ -12,7 +12,6 @@ from app.models.event import Event
 
 router = APIRouter(tags=["Organizers"])
 
-# Persist organizer profiles on Railway's mounted volume when available.
 DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parent.parent
 PROFILE_STORE_PATH = DATA_DIR / "organizer_profiles.json"
 
@@ -33,7 +32,10 @@ def _load_profiles() -> Dict[str, Dict[str, Any]]:
 
 def _save_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
     PROFILE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROFILE_STORE_PATH.write_text(json.dumps(profiles, indent=2, sort_keys=True), encoding="utf-8")
+    PROFILE_STORE_PATH.write_text(
+        json.dumps(profiles, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _event_to_public(event: Event) -> Dict[str, Any]:
@@ -70,12 +72,10 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "location": str(payload.get("location") or "").strip(),
         "logoDataUrl": str(payload.get("logoDataUrl") or "").strip(),
         "imageUrls": list(payload.get("imageUrls") or []),
-
-        # ✅ ADD THESE (THIS WAS MISSING)
         "yearsInBusiness": str(payload.get("yearsInBusiness") or "").strip(),
         "eventTypes": str(payload.get("eventTypes") or "").strip(),
         "eventSize": str(payload.get("eventSize") or "").strip(),
-
+        "verified": bool(payload.get("verified", False)),
         "profileComplete": bool(payload.get("profileComplete")),
         "updatedAt": str(payload.get("updatedAt") or "").strip(),
     }
@@ -96,31 +96,45 @@ def save_organizer_profile(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Primary contact name required")
 
     profiles = _load_profiles()
+
+    existing = profiles.get(email) or {}
+
+    # Preserve verification status unless the incoming payload explicitly includes verified.
+    if "verified" not in (payload or {}):
+        profile["verified"] = bool(existing.get("verified", False))
+
     profiles[email] = profile
     _save_profiles(profiles)
 
-    return {"ok": True, "profile": profile, "organizer": {"email": email, "profile": profile}}
+    return {
+        "ok": True,
+        "profile": profile,
+        "organizer": {
+            "email": email,
+            "profile": profile,
+            "verified": bool(profile.get("verified", False)),
+        },
+    }
 
 
 @router.get("/organizer/profile/{email}")
 def get_organizer_profile(email: str):
     email = _norm_email(email)
     profile = _load_profiles().get(email)
+
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    return {"profile": profile}
 
+    return {"profile": profile}
 
 
 @router.get("/organizers/public/{email}")
 def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
 
-    # Load stored profiles
     profiles = _load_profiles()
     profile = profiles.get(email) or {}
 
-    # Load events
     events = (
         db.query(Event)
         .filter(Event.organizer_email == email)
@@ -137,7 +151,6 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     if not profile and not events:
         raise HTTPException(status_code=404, detail="Organizer not found")
 
-    # Name fallback
     name = (
         profile.get("organizationName")
         or profile.get("contactName")
@@ -149,19 +162,18 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         "organizer": {
             "email": email,
             "name": name,
-            "verified": True,
-
-            # ✅ FLAT FIELDS (this is what frontend should use)
+            "verified": bool(profile.get("verified", False)),
             "yearsInBusiness": profile.get("yearsInBusiness"),
             "eventTypes": profile.get("eventTypes"),
             "eventSize": profile.get("eventSize"),
-
-            # Keep full profile for flexibility
             "profile": profile,
-
-            # Events
             "events_count": len(events),
             "public_events_count": len(public_events),
             "events": public_events,
         }
     }
+
+
+@router.get("/organizers/{email}")
+def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
+    return get_public_organizer(email, db)
