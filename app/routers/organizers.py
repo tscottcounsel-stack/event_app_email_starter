@@ -32,3 +32,8 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
             "events_count": len(events),
         }
     }
+
+@router.get("/organizers/{email}")
+def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
+    return get_public_organizer(email, db)
+
