@@ -25,7 +25,21 @@ def _safe_str(value: Any) -> str:
 def _safe_list_of_str(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        return [part.strip() for part in raw.split(",") if part.strip()]
+
     return []
+
+
+def _first_category(categories: Any, fallback: Any = "") -> str:
+    values = _safe_list_of_str(categories)
+    if values:
+        return values[0]
+    return _safe_str(fallback)
 
 
 def _user_vendor_key(user: Dict[str, Any]) -> str:
@@ -40,6 +54,7 @@ def _user_vendor_key(user: Dict[str, Any]) -> str:
 
     raise HTTPException(status_code=400, detail="Unable to resolve vendor identity")
 
+
 def _normalize_vendor_key(vendor_id: Any) -> str:
     vendor_key = _safe_str(vendor_id).lower()
     if not vendor_key:
@@ -47,13 +62,42 @@ def _normalize_vendor_key(vendor_id: Any) -> str:
     return vendor_key
 
 
+def _normalize_categories(payload: Dict[str, Any]) -> List[str]:
+    categories = _safe_list_of_str(payload.get("categories"))
+
+    if not categories:
+        categories = _safe_list_of_str(payload.get("vendor_categories"))
+
+    if not categories:
+        category = (
+            payload.get("category")
+            or payload.get("vendor_category")
+            or payload.get("businessCategory")
+            or payload.get("business_category")
+            or payload.get("businessType")
+            or payload.get("business_type")
+            or ""
+        )
+        categories = _safe_list_of_str(category)
+
+    return categories
+
+
 def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    categories = _normalize_categories(payload)
+    primary_category = _first_category(categories)
+
+    mapped = {
         "business_name": payload.get("businessName", ""),
         "email": payload.get("email", ""),
         "phone": payload.get("phone", ""),
         "description": payload.get("description", ""),
-        "categories": payload.get("categories", []),
+        "categories": categories,
+        "vendor_categories": categories,
+        "category": primary_category,
+        "vendor_category": primary_category,
+        "business_category": primary_category,
+        "business_type": primary_category,
         "website": payload.get("website", ""),
         "instagram": payload.get("instagram", ""),
         "facebook": payload.get("facebook", ""),
@@ -69,6 +113,8 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": _now_iso(),
     }
 
+    return mapped
+
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     vendor_key = _normalize_vendor_key(vendor_id)
@@ -76,6 +122,73 @@ def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
     return vendor
+
+
+def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
+    categories = _safe_list_of_str(
+        vendor.get("categories")
+        or vendor.get("vendor_categories")
+        or vendor.get("category")
+        or vendor.get("vendor_category")
+    )
+    primary_category = _first_category(
+        categories,
+        vendor.get("category")
+        or vendor.get("vendor_category")
+        or vendor.get("business_category")
+        or vendor.get("business_type")
+        or "",
+    )
+
+    return {
+        **vendor,
+        "vendor_id": vendor_key,
+        "categories": categories,
+        "vendor_categories": categories,
+        "category": primary_category,
+        "vendor_category": primary_category,
+        "business_category": primary_category,
+        "business_type": primary_category,
+    }
+
+
+def _sync_vendor_category_to_applications(vendor_key: str, vendor: Dict[str, Any]) -> None:
+    categories = _safe_list_of_str(vendor.get("categories") or vendor.get("vendor_categories"))
+    primary_category = _first_category(categories, vendor.get("category") or vendor.get("vendor_category") or "")
+
+    if not primary_category and not categories:
+        return
+
+    changed = False
+    vendor_email = _safe_str(vendor.get("email") or vendor_key).lower()
+    vendor_id = _safe_str(vendor.get("vendor_id") or vendor_key).lower()
+
+    for app in _APPLICATIONS.values():
+        if not isinstance(app, dict):
+            continue
+
+        app_vendor_email = _safe_str(app.get("vendor_email")).lower()
+        app_vendor_id = _safe_str(app.get("vendor_id")).lower()
+
+        if vendor_key not in {app_vendor_email, app_vendor_id} and vendor_email not in {app_vendor_email, app_vendor_id} and vendor_id not in {app_vendor_email, app_vendor_id}:
+            continue
+
+        if categories and not _safe_list_of_str(app.get("vendor_categories")):
+            app["vendor_categories"] = categories
+            changed = True
+
+        if primary_category and not _safe_str(app.get("vendor_category")):
+            app["vendor_category"] = primary_category
+            changed = True
+
+        if primary_category and not _safe_str(app.get("category")):
+            app["category"] = primary_category
+            changed = True
+
+        app["updated_at"] = app.get("updated_at") or _now_iso()
+
+    if changed:
+        save_store()
 
 
 def _reviews_for_vendor(vendor_id: Any) -> List[Dict[str, Any]]:
@@ -160,6 +273,13 @@ class VendorProfileUpsert(BaseModel):
     phone: str = ""
     description: str = ""
     categories: List[str] = Field(default_factory=list)
+    category: str = ""
+    vendor_category: str = ""
+    vendor_categories: List[str] = Field(default_factory=list)
+    businessCategory: str = ""
+    business_category: str = ""
+    businessType: str = ""
+    business_type: str = ""
     website: str = ""
     instagram: str = ""
     facebook: str = ""
@@ -186,7 +306,11 @@ class VendorReviewCreate(BaseModel):
 @router.get("/me")
 def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
     key = _user_vendor_key(user)
-    return _VENDORS.get(key) or {}
+    vendor = _VENDORS.get(key) or {}
+    if not vendor:
+        return {}
+    return _vendor_public_payload(key, vendor)
+
 
 @router.post("/me")
 def save_my_vendor_profile(
@@ -196,26 +320,41 @@ def save_my_vendor_profile(
     key = _user_vendor_key(user)
     existing = _VENDORS.get(key, {})
     mapped = _map_payload(payload.model_dump())
+
     updated = {**existing, **mapped}
     updated["vendor_id"] = key
     updated["email"] = key
+
+    categories = _safe_list_of_str(updated.get("categories") or updated.get("vendor_categories"))
+    primary_category = _first_category(categories, updated.get("category") or updated.get("vendor_category") or "")
+
+    updated["categories"] = categories
+    updated["vendor_categories"] = categories
+    updated["category"] = primary_category
+    updated["vendor_category"] = primary_category
+    updated["business_category"] = primary_category
+    updated["business_type"] = primary_category
+    updated["updated_at"] = _now_iso()
+
     _VENDORS[key] = updated
     save_store()
-    return updated
+    _sync_vendor_category_to_applications(key, updated)
+
+    return _vendor_public_payload(key, updated)
 
 
 @router.get("/by-email/{email}")
 def get_vendor_profile_by_email(email: str):
     vendor_key = _normalize_vendor_key(email)
     vendor = _get_vendor_or_404(vendor_key)
-    return {**vendor, "vendor_id": vendor_key}
+    return _vendor_public_payload(vendor_key, vendor)
 
 
 @router.get("/public/{vendor_id}")
 def get_vendor_profile(vendor_id: str):
     vendor_key = _normalize_vendor_key(vendor_id)
     vendor = _get_vendor_or_404(vendor_key)
-    return {**vendor, "vendor_id": vendor_key}
+    return _vendor_public_payload(vendor_key, vendor)
 
 
 @router.get("/{vendor_id}/reviews")
