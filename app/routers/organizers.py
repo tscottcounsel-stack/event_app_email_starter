@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ router = APIRouter(tags=["Organizers"])
 
 DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parent.parent
 PROFILE_STORE_PATH = DATA_DIR / "organizer_profiles.json"
+REVIEWS_STORE_PATH = DATA_DIR / "organizer_reviews.json"
 
 
 def _norm_email(value: Any) -> str:
@@ -36,6 +38,35 @@ def _save_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
         json.dumps(profiles, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _load_reviews() -> Dict[str, List[Dict[str, Any]]]:
+    try:
+        if not REVIEWS_STORE_PATH.exists():
+            return {}
+        data = json.loads(REVIEWS_STORE_PATH.read_text(encoding="utf-8") or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_reviews(reviews: Dict[str, List[Dict[str, Any]]]) -> None:
+    REVIEWS_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REVIEWS_STORE_PATH.write_text(
+        json.dumps(reviews, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 def _event_to_public(event: Event) -> Dict[str, Any]:
@@ -81,6 +112,56 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_review(payload: Dict[str, Any], organizer_email: str) -> Dict[str, Any]:
+    rating = _safe_int(payload.get("rating"), 0)
+    rating = max(1, min(5, rating))
+
+    comment = str(payload.get("comment") or "").strip()
+    reviewer_name = str(
+        payload.get("reviewer_name")
+        or payload.get("reviewerName")
+        or payload.get("name")
+        or "Verified Vendor"
+    ).strip()
+
+    return {
+        "id": str(payload.get("id") or f"review-{int(datetime.now(timezone.utc).timestamp() * 1000)}"),
+        "organizer_email": organizer_email,
+        "rating": rating,
+        "comment": comment,
+        "reviewer_name": reviewer_name or "Verified Vendor",
+        "created_at": str(payload.get("created_at") or payload.get("createdAt") or _utc_now_iso()),
+    }
+
+
+def _review_summary(organizer_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not organizer_reviews:
+        return {
+            "rating": 0,
+            "average_rating": 0,
+            "review_count": 0,
+            "reviews_count": 0,
+        }
+
+    total = 0
+    count = 0
+
+    for review in organizer_reviews:
+        rating = _safe_int(review.get("rating"), 0)
+        if rating > 0:
+            total += rating
+            count += 1
+
+    average = round(total / count, 1) if count else 0
+
+    return {
+        "rating": average,
+        "average_rating": average,
+        "review_count": len(organizer_reviews),
+        "reviews_count": len(organizer_reviews),
+    }
+
+
 @router.post("/organizer/profile")
 def save_organizer_profile(payload: Dict[str, Any]):
     profile = _profile_from_payload(payload or {})
@@ -96,10 +177,9 @@ def save_organizer_profile(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Primary contact name required")
 
     profiles = _load_profiles()
-
     existing = profiles.get(email) or {}
 
-    # Preserve verification status unless the incoming payload explicitly includes verified.
+    # Preserve verification status unless incoming payload explicitly includes verified.
     if "verified" not in (payload or {}):
         profile["verified"] = bool(existing.get("verified", False))
 
@@ -126,6 +206,64 @@ def get_organizer_profile(email: str):
         raise HTTPException(status_code=404, detail="Profile not found")
 
     return {"profile": profile}
+
+
+@router.get("/organizers/public/{email}/reviews")
+def get_public_organizer_reviews(email: str):
+    email = _norm_email(email)
+    reviews_store = _load_reviews()
+    organizer_reviews = list(reviews_store.get(email, []))
+    summary = _review_summary(organizer_reviews)
+
+    return {
+        "ok": True,
+        "email": email,
+        "reviews": organizer_reviews,
+        **summary,
+    }
+
+
+@router.post("/organizers/public/{email}/reviews")
+def submit_public_organizer_review(email: str, payload: Dict[str, Any]):
+    email = _norm_email(email)
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Organizer email required")
+
+    review = _normalize_review(payload or {}, email)
+
+    if not review.get("comment"):
+        raise HTTPException(status_code=400, detail="Review comment required")
+
+    reviews_store = _load_reviews()
+    reviews_store.setdefault(email, [])
+    reviews_store[email].append(review)
+    _save_reviews(reviews_store)
+
+    organizer_reviews = list(reviews_store.get(email, []))
+    summary = _review_summary(organizer_reviews)
+
+    return {
+        "ok": True,
+        "email": email,
+        "review": review,
+        "reviews": organizer_reviews,
+        **summary,
+    }
+
+
+@router.post("/organizers/review")
+def submit_organizer_review_alias(payload: Dict[str, Any]):
+    email = _norm_email(
+        payload.get("organizerEmail")
+        or payload.get("organizer_email")
+        or payload.get("email")
+    )
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Organizer email required")
+
+    return submit_public_organizer_review(email, payload)
 
 
 @router.get("/organizers/public/{email}")
@@ -158,6 +296,10 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         or "Organizer"
     )
 
+    reviews_store = _load_reviews()
+    organizer_reviews = list(reviews_store.get(email, []))
+    review_summary = _review_summary(organizer_reviews)
+
     return {
         "organizer": {
             "email": email,
@@ -166,11 +308,17 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
             "yearsInBusiness": profile.get("yearsInBusiness"),
             "eventTypes": profile.get("eventTypes"),
             "eventSize": profile.get("eventSize"),
+            "rating": review_summary["rating"],
+            "review_count": review_summary["review_count"],
+            "reviews_count": review_summary["reviews_count"],
+            "reviews": organizer_reviews,
             "profile": profile,
             "events_count": len(events),
             "public_events_count": len(public_events),
             "events": public_events,
-        }
+        },
+        "reviews": organizer_reviews,
+        **review_summary,
     }
 
 
