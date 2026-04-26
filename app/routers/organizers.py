@@ -337,3 +337,24 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
 @router.get("/organizers/{email}")
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
     return get_public_organizer(email, db)
+
+@router.get("/verification/public")
+def get_public_organizers():
+    profiles = _load_profiles()
+
+    results = []
+
+    for email, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+
+        results.append({
+            "email": email,
+            "business_name": profile.get("organizationName"),
+            "city": profile.get("location"),
+            "status": "verified" if profile.get("verified") else "pending",
+            "categories": [],
+            "bio": f"{profile.get('organizationName', 'Organizer')} profile on VendCore",
+        })
+
+    return results

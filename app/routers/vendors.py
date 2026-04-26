@@ -439,3 +439,19 @@ def backfill_categories():
     save_store()
 
     return {"updated": updated}
+
+@router.get("/public")
+def get_public_vendors():
+    results = []
+
+    for vendor_key, vendor in _VENDORS.items():
+        if not isinstance(vendor, dict):
+            continue
+
+        payload = _vendor_public_payload(vendor_key, vendor)
+
+        # Only show vendors with at least basic profile data
+        if payload.get("business_name") or payload.get("email"):
+            results.append(payload)
+
+    return results
