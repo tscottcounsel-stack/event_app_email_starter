@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.event import Event
+from app.routers.verifications import _compute_lifecycle_status, _find_latest_record
 
 router = APIRouter(tags=["Organizers"])
 
@@ -95,6 +96,21 @@ def compute_verification_status(profile: Dict[str, Any]) -> str:
 
     return "pending"
 
+
+
+def get_organizer_verification_status(email: Any, profile: Dict[str, Any] | None = None) -> str:
+    """Return organizer lifecycle status from the verification record source of truth.
+
+    Falls back to legacy/profile fields only when no verification record exists yet.
+    """
+    normalized_email = _norm_email(email)
+
+    if normalized_email:
+        record = _find_latest_record(normalized_email, "organizer")
+        if record:
+            return _compute_lifecycle_status(record)
+
+    return compute_verification_status(profile or {})
 
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
@@ -273,7 +289,7 @@ def save_organizer_profile(payload: Dict[str, Any]):
     if not profile.get("documents") and isinstance(existing.get("documents"), list):
         profile["documents"] = existing.get("documents")
 
-    profile["verification_status"] = compute_verification_status(profile)
+    profile["verification_status"] = get_organizer_verification_status(email, profile)
     profile["verified"] = profile["verification_status"] == "verified"
 
     profiles[email] = profile
@@ -286,7 +302,7 @@ def save_organizer_profile(payload: Dict[str, Any]):
             "email": email,
             "profile": profile,
             "verified": bool(profile.get("verified", False)),
-            "verification_status": compute_verification_status(profile),
+            "verification_status": get_organizer_verification_status(email, profile),
         },
     }
 
@@ -299,7 +315,7 @@ def get_organizer_profile(email: str):
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    profile = {**profile, "verification_status": compute_verification_status(profile)}
+    profile = {**profile, "verification_status": get_organizer_verification_status(email, profile)}
     profile["verified"] = profile["verification_status"] == "verified"
 
     return {"profile": profile}
@@ -363,11 +379,6 @@ def submit_organizer_review_alias(payload: Dict[str, Any]):
     return submit_public_organizer_review(email, payload)
 
 
-@router.get("/organizers/public-directory")
-def get_public_organizers_directory(db: Session = Depends(get_db)):
-    return _public_directory_rows(db)
-
-
 @router.get("/organizers/public/{email}")
 def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
@@ -402,7 +413,7 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     organizer_reviews = list(reviews_store.get(email, []))
     review_summary = _review_summary(organizer_reviews)
 
-    verification_status = compute_verification_status(profile)
+    verification_status = get_organizer_verification_status(email, profile)
 
     return {
         "organizer": {
@@ -434,9 +445,6 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         **review_summary,
     }
 
-@router.get("/organizers/{email}")
-def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
-    return get_public_organizer(email, db)
 
 def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
     profiles = _load_profiles()
@@ -460,7 +468,7 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         )
         location = str(profile.get("location") or "").strip()
 
-        verification_status = compute_verification_status(profile)
+        verification_status = get_organizer_verification_status(email, profile)
 
         rows_by_email[email] = {
             "email": email,
@@ -496,21 +504,22 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             continue
 
         location = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
+        verification_status = get_organizer_verification_status(email, {})
         rows_by_email[email] = {
             "email": email,
             "business_name": email,
             "name": email,
             "city": location,
             "location": location,
-            "status": "pending",
-            "verification_status": "pending",
-            "verified": False,
+            "status": verification_status,
+            "verification_status": verification_status,
+            "verified": verification_status == "verified",
             "categories": [getattr(event, "category", "")] if getattr(event, "category", "") else [],
             "bio": "Organizer hosting events on VendCore",
             "rating": 0,
             "review_count": 0,
             "events_count": 1,
-            "promoted": False,
+            "promoted": verification_status == "verified",
         }
 
     rows = list(rows_by_email.values())
@@ -518,6 +527,15 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
     return rows
 
 
+@router.get("/organizers/public-directory")
+def get_public_organizers_directory(db: Session = Depends(get_db)):
+    return _public_directory_rows(db)
+
+
 @router.get("/verification/public")
 def get_public_organizers(db: Session = Depends(get_db)):
     return _public_directory_rows(db)
+@router.get("/organizers/{email}")
+def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
+    return get_public_organizer(email, db)
+
