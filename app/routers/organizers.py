@@ -364,6 +364,7 @@ def get_public_organizers_directory(db: Session = Depends(get_db)):
             "bio": f"{name} profile on VendCore",
             "events_count": len(events),
             "promoted": bool(profile.get("verified")),
+            "logo_url": profile.get("logoDataUrl"), 
         })
 
     return results
