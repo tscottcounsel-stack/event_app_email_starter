@@ -12,10 +12,10 @@ from app.store import (
     _EVENTS,
     _REVIEWS,
     _VENDORS,
-    find_latest_verification_by_email,
     next_review_id,
     save_store,
 )
+from app.routers.verifications import _find_latest_record
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
 
@@ -178,61 +178,6 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
     return "unverified"
 
 
-def _review_status_from_verification(verification: Dict[str, Any] | None) -> str:
-    if not isinstance(verification, dict):
-        return "none"
-
-    explicit = _safe_str(verification.get("review_status") or verification.get("reviewStatus")).lower()
-    if explicit:
-        return explicit
-
-    raw = _safe_str(verification.get("status")).lower()
-    if raw == "verified":
-        return "approved"
-    if raw == "pending":
-        return "renewal_pending"
-    if raw == "rejected":
-        return "rejected"
-    return raw or "none"
-
-
-def _public_verification_display(verification_status: str, review_status: str) -> Dict[str, str]:
-    status = _safe_str(verification_status).lower()
-    review = _safe_str(review_status).lower()
-
-    if status in {"verified", "expiring_soon"}:
-        return {"public_verification_status": "verified", "public_verification_label": "Verified"}
-
-    if review in {"pending", "renewal_pending"} or status == "pending":
-        return {"public_verification_status": "renewal_pending", "public_verification_label": "Renewal pending"}
-
-    return {"public_verification_status": "not_verified", "public_verification_label": "Not verified"}
-
-
-def _derive_visibility_tier(vendor: Dict[str, Any], is_public_verified: bool) -> str:
-    explicit = _safe_str(vendor.get("visibility_tier") or vendor.get("visibilityTier")).lower()
-    if explicit in {"premium", "verified", "standard"}:
-        return explicit
-    if explicit in {"featured", "priority"}:
-        return "premium"
-
-    plan = _safe_str(vendor.get("plan") or vendor.get("subscription_plan") or vendor.get("subscriptionPlan")).lower()
-    is_premium = (
-        "premium" in plan
-        or "pro" in plan
-        or "growth" in plan
-        or "enterprise" in plan
-        or bool(vendor.get("featured"))
-        or bool(vendor.get("promoted"))
-    )
-
-    if is_premium:
-        return "premium"
-    if is_public_verified:
-        return "verified"
-    return "standard"
-
-
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     vendor_key = _normalize_vendor_key(vendor_id)
     vendor = _VENDORS.get(vendor_key)
@@ -267,23 +212,37 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         "business_category": primary_category,
         "business_type": primary_category,
     }
-
-    verification = find_latest_verification_by_email(vendor.get("email") or vendor_key, "vendor")
+    verification = _find_latest_record(vendor.get("email") or vendor_key, "vendor")
     verification_status = compute_verification_status(vendor, verification)
-    review_status = _review_status_from_verification(verification)
-    public_display = _public_verification_display(verification_status, review_status)
-    is_public_verified = public_display["public_verification_status"] == "verified"
-
-    plan = _safe_str(vendor.get("plan") or vendor.get("subscription_plan") or vendor.get("subscriptionPlan")).lower()
-    visibility_tier = _derive_visibility_tier(vendor, is_public_verified)
-
     payload["verification_status"] = verification_status
-    payload["review_status"] = review_status
-    payload["verified"] = is_public_verified
+    payload["verified"] = verification_status == "verified"
+
+    # Visibility + monetization logic.
+    plan = _safe_str(
+        vendor.get("plan")
+        or vendor.get("subscription_plan")
+        or vendor.get("subscriptionPlan")
+    ).lower()
+
+    is_premium = (
+        "premium" in plan
+        or "pro" in plan
+        or "growth" in plan
+        or "enterprise" in plan
+        or bool(vendor.get("featured"))
+        or bool(vendor.get("promoted"))
+    )
+
+    if is_premium:
+        visibility_tier = "premium"
+    elif payload["verified"]:
+        visibility_tier = "verified"
+    else:
+        visibility_tier = "standard"
+
     payload["plan"] = plan
     payload["visibility_tier"] = visibility_tier
     payload["visibilityTier"] = visibility_tier
-    payload.update(public_display)
 
     if verification:
         payload["verification_id"] = verification.get("id")
