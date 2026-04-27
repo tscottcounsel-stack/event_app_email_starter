@@ -333,6 +333,40 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         **review_summary,
     }
 
+@router.get("/organizers/public-directory")
+def get_public_organizers_directory(db: Session = Depends(get_db)):
+    profiles = _load_profiles()
+    results = []
+
+    for email, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+
+        events = (
+            db.query(Event)
+            .filter(Event.organizer_email == email)
+            .order_by(Event.id.desc())
+            .all()
+        )
+
+        name = (
+            profile.get("organizationName")
+            or profile.get("contactName")
+            or email
+        )
+
+        results.append({
+            "email": email,
+            "business_name": name,
+            "city": profile.get("location"),
+            "status": "verified" if profile.get("verified") else "pending",
+            "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
+            "bio": f"{name} profile on VendCore",
+            "events_count": len(events),
+            "promoted": bool(profile.get("verified")),
+        })
+
+    return results
 
 @router.get("/organizers/{email}")
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
