@@ -7,7 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.routers.auth import get_current_user
-from app.store import _APPLICATIONS, _EVENTS, _REVIEWS, _VENDORS, next_review_id, save_store
+from app.store import (
+    _APPLICATIONS,
+    _EVENTS,
+    _REVIEWS,
+    _VENDORS,
+    find_latest_verification_by_email,
+    next_review_id,
+    save_store,
+)
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
 
@@ -132,60 +140,42 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
-def compute_verification_status(profile: Dict[str, Any]) -> str:
+def compute_verification_status(profile: Dict[str, Any], verification: Dict[str, Any] | None = None) -> str:
     """Return the public verification lifecycle status for a vendor profile."""
+    source = verification if isinstance(verification, dict) and verification else profile
     now = datetime.utcnow()
-    explicit_status = _safe_str(
-        profile.get("verification_status")
-        or profile.get("verificationStatus")
-        or profile.get("status")
-    ).lower()
+    explicit_status = _safe_str(source.get("status") or source.get("verification_status") or source.get("verificationStatus")).lower()
 
-    if explicit_status in {"expired", "expiring_soon", "verified", "pending", "rejected"}:
+    if explicit_status in {"pending", "rejected"}:
         return explicit_status
 
-    documents = profile.get("documents") or profile.get("verification_documents") or profile.get("verificationDocuments") or []
-    if isinstance(documents, dict):
-        documents = list(documents.values())
-
-    has_expiration = False
-    if isinstance(documents, list):
-        for doc in documents:
-            if not isinstance(doc, dict):
-                continue
-
-            exp_date = _parse_datetime(
-                doc.get("expiration_date")
-                or doc.get("expirationDate")
-                or doc.get("expires_at")
-                or doc.get("expiresAt")
-            )
-
-            if not exp_date:
-                continue
-
-            has_expiration = True
+    if explicit_status == "verified" or bool(source.get("verified")):
+        exp_date = _parse_datetime(source.get("expiration_date") or source.get("expirationDate") or source.get("expires_at") or source.get("expiresAt"))
+        if exp_date:
             if exp_date < now:
                 return "expired"
             if exp_date - now <= timedelta(days=30):
                 return "expiring_soon"
 
-    if bool(profile.get("verified")) or explicit_status in {"approved", "complete"}:
-        if has_expiration:
-            return "verified"
-
-        # Temporary lifecycle proxy until upload flows persist real expiration_date values.
-        updated = _parse_datetime(profile.get("updated_at") or profile.get("updatedAt"))
-        if updated:
-            age_days = (now - updated).days
-            if age_days > 365:
-                return "expired"
-            if age_days >= 335:
-                return "expiring_soon"
-
+        documents = source.get("documents") or source.get("verification_documents") or source.get("verificationDocuments") or []
+        if isinstance(documents, dict):
+            documents = list(documents.values())
+        if isinstance(documents, list):
+            for doc in documents:
+                if not isinstance(doc, dict):
+                    continue
+                doc_exp = _parse_datetime(doc.get("expiration_date") or doc.get("expirationDate") or doc.get("expires_at") or doc.get("expiresAt"))
+                if not doc_exp:
+                    continue
+                if doc_exp < now:
+                    return "expired"
+                if doc_exp - now <= timedelta(days=30):
+                    return "expiring_soon"
         return "verified"
 
-    return "pending"
+    if explicit_status in {"expired", "expiring_soon"}:
+        return explicit_status
+    return "unverified"
 
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
@@ -222,8 +212,38 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         "business_category": primary_category,
         "business_type": primary_category,
     }
-    payload["verification_status"] = compute_verification_status(vendor)
-    payload["verified"] = payload["verification_status"] == "verified"
+    verification = find_latest_verification_by_email(vendor.get("email") or vendor_key, "vendor")
+    verification_status = compute_verification_status(vendor, verification)
+    payload["verification_status"] = verification_status
+    payload["verified"] = verification_status == "verified"
+
+# --- VISIBILITY + MONETIZATION LOGIC ---
+plan = _safe_str(
+    vendor.get("plan")
+    or vendor.get("subscription_plan")
+    or vendor.get("subscriptionPlan")
+).lower()
+
+is_premium = (
+    "premium" in plan
+    or "pro" in plan
+    or bool(vendor.get("featured"))
+    or bool(vendor.get("promoted"))
+)
+
+if is_premium:
+    visibility_tier = "premium"
+elif payload["verified"]:
+    visibility_tier = "verified"
+else:
+    visibility_tier = "standard"
+
+payload["plan"] = plan
+payload["visibility_tier"] = visibility_tier
+    if verification:
+        payload["verification_id"] = verification.get("id")
+        payload["expiration_date"] = verification.get("expiration_date")
+        payload["documents"] = verification.get("documents", payload.get("documents", []))
 
     return payload
 
