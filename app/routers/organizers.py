@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -16,6 +16,84 @@ router = APIRouter(tags=["Organizers"])
 DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parent.parent
 PROFILE_STORE_PATH = DATA_DIR / "organizer_profiles.json"
 REVIEWS_STORE_PATH = DATA_DIR / "organizer_reviews.json"
+
+
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    raw = _safe_str(value)
+    if not raw:
+        return None
+
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def compute_verification_status(profile: Dict[str, Any]) -> str:
+    """Return the public verification lifecycle status for an organizer profile."""
+    now = datetime.utcnow()
+    explicit_status = _safe_str(
+        profile.get("verification_status")
+        or profile.get("verificationStatus")
+        or profile.get("status")
+    ).lower()
+
+    if explicit_status in {"expired", "expiring_soon", "verified", "pending", "rejected"}:
+        return explicit_status
+
+    documents = profile.get("documents") or profile.get("verification_documents") or profile.get("verificationDocuments") or []
+    if isinstance(documents, dict):
+        documents = list(documents.values())
+
+    has_expiration = False
+    if isinstance(documents, list):
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+
+            exp_date = _parse_datetime(
+                doc.get("expiration_date")
+                or doc.get("expirationDate")
+                or doc.get("expires_at")
+                or doc.get("expiresAt")
+            )
+
+            if not exp_date:
+                continue
+
+            has_expiration = True
+            if exp_date < now:
+                return "expired"
+            if exp_date - now <= timedelta(days=30):
+                return "expiring_soon"
+
+    if bool(profile.get("verified")) or explicit_status in {"approved", "complete"}:
+        if has_expiration:
+            return "verified"
+
+        # Temporary lifecycle proxy until upload flows persist real expiration_date values.
+        updated = _parse_datetime(profile.get("updatedAt") or profile.get("updated_at"))
+        if updated:
+            age_days = (now - updated).days
+            if age_days > 365:
+                return "expired"
+            if age_days >= 335:
+                return "expiring_soon"
+
+        return "verified"
+
+    return "pending"
 
 
 def _norm_email(value: Any) -> str:
@@ -113,8 +191,10 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "linkedin": str(payload.get("linkedin") or payload.get("linkedIn") or payload.get("linkedinUrl") or payload.get("linkedin_url") or "").strip(),
         "youtube": str(payload.get("youtube") or payload.get("youTube") or payload.get("youtubeUrl") or payload.get("youtube_url") or "").strip(),
         "verified": bool(payload.get("verified", False)),
+        "verification_status": str(payload.get("verification_status") or payload.get("verificationStatus") or "").strip(),
+        "documents": list(payload.get("documents") or payload.get("verification_documents") or payload.get("verificationDocuments") or []),
         "profileComplete": bool(payload.get("profileComplete")),
-        "updatedAt": str(payload.get("updatedAt") or "").strip(),
+        "updatedAt": str(payload.get("updatedAt") or payload.get("updated_at") or _utc_now_iso()).strip(),
     }
 
 
@@ -185,9 +265,16 @@ def save_organizer_profile(payload: Dict[str, Any]):
     profiles = _load_profiles()
     existing = profiles.get(email) or {}
 
-    # Preserve verification status unless incoming payload explicitly includes verified.
+    # Preserve verification fields unless incoming payload explicitly updates them.
     if "verified" not in (payload or {}):
         profile["verified"] = bool(existing.get("verified", False))
+    if not profile.get("verification_status"):
+        profile["verification_status"] = _safe_str(existing.get("verification_status") or existing.get("verificationStatus"))
+    if not profile.get("documents") and isinstance(existing.get("documents"), list):
+        profile["documents"] = existing.get("documents")
+
+    profile["verification_status"] = compute_verification_status(profile)
+    profile["verified"] = profile["verification_status"] == "verified"
 
     profiles[email] = profile
     _save_profiles(profiles)
@@ -199,6 +286,7 @@ def save_organizer_profile(payload: Dict[str, Any]):
             "email": email,
             "profile": profile,
             "verified": bool(profile.get("verified", False)),
+            "verification_status": compute_verification_status(profile),
         },
     }
 
@@ -210,6 +298,9 @@ def get_organizer_profile(email: str):
 
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+
+    profile = {**profile, "verification_status": compute_verification_status(profile)}
+    profile["verified"] = profile["verification_status"] == "verified"
 
     return {"profile": profile}
 
@@ -306,11 +397,16 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     organizer_reviews = list(reviews_store.get(email, []))
     review_summary = _review_summary(organizer_reviews)
 
+    verification_status = compute_verification_status(profile)
+
     return {
         "organizer": {
             "email": email,
             "name": name,
-            "verified": bool(profile.get("verified", False)),
+            "verified": verification_status == "verified",
+            "verification_status": verification_status,
+            "logo_url": profile.get("logoDataUrl"),
+            "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
             "yearsInBusiness": profile.get("yearsInBusiness"),
             "eventTypes": profile.get("eventTypes"),
             "eventSize": profile.get("eventSize"),
@@ -332,42 +428,6 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         "reviews": organizer_reviews,
         **review_summary,
     }
-
-@router.get("/organizers/public-directory")
-def get_public_organizers_directory(db: Session = Depends(get_db)):
-    profiles = _load_profiles()
-    results = []
-
-    for email, profile in profiles.items():
-        if not isinstance(profile, dict):
-            continue
-
-        events = (
-            db.query(Event)
-            .filter(Event.organizer_email == email)
-            .order_by(Event.id.desc())
-            .all()
-        )
-
-        name = (
-            profile.get("organizationName")
-            or profile.get("contactName")
-            or email
-        )
-
-        results.append({
-            "email": email,
-            "business_name": name,
-            "city": profile.get("location"),
-            "status": "verified" if profile.get("verified") else "pending",
-            "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
-            "bio": f"{name} profile on VendCore",
-            "events_count": len(events),
-            "promoted": bool(profile.get("verified")),
-            "logo_url": profile.get("logoDataUrl"), 
-        })
-
-    return results
 
 @router.get("/organizers/{email}")
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
@@ -395,20 +455,25 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         )
         location = str(profile.get("location") or "").strip()
 
+        verification_status = compute_verification_status(profile)
+
         rows_by_email[email] = {
             "email": email,
             "business_name": name,
             "name": name,
             "city": location,
             "location": location,
-            "status": "verified" if profile.get("verified") else "pending",
-            "verified": bool(profile.get("verified", False)),
+            "status": verification_status,
+            "verification_status": verification_status,
+            "verified": verification_status == "verified",
             "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
             "bio": profile.get("organizationType") or f"{name} profile on VendCore",
             "rating": summary.get("rating", 0),
             "review_count": summary.get("review_count", 0),
             "events_count": 0,
-            "promoted": bool(profile.get("verified", False)),
+            "promoted": verification_status == "verified",
+            "logo_url": profile.get("logoDataUrl"),
+            "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
         }
 
     events = db.query(Event).order_by(Event.id.desc()).all()
@@ -433,6 +498,7 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "city": location,
             "location": location,
             "status": "pending",
+            "verification_status": "pending",
             "verified": False,
             "categories": [getattr(event, "category", "")] if getattr(event, "category", "") else [],
             "bio": "Organizer hosting events on VendCore",

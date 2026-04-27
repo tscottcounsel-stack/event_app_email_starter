@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -116,6 +116,78 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return mapped
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    raw = _safe_str(value)
+    if not raw:
+        return None
+
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def compute_verification_status(profile: Dict[str, Any]) -> str:
+    """Return the public verification lifecycle status for a vendor profile."""
+    now = datetime.utcnow()
+    explicit_status = _safe_str(
+        profile.get("verification_status")
+        or profile.get("verificationStatus")
+        or profile.get("status")
+    ).lower()
+
+    if explicit_status in {"expired", "expiring_soon", "verified", "pending", "rejected"}:
+        return explicit_status
+
+    documents = profile.get("documents") or profile.get("verification_documents") or profile.get("verificationDocuments") or []
+    if isinstance(documents, dict):
+        documents = list(documents.values())
+
+    has_expiration = False
+    if isinstance(documents, list):
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+
+            exp_date = _parse_datetime(
+                doc.get("expiration_date")
+                or doc.get("expirationDate")
+                or doc.get("expires_at")
+                or doc.get("expiresAt")
+            )
+
+            if not exp_date:
+                continue
+
+            has_expiration = True
+            if exp_date < now:
+                return "expired"
+            if exp_date - now <= timedelta(days=30):
+                return "expiring_soon"
+
+    if bool(profile.get("verified")) or explicit_status in {"approved", "complete"}:
+        if has_expiration:
+            return "verified"
+
+        # Temporary lifecycle proxy until upload flows persist real expiration_date values.
+        updated = _parse_datetime(profile.get("updated_at") or profile.get("updatedAt"))
+        if updated:
+            age_days = (now - updated).days
+            if age_days > 365:
+                return "expired"
+            if age_days >= 335:
+                return "expiring_soon"
+
+        return "verified"
+
+    return "pending"
+
+
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     vendor_key = _normalize_vendor_key(vendor_id)
     vendor = _VENDORS.get(vendor_key)
@@ -140,7 +212,7 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         or "",
     )
 
-    return {
+    payload = {
         **vendor,
         "vendor_id": vendor_key,
         "categories": categories,
@@ -150,6 +222,10 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         "business_category": primary_category,
         "business_type": primary_category,
     }
+    payload["verification_status"] = compute_verification_status(vendor)
+    payload["verified"] = payload["verification_status"] == "verified"
+
+    return payload
 
 
 def _sync_vendor_category_to_applications(vendor_key: str, vendor: Dict[str, Any]) -> None:
