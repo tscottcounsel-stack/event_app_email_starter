@@ -114,7 +114,33 @@ def _find_latest_record(email: str, role: str = "") -> Optional[Dict[str, Any]]:
     return matches[0]
 
 
+def _earliest_expiration_from_documents(record: Optional[Dict[str, Any]]) -> Optional[datetime]:
+    if not isinstance(record, dict):
+        return None
+
+    documents = record.get("documents") or record.get("verification_documents") or record.get("verificationDocuments") or []
+    if isinstance(documents, dict):
+        documents = list(documents.values())
+
+    expirations: List[datetime] = []
+    if isinstance(documents, list):
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+            exp = _parse_datetime(
+                doc.get("expiration_date")
+                or doc.get("expirationDate")
+                or doc.get("expires_at")
+                or doc.get("expiresAt")
+            )
+            if exp:
+                expirations.append(exp)
+
+    return min(expirations) if expirations else None
+
+
 def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
+    """Internal verification truth used by admin/review flows."""
     if not record:
         return "unverified"
 
@@ -123,7 +149,7 @@ def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
     if status != "verified":
         return status
 
-    expiration = _parse_datetime(record.get("expiration_date"))
+    expiration = _earliest_expiration_from_documents(record) or _parse_datetime(record.get("expiration_date"))
     if not expiration:
         return "verified"
 
@@ -137,10 +163,56 @@ def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
     return "verified"
 
 
+def _review_status(record: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(record, dict):
+        return "none"
+
+    explicit = _safe_lower(record.get("review_status") or record.get("reviewStatus"))
+    if explicit:
+        return explicit
+
+    raw = _safe_lower(record.get("status"))
+    if raw == "verified":
+        return "approved"
+    if raw == "pending":
+        return "renewal_pending"
+    if raw == "rejected":
+        return "rejected"
+    return raw or "none"
+
+
+def _public_verification_display(record: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Reputation-safe public display. Keep raw lifecycle details internal/admin-only."""
+    lifecycle_status = _compute_lifecycle_status(record)
+    review_status = _review_status(record)
+
+    if lifecycle_status in {"verified", "expiring_soon"}:
+        return {
+            "public_verification_status": "verified",
+            "public_verification_label": "Verified",
+        }
+
+    if review_status in {"pending", "renewal_pending"}:
+        return {
+            "public_verification_status": "renewal_pending",
+            "public_verification_label": "Renewal pending",
+        }
+
+    return {
+        "public_verification_status": "not_verified",
+        "public_verification_label": "Not verified",
+    }
+
+
 def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    lifecycle_status = _compute_lifecycle_status(record)
+    review_status = _review_status(record)
+    public_display = _public_verification_display(record)
     return {
         **record,
-        "verification_status": _compute_lifecycle_status(record),
+        "verification_status": lifecycle_status,
+        "review_status": review_status,
+        **public_display,
     }
 
 

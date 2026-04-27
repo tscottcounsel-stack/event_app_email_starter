@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.event import Event
-from app.routers.verifications import _compute_lifecycle_status, _find_latest_record
 
 router = APIRouter(tags=["Organizers"])
 
@@ -97,25 +96,48 @@ def compute_verification_status(profile: Dict[str, Any]) -> str:
     return "pending"
 
 
-
-def get_organizer_verification_status(email: Any, profile: Dict[str, Any] | None = None) -> str:
-    """Return organizer lifecycle status from the verification record source of truth.
-
-    Falls back to legacy/profile fields only when no verification record exists yet.
-    """
-    normalized_email = _norm_email(email)
-
-    if normalized_email:
-        record = _find_latest_record(normalized_email, "organizer")
-        if record:
-            return _compute_lifecycle_status(record)
-
-    return compute_verification_status(profile or {})
-
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+
+def _public_verification_display(verification_status: str, review_status: str = "") -> Dict[str, str]:
+    status = _safe_str(verification_status).lower()
+    review = _safe_str(review_status).lower()
+
+    if status in {"verified", "expiring_soon"}:
+        return {
+            "public_verification_status": "verified",
+            "public_verification_label": "Verified",
+        }
+
+    if status == "pending" or review in {"pending", "renewal_pending"}:
+        return {
+            "public_verification_status": "renewal_pending",
+            "public_verification_label": "Renewal pending",
+        }
+
+    return {
+        "public_verification_status": "not_verified",
+        "public_verification_label": "Not verified",
+    }
+
+
+def _derive_visibility_tier(profile: Dict[str, Any], public_verification_status: str) -> str:
+    explicit = _safe_str(profile.get("visibility_tier") or profile.get("visibilityTier")).lower()
+    if explicit in {"premium", "verified", "standard"}:
+        return explicit
+    if explicit in {"featured", "priority"}:
+        return "premium"
+
+    plan = _safe_str(profile.get("plan") or profile.get("subscription_plan") or profile.get("subscriptionPlan")).lower()
+    if profile.get("promoted") or profile.get("featured") or any(token in plan for token in ["premium", "pro", "growth", "enterprise"]):
+        return "premium"
+
+    if public_verification_status == "verified":
+        return "verified"
+
+    return "standard"
 def _load_profiles() -> Dict[str, Dict[str, Any]]:
     try:
         if not PROFILE_STORE_PATH.exists():
@@ -289,7 +311,7 @@ def save_organizer_profile(payload: Dict[str, Any]):
     if not profile.get("documents") and isinstance(existing.get("documents"), list):
         profile["documents"] = existing.get("documents")
 
-    profile["verification_status"] = get_organizer_verification_status(email, profile)
+    profile["verification_status"] = compute_verification_status(profile)
     profile["verified"] = profile["verification_status"] == "verified"
 
     profiles[email] = profile
@@ -302,7 +324,7 @@ def save_organizer_profile(payload: Dict[str, Any]):
             "email": email,
             "profile": profile,
             "verified": bool(profile.get("verified", False)),
-            "verification_status": get_organizer_verification_status(email, profile),
+            "verification_status": compute_verification_status(profile),
         },
     }
 
@@ -315,7 +337,7 @@ def get_organizer_profile(email: str):
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    profile = {**profile, "verification_status": get_organizer_verification_status(email, profile)}
+    profile = {**profile, "verification_status": compute_verification_status(profile)}
     profile["verified"] = profile["verification_status"] == "verified"
 
     return {"profile": profile}
@@ -413,14 +435,21 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     organizer_reviews = list(reviews_store.get(email, []))
     review_summary = _review_summary(organizer_reviews)
 
-    verification_status = get_organizer_verification_status(email, profile)
+    verification_status = compute_verification_status(profile)
+    review_status = _safe_str(profile.get("review_status") or profile.get("reviewStatus")) or ("approved" if verification_status in {"verified", "expiring_soon"} else "renewal_pending" if verification_status == "pending" else "none")
+    public_display = _public_verification_display(verification_status, review_status)
+    visibility_tier = _derive_visibility_tier(profile, public_display["public_verification_status"])
 
     return {
         "organizer": {
             "email": email,
             "name": name,
-            "verified": verification_status == "verified",
+            "verified": public_display["public_verification_status"] == "verified",
             "verification_status": verification_status,
+            "review_status": review_status,
+            **public_display,
+            "visibility_tier": visibility_tier,
+            "visibilityTier": visibility_tier,
             "logo_url": profile.get("logoDataUrl"),
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
             "yearsInBusiness": profile.get("yearsInBusiness"),
@@ -445,6 +474,9 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
         **review_summary,
     }
 
+@router.get("/organizers/{email}")
+def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
+    return get_public_organizer(email, db)
 
 def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
     profiles = _load_profiles()
@@ -468,7 +500,10 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         )
         location = str(profile.get("location") or "").strip()
 
-        verification_status = get_organizer_verification_status(email, profile)
+        verification_status = compute_verification_status(profile)
+        review_status = _safe_str(profile.get("review_status") or profile.get("reviewStatus")) or ("approved" if verification_status in {"verified", "expiring_soon"} else "renewal_pending" if verification_status == "pending" else "none")
+        public_display = _public_verification_display(verification_status, review_status)
+        visibility_tier = _derive_visibility_tier(profile, public_display["public_verification_status"])
 
         rows_by_email[email] = {
             "email": email,
@@ -478,13 +513,17 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "location": location,
             "status": verification_status,
             "verification_status": verification_status,
-            "verified": verification_status == "verified",
+            "review_status": review_status,
+            **public_display,
+            "verified": public_display["public_verification_status"] == "verified",
+            "visibility_tier": visibility_tier,
+            "visibilityTier": visibility_tier,
             "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
             "bio": profile.get("organizationType") or f"{name} profile on VendCore",
             "rating": summary.get("rating", 0),
             "review_count": summary.get("review_count", 0),
             "events_count": 0,
-            "promoted": verification_status == "verified",
+            "promoted": visibility_tier == "premium",
             "logo_url": profile.get("logoDataUrl"),
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
         }
@@ -504,22 +543,26 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             continue
 
         location = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
-        verification_status = get_organizer_verification_status(email, {})
         rows_by_email[email] = {
             "email": email,
             "business_name": email,
             "name": email,
             "city": location,
             "location": location,
-            "status": verification_status,
-            "verification_status": verification_status,
-            "verified": verification_status == "verified",
+            "status": "pending",
+            "verification_status": "pending",
+            "review_status": "renewal_pending",
+            "public_verification_status": "renewal_pending",
+            "public_verification_label": "Renewal pending",
+            "verified": False,
+            "visibility_tier": "standard",
+            "visibilityTier": "standard",
             "categories": [getattr(event, "category", "")] if getattr(event, "category", "") else [],
             "bio": "Organizer hosting events on VendCore",
             "rating": 0,
             "review_count": 0,
             "events_count": 1,
-            "promoted": verification_status == "verified",
+            "promoted": False,
         }
 
     rows = list(rows_by_email.values())
@@ -535,7 +578,3 @@ def get_public_organizers_directory(db: Session = Depends(get_db)):
 @router.get("/verification/public")
 def get_public_organizers(db: Session = Depends(get_db)):
     return _public_directory_rows(db)
-@router.get("/organizers/{email}")
-def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
-    return get_public_organizer(email, db)
-
