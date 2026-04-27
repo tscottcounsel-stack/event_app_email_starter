@@ -1,49 +1,46 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 
-from app.routers.auth import get_current_user
-from app.store import _VENDORS, _VERIFICATIONS, save_store, upsert_verification_record
+from app.store import _VERIFICATIONS, save_store
 
 router = APIRouter(tags=["Verifications"])
 
-DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parent.parent
-PROFILE_STORE_PATH = DATA_DIR / "organizer_profiles.json"
-
-VALID_STATUSES = {"pending", "verified", "rejected", "expired", "expiring_soon", "unverified"}
-RENEWAL_DAYS = 365
+VALID_ROLES = {"vendor", "organizer"}
+VALID_REVIEW_STATUSES = {"verified", "rejected"}
 EXPIRING_SOON_DAYS = 30
+DEFAULT_VERIFICATION_DURATION_DAYS = 365
 
 
-def _utc_now() -> datetime:
+def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _utc_now_iso() -> str:
-    return _utc_now().isoformat()
+def _now_iso() -> str:
+    return _now().isoformat()
 
 
 def _safe_str(value: Any) -> str:
-    return str(value or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
-def _norm_email(value: Any) -> str:
+def _safe_lower(value: Any) -> str:
     return _safe_str(value).lower()
 
 
-def _parse_datetime(value: Any) -> datetime | None:
+def _parse_datetime(value: Any) -> Optional[datetime]:
     raw = _safe_str(value)
     if not raw:
         return None
+
     try:
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        parsed = datetime.fromisoformat(raw)
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
@@ -51,32 +48,9 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
-def _public_status(record: Dict[str, Any] | None) -> str:
-    if not record:
-        return "unverified"
-
-    status = _safe_str(record.get("status") or record.get("verification_status")).lower()
-    if status in {"pending", "rejected"}:
-        return status
-
-    if status != "verified":
-        return status if status in VALID_STATUSES else "unverified"
-
-    exp = _parse_datetime(record.get("expiration_date") or record.get("expires_at"))
-    if not exp:
-        return "verified"
-
-    now = _utc_now()
-    if exp < now:
-        return "expired"
-    if exp - now <= timedelta(days=EXPIRING_SOON_DAYS):
-        return "expiring_soon"
-    return "verified"
-
-
 def _next_verification_id() -> int:
     ids: List[int] = []
-    for key in (_VERIFICATIONS or {}).keys():
+    for key in _VERIFICATIONS.keys():
         try:
             ids.append(int(key))
         except Exception:
@@ -84,196 +58,225 @@ def _next_verification_id() -> int:
     return max(ids, default=0) + 1
 
 
-def _find_latest(email: Any, role: Any = None) -> Dict[str, Any] | None:
-    target_email = _norm_email(email)
-    target_role = _safe_str(role).lower()
-    if not target_email:
-        return None
+def _normalize_documents(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
 
-    matches: List[Dict[str, Any]] = []
-    for item in (_VERIFICATIONS or {}).values():
+    docs: List[Dict[str, Any]] = []
+    for item in value:
         if not isinstance(item, dict):
             continue
-        if _norm_email(item.get("email")) != target_email:
+
+        doc = {
+            "name": _safe_str(item.get("name") or item.get("label") or item.get("type")),
+            "label": _safe_str(item.get("label") or item.get("name") or item.get("type")),
+            "type": _safe_str(item.get("type") or item.get("document_type") or item.get("category")),
+            "url": _safe_str(item.get("url") or item.get("file_url") or item.get("fileUrl")),
+            "expiration_date": _safe_str(
+                item.get("expiration_date")
+                or item.get("expirationDate")
+                or item.get("expires_at")
+                or item.get("expiresAt")
+            ),
+            "uploaded_at": _safe_str(item.get("uploaded_at") or item.get("uploadedAt") or _now_iso()),
+        }
+
+        if doc["name"] or doc["url"] or doc["type"]:
+            docs.append(doc)
+
+    return docs
+
+
+def _record_matches_identity(record: Dict[str, Any], email: str, role: str) -> bool:
+    record_email = _safe_lower(record.get("email"))
+    record_role = _safe_lower(record.get("role"))
+    return bool(record_email and email and record_email == email and record_role == role)
+
+
+def _find_latest_record(email: str, role: str = "") -> Optional[Dict[str, Any]]:
+    normalized_email = _safe_lower(email)
+    normalized_role = _safe_lower(role)
+
+    matches: List[Dict[str, Any]] = []
+    for record in _VERIFICATIONS.values():
+        if not isinstance(record, dict):
             continue
-        if target_role and _safe_str(item.get("role")).lower() != target_role:
+        if _safe_lower(record.get("email")) != normalized_email:
             continue
-        matches.append(item)
+        if normalized_role and _safe_lower(record.get("role")) != normalized_role:
+            continue
+        matches.append(record)
 
     if not matches:
         return None
 
-    matches.sort(
-        key=lambda item: (
-            _safe_str(item.get("submitted_at") or item.get("created_at")),
-            int(item.get("id") or 0),
-        ),
-        reverse=True,
-    )
+    matches.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
     return matches[0]
 
 
-def _load_profiles() -> Dict[str, Dict[str, Any]]:
-    try:
-        if not PROFILE_STORE_PATH.exists():
-            return {}
-        data = json.loads(PROFILE_STORE_PATH.read_text(encoding="utf-8") or "{}")
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
+    if not record:
+        return "unverified"
+
+    status = _safe_lower(record.get("status")) or "pending"
+
+    if status != "verified":
+        return status
+
+    expiration = _parse_datetime(record.get("expiration_date"))
+    if not expiration:
+        return "verified"
+
+    now = _now()
+    if expiration < now:
+        return "expired"
+
+    if expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
+        return "expiring_soon"
+
+    return "verified"
 
 
-def _save_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
-    PROFILE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROFILE_STORE_PATH.write_text(json.dumps(profiles, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _sync_public_profile_flags(record: Dict[str, Any]) -> None:
-    email = _norm_email(record.get("email"))
-    role = _safe_str(record.get("role")).lower()
-    public_status = _public_status(record)
-    is_verified = public_status == "verified"
-
-    if not email:
-        return
-
-    if role == "vendor":
-        vendor = _VENDORS.get(email)
-        if isinstance(vendor, dict):
-            vendor["verified"] = is_verified
-            vendor["verification_status"] = public_status
-            vendor["verification_id"] = record.get("id")
-            vendor["expiration_date"] = record.get("expiration_date")
-            vendor["documents"] = record.get("documents", [])
-            vendor["updated_at"] = _utc_now_iso()
-
-    if role == "organizer":
-        profiles = _load_profiles()
-        profile = profiles.get(email)
-        if isinstance(profile, dict):
-            profile["verified"] = is_verified
-            profile["verification_status"] = public_status
-            profile["verification_id"] = record.get("id")
-            profile["expiration_date"] = record.get("expiration_date")
-            profile["documents"] = record.get("documents", [])
-            profile["updatedAt"] = _utc_now_iso()
-            profiles[email] = profile
-            _save_profiles(profiles)
-
-
-def _normalize_documents(value: Any) -> List[Dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    docs: List[Dict[str, Any]] = []
-    for idx, doc in enumerate(value, start=1):
-        if not isinstance(doc, dict):
-            continue
-        docs.append({
-            "id": doc.get("id") or idx,
-            "name": _safe_str(doc.get("name") or doc.get("label") or doc.get("type") or f"Document {idx}"),
-            "label": _safe_str(doc.get("label") or doc.get("name") or doc.get("type") or f"Document {idx}"),
-            "type": _safe_str(doc.get("type") or doc.get("document_type") or doc.get("documentType")),
-            "url": _safe_str(doc.get("url") or doc.get("file_url") or doc.get("fileUrl")),
-            "expiration_date": _safe_str(doc.get("expiration_date") or doc.get("expirationDate") or doc.get("expires_at") or doc.get("expiresAt")),
-        })
-    return docs
+def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **record,
+        "verification_status": _compute_lifecycle_status(record),
+    }
 
 
 @router.post("/verification/submit")
-def submit_verification(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
-    data = payload or {}
-    email = _norm_email(data.get("email") or user.get("email"))
-    role = _safe_str(data.get("role") or user.get("role")).lower()
+def submit_verification(payload: Dict[str, Any]):
+    email = _safe_lower(payload.get("email"))
+    role = _safe_lower(payload.get("role"))
 
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
-    if role not in {"vendor", "organizer"}:
+
+    if role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
 
-    existing = _find_latest(email, role)
-    vid = int(existing.get("id")) if existing and existing.get("id") else _next_verification_id()
+    existing = None
+    for verification_id, record in _VERIFICATIONS.items():
+        if isinstance(record, dict) and _record_matches_identity(record, email, role):
+            existing = (verification_id, record)
+            break
 
-    record = {
-        "id": vid,
-        "user_id": data.get("user_id") or user.get("id") or user.get("sub") or vid,
-        "email": email,
-        "role": role,
-        "status": "pending",
-        "submitted_at": _utc_now_iso(),
-        "reviewed_at": None,
-        "reviewed_by": None,
-        "notes": _safe_str(data.get("notes")),
-        "payment_status": _safe_str(data.get("payment_status") or "unpaid"),
-        "fee_amount": data.get("fee_amount") or 0,
-        "documents": _normalize_documents(data.get("documents")),
-        "expiration_date": _safe_str(data.get("expiration_date") or data.get("expirationDate")),
+    documents = _normalize_documents(payload.get("documents"))
+    submitted_at = _now_iso()
+
+    if existing:
+        verification_id, record = existing
+        record.update(
+            {
+                "id": int(verification_id),
+                "email": email,
+                "role": role,
+                "status": "pending",
+                "submitted_at": submitted_at,
+                "reviewed_at": None,
+                "reviewed_by": None,
+                "notes": _safe_str(payload.get("notes") or record.get("notes")),
+                "documents": documents,
+                "payment_status": _safe_str(payload.get("payment_status") or record.get("payment_status") or "unpaid"),
+                "fee_amount": payload.get("fee_amount", record.get("fee_amount", 0)),
+                "expiration_date": payload.get("expiration_date") or record.get("expiration_date"),
+            }
+        )
+        saved = record
+    else:
+        verification_id = _next_verification_id()
+        saved = {
+            "id": verification_id,
+            "email": email,
+            "role": role,
+            "status": "pending",
+            "submitted_at": submitted_at,
+            "reviewed_at": None,
+            "reviewed_by": None,
+            "notes": _safe_str(payload.get("notes")),
+            "documents": documents,
+            "payment_status": _safe_str(payload.get("payment_status") or "unpaid"),
+            "fee_amount": payload.get("fee_amount", 0),
+            "expiration_date": payload.get("expiration_date"),
+        }
+        _VERIFICATIONS[verification_id] = saved
+
+    save_store()
+
+    return {
+        "ok": True,
+        "verification": _public_record(saved),
     }
 
-    upsert_verification_record(record)
-    _sync_public_profile_flags(record)
-    save_store()
-    return {"ok": True, "verification": record}
 
-
-@router.get("/verification/me")
-def get_my_verification(user: Dict[str, Any] = Depends(get_current_user)):
-    email = _norm_email(user.get("email"))
-    role = _safe_str(user.get("role")).lower()
-    record = _find_latest(email, role) or _find_latest(email)
-    if not record:
-        return {"verification": None, "verification_status": "unverified"}
-    return {"verification": record, "verification_status": _public_status(record)}
+@router.get("/verification/status")
+def get_verification_status(email: str, role: str = ""):
+    record = _find_latest_record(email, role)
+    return {
+        "ok": True,
+        "email": _safe_lower(email),
+        "role": _safe_lower(role),
+        "verification_status": _compute_lifecycle_status(record),
+        "verification": _public_record(record) if record else None,
+    }
 
 
 @router.get("/admin/verifications")
-def get_admin_verifications(user: Dict[str, Any] = Depends(get_current_user)):
-    if _safe_str(user.get("role")).lower() != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+def get_admin_verifications():
+    records = [
+        _public_record(record)
+        for record in _VERIFICATIONS.values()
+        if isinstance(record, dict)
+    ]
+    records.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
 
-    rows = []
-    for item in (_VERIFICATIONS or {}).values():
-        if not isinstance(item, dict):
-            continue
-        row = dict(item)
-        row["status"] = _public_status(row)
-        rows.append(row)
-
-    rows.sort(
-        key=lambda item: (
-            _safe_str(item.get("submitted_at") or item.get("created_at")),
-            int(item.get("id") or 0),
-        ),
-        reverse=True,
-    )
-    return {"verifications": rows}
+    return {
+        "ok": True,
+        "verifications": records,
+        "count": len(records),
+    }
 
 
 @router.post("/admin/verify/{verification_id}")
-def review_verification(verification_id: int, payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
-    if _safe_str(user.get("role")).lower() != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+def review_verification(verification_id: int, payload: Dict[str, Any]):
+    record = _VERIFICATIONS.get(verification_id)
 
-    record = _VERIFICATIONS.get(int(verification_id))
     if not isinstance(record, dict):
         raise HTTPException(status_code=404, detail="Verification not found")
 
-    decision = _safe_str((payload or {}).get("status")).lower()
-    if decision not in {"verified", "rejected"}:
+    status = _safe_lower(payload.get("status"))
+
+    if status not in VALID_REVIEW_STATUSES:
         raise HTTPException(status_code=400, detail="Status must be verified or rejected")
 
-    record["status"] = decision
-    record["reviewed_at"] = _utc_now_iso()
-    record["reviewed_by"] = _norm_email(user.get("email")) or "admin"
-    record["notes"] = _safe_str((payload or {}).get("notes"))
+    record["status"] = status
+    record["reviewed_at"] = _now_iso()
+    record["reviewed_by"] = _safe_str(payload.get("reviewed_by") or payload.get("reviewedBy"))
+    record["notes"] = _safe_str(payload.get("notes"))
 
-    if decision == "verified":
-        requested_exp = _parse_datetime((payload or {}).get("expiration_date") or (payload or {}).get("expirationDate"))
-        expiration = requested_exp or (_utc_now() + timedelta(days=RENEWAL_DAYS))
-        record["expiration_date"] = expiration.isoformat()
-    else:
-        record["expiration_date"] = None
+    if status == "verified":
+        provided_expiration = _safe_str(payload.get("expiration_date") or payload.get("expirationDate"))
+        record["expiration_date"] = provided_expiration or (
+            _now() + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
+        ).isoformat()
 
-    _VERIFICATIONS[int(verification_id)] = record
-    _sync_public_profile_flags(record)
     save_store()
-    return {"ok": True, "verification": {**record, "status": _public_status(record)}}
+
+    return {
+        "ok": True,
+        "verification": _public_record(record),
+    }
+
+
+@router.delete("/admin/verifications/{verification_id}")
+def delete_verification(verification_id: int):
+    if verification_id not in _VERIFICATIONS:
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    removed = _VERIFICATIONS.pop(verification_id)
+    save_store()
+
+    return {
+        "ok": True,
+        "deleted": removed,
+    }
