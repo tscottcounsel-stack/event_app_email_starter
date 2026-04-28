@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict
 
 from app.routers.auth import _USERS, _USERS_BY_EMAIL, _persist_users, get_current_user
 
+from app.store import _VENDORS, save_store
+
 try:
     import stripe
 except Exception:
@@ -158,6 +160,29 @@ def _set_customer_fields(
     if subscription_id:
         user["stripe_subscription_id"] = subscription_id
 
+def _sync_vendor_premium_from_subscription(user: Dict[str, Any]) -> None:
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+
+    if role != "vendor" or not email:
+        return
+
+    vendor = _VENDORS.get(email)
+    if not isinstance(vendor, dict):
+        return
+
+    is_premium = plan == "pro_vendor" and status in {"active", "trialing", "paid"}
+
+    vendor["plan"] = plan
+    vendor["subscription_plan"] = plan
+    vendor["subscription_status"] = status
+    vendor["featured"] = is_premium
+    vendor["promoted"] = is_premium
+    vendor["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+
+    save_store()
 
 def _apply_subscription_state(
     user: Dict[str, Any],
@@ -179,11 +204,18 @@ def _apply_subscription_state(
     user["current_period_end"] = _to_iso(current_period_end)
     user["cancel_at_period_end"] = bool(cancel_at_period_end)
 
+    # 🔥 AUTO-SET PREMIUM FLAG
+if normalized_plan == "pro_vendor" and normalized_status in {"active", "trialing", "paid"}:
+    user["featured"] = True
+else:
+    user["featured"] = False
     if normalized_status in {"canceled", "cancelled", "unpaid", "incomplete_expired", "inactive"}:
         user["plan"] = "starter"
         user["subscription_status"] = "inactive"
         user["stripe_subscription_id"] = None
         user["cancel_at_period_end"] = False
+
+    _sync_vendor_premium_from_subscription(user)
 
     _save_user_updates(user)
 
