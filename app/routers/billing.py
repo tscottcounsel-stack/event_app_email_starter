@@ -307,31 +307,25 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             if user:
                 return user
 
-        # 🔥 ALWAYS PRIORITIZE METADATA FIRST
-email = metadata.get("email")
-
-# fallback: Stripe-provided email
-if not email:
-    email = getattr(session, "customer_email", None)
-    if not email and isinstance(session, dict):
-        email = session.get("customer_email")
-
-# fallback: customer_details
-if not email:
-    customer_details = getattr(session, "customer_details", None)
-    if customer_details is None and isinstance(session, dict):
-        customer_details = session.get("customer_details") or {}
-
-    if isinstance(customer_details, dict):
-        email = customer_details.get("email")
-
-            if isinstance(customer_details, dict):
-                email = customer_details.get("email")
-            else:
-                email = getattr(customer_details, "email", None)
+        # Prefer our checkout metadata first because Stripe customer_email can be empty
+        # when an existing customer is attached to the session.
+        email = str(metadata.get("email") or "").strip().lower()
 
         if not email:
-            email = metadata.get("email")
+            raw_email = getattr(session, "customer_email", None)
+            if raw_email is None and isinstance(session, dict):
+                raw_email = session.get("customer_email")
+            email = str(raw_email or "").strip().lower()
+
+        if not email:
+            customer_details = getattr(session, "customer_details", None)
+            if customer_details is None and isinstance(session, dict):
+                customer_details = session.get("customer_details") or {}
+
+            if isinstance(customer_details, dict):
+                email = str(customer_details.get("email") or "").strip().lower()
+            else:
+                email = str(getattr(customer_details, "email", "") or "").strip().lower()
 
         if email:
             user = _lookup_user(email=email)
@@ -346,7 +340,6 @@ if not email:
     except Exception as exc:
         print("🔥 USER LOOKUP ERROR:", str(exc))
         return None
-
 
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
