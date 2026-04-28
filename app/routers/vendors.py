@@ -212,7 +212,10 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         "business_category": primary_category,
         "business_type": primary_category,
     }
-    verification = _find_latest_record(vendor.get("email") or vendor_key, "vendor")
+    verification = (
+    _find_latest_record(vendor.get("email") or vendor_key, "vendor")
+    or find_latest_verification_by_email(vendor.get("email") or vendor_key, "vendor")
+)
     verification_status = compute_verification_status(vendor, verification)
     payload["verification_status"] = verification_status
     payload["verified"] = verification_status == "verified"
@@ -555,3 +558,25 @@ def get_public_vendors():
             results.append(payload)
 
     return results
+
+@router.post("/admin/set-premium")
+def set_vendor_premium(payload: dict):
+    from app.store import _VENDORS, save_store
+
+    email = (payload.get("email") or "").strip().lower()
+    featured = bool(payload.get("featured", True))
+
+    vendor = _VENDORS.get(email)
+
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    vendor["featured"] = featured
+
+    save_store()
+
+    return {
+        "ok": True,
+        "email": email,
+        "featured": featured
+    }
