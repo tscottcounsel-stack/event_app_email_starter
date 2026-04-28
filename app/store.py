@@ -401,6 +401,45 @@ def upsert_verification(user_id: Any, payload: Dict[str, Any]) -> Dict[str, Any]
         return record
 
 
+
+def _norm_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def find_latest_verification_by_email(email: Any, role: Any = None) -> Dict[str, Any] | None:
+    target_email = _norm_email(email)
+    target_role = str(role or "").strip().lower()
+    if not target_email:
+        return None
+    with _LOCK:
+        matches = []
+        for item in (_VERIFICATIONS or {}).values():
+            if not isinstance(item, dict):
+                continue
+            if _norm_email(item.get("email")) != target_email:
+                continue
+            if target_role and str(item.get("role") or "").strip().lower() != target_role:
+                continue
+            matches.append(item)
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (str(item.get("submitted_at") or item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)
+        return dict(matches[0])
+
+
+def upsert_verification_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(payload or {})
+    try:
+        vid = int(data.get("id")) if data.get("id") not in (None, "") else next_verification_id()
+    except Exception:
+        vid = next_verification_id()
+    with _LOCK:
+        existing = _VERIFICATIONS.get(vid, {}) if isinstance(_VERIFICATIONS.get(vid, {}), dict) else {}
+        record = {**existing, **data, "id": vid}
+        _VERIFICATIONS[vid] = record
+        save_store()
+        return dict(record)
+
 def get_or_create_application(
     *,
     vendor_email: Any,
