@@ -218,6 +218,10 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "email": email,
         "phone": str(payload.get("phone") or "").strip(),
         "website": str(payload.get("website") or "").strip(),
+        "business_address": str(payload.get("business_address") or payload.get("businessAddress") or "").strip(),
+        "city": str(payload.get("city") or "").strip(),
+        "state": str(payload.get("state") or "").strip(),
+        "zip": str(payload.get("zip") or payload.get("zipcode") or payload.get("postal_code") or "").strip(),
         "location": str(payload.get("location") or "").strip(),
         "logoDataUrl": str(payload.get("logoDataUrl") or "").strip(),
         "imageUrls": list(payload.get("imageUrls") or []),
@@ -312,6 +316,10 @@ def save_organizer_profile(payload: Dict[str, Any]):
         profile["verification_status"] = _safe_str(existing.get("verification_status") or existing.get("verificationStatus"))
     if not profile.get("documents") and isinstance(existing.get("documents"), list):
         profile["documents"] = existing.get("documents")
+
+    for premium_key in ("plan", "subscription_plan", "subscription_status", "featured", "promoted"):
+        if premium_key not in (payload or {}) and premium_key in existing:
+            profile[premium_key] = existing.get(premium_key)
 
     profile["verification_status"] = compute_verification_status(profile)
     profile["verified"] = profile["verification_status"] == "verified"
@@ -452,11 +460,25 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
             **public_display,
             "visibility_tier": visibility_tier,
             "visibilityTier": visibility_tier,
+            "plan": profile.get("plan"),
+            "subscription_plan": profile.get("subscription_plan"),
+            "subscription_status": profile.get("subscription_status"),
+            "featured": bool(profile.get("featured")),
+            "promoted": bool(profile.get("promoted")),
             "logo_url": profile.get("logoDataUrl"),
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
             "yearsInBusiness": profile.get("yearsInBusiness"),
             "eventTypes": profile.get("eventTypes"),
             "eventSize": profile.get("eventSize"),
+            "business_address": profile.get("business_address"),
+            "city": profile.get("city") or profile.get("location"),
+            "state": profile.get("state"),
+            "zip": profile.get("zip"),
+            "plan": profile.get("plan"),
+            "subscription_plan": profile.get("subscription_plan"),
+            "subscription_status": profile.get("subscription_status"),
+            "featured": bool(profile.get("featured")),
+            "promoted": bool(profile.get("promoted")),
             "instagram": profile.get("instagram"),
             "facebook": profile.get("facebook"),
             "tiktok": profile.get("tiktok"),
@@ -496,7 +518,11 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             or profile.get("contactName")
             or email
         )
-        location = str(profile.get("location") or "").strip()
+        location = str(
+            profile.get("location")
+            or ", ".join([x for x in [profile.get("city"), profile.get("state")] if x])
+            or ""
+        ).strip()
 
         verification_status = compute_verification_status(profile)
         review_status = _safe_str(profile.get("review_status") or profile.get("reviewStatus")) or ("approved" if verification_status in {"verified", "expiring_soon"} else "renewal_pending" if verification_status == "pending" else "none")
@@ -509,6 +535,9 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "name": name,
             "city": location,
             "location": location,
+            "business_address": profile.get("business_address"),
+            "state": profile.get("state"),
+            "zip": profile.get("zip"),
             "status": verification_status,
             "verification_status": verification_status,
             "review_status": review_status,

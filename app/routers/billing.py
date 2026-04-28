@@ -184,6 +184,39 @@ def _sync_vendor_premium_from_subscription(user: Dict[str, Any]) -> None:
 
     save_store()
 
+def _sync_organizer_premium_from_subscription(user: Dict[str, Any]) -> None:
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+
+    if role != "organizer" or not email:
+        return
+
+    try:
+        from app.routers.organizers import _load_profiles, _save_profiles
+    except Exception as exc:
+        print("⚠️ Organizer premium sync skipped:", str(exc))
+        return
+
+    profiles = _load_profiles()
+    profile = profiles.get(email)
+
+    if not isinstance(profile, dict):
+        return
+
+    is_premium = plan == "enterprise_organizer" and status in {"active", "trialing", "paid"}
+
+    profile["plan"] = plan
+    profile["subscription_plan"] = plan
+    profile["subscription_status"] = status
+    profile["featured"] = is_premium
+    profile["promoted"] = is_premium
+    profile["updatedAt"] = datetime.now(tz=timezone.utc).isoformat()
+
+    profiles[email] = profile
+    _save_profiles(profiles)
+
 def _apply_subscription_state(
     user: Dict[str, Any],
     *,
@@ -211,6 +244,7 @@ def _apply_subscription_state(
         user["cancel_at_period_end"] = False
 
     _sync_vendor_premium_from_subscription(user)
+    _sync_organizer_premium_from_subscription(user)
     _save_user_updates(user)
 
 def _extract_subscription_price_id(subscription: Any) -> Optional[str]:
@@ -655,9 +689,15 @@ async def stripe_webhook(request: Request):
                         plan = _price_id_to_plan(price_id)
 
                         if plan and plan != "starter":
-                            user["plan"] = plan
-                            user["subscription_status"] = "active"
-                            _save_user_updates(user)
+                            _apply_subscription_state(
+                                user,
+                                plan=plan,
+                                subscription_status=str(getattr(subscription, "status", None) or "active"),
+                                customer_id=customer_id,
+                                subscription_id=subscription_id,
+                                current_period_end=getattr(subscription, "current_period_end", None),
+                                cancel_at_period_end=bool(getattr(subscription, "cancel_at_period_end", False)),
+                            )
                     except Exception as exc:
                         print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
                 else:
@@ -665,9 +705,15 @@ async def stripe_webhook(request: Request):
                     plan = str(metadata.get("plan") or "").strip().lower()
 
                     if plan:
-                        user["plan"] = plan
-                        user["subscription_status"] = "active"
-                        _save_user_updates(user)
+                        _apply_subscription_state(
+                            user,
+                            plan=plan,
+                            subscription_status="active",
+                            customer_id=customer_id,
+                            subscription_id=subscription_id,
+                            current_period_end=None,
+                            cancel_at_period_end=False,
+                        )
             else:
                 print("⚠️ No user found for checkout session")
         except Exception as exc:
