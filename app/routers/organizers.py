@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.event import Event
 
+try:
+    from app.routers.auth import _USERS, _USERS_BY_EMAIL
+except Exception:
+    _USERS = {}
+    _USERS_BY_EMAIL = {}
+
 router = APIRouter(tags=["Organizers"])
 
 DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).resolve().parent.parent
@@ -121,6 +127,76 @@ def _public_verification_display(verification_status: str, review_status: str = 
         "public_verification_status": "not_verified",
         "public_verification_label": "Not verified",
     }
+
+
+
+def _user_for_email(email: str) -> Dict[str, Any]:
+    normalized = _norm_email(email)
+    if not normalized:
+        return {}
+
+    try:
+        user_id = _USERS_BY_EMAIL.get(normalized)
+        if user_id is not None:
+            user = _USERS.get(int(user_id))
+            if isinstance(user, dict):
+                return user
+    except Exception:
+        pass
+
+    try:
+        for user in _USERS.values():
+            if isinstance(user, dict) and _norm_email(user.get("email")) == normalized:
+                return user
+    except Exception:
+        pass
+
+    return {}
+
+
+def _apply_subscription_overlay(profile: Dict[str, Any], email: str) -> Dict[str, Any]:
+    """Overlay live billing state from the auth user store onto organizer profiles.
+
+    Organizer profiles are still stored separately from user billing state. This keeps
+    public organizer directory/profile output in sync when Stripe updates the user
+    record but the profile JSON has not been rewritten yet.
+    """
+    merged = dict(profile or {})
+    user = _user_for_email(email)
+
+    if not isinstance(user, dict) or not user:
+        return merged
+
+    role = _safe_str(user.get("role")).lower()
+    if role and role != "organizer":
+        return merged
+
+    plan = _safe_str(user.get("plan") or "starter").lower()
+    status = _safe_str(user.get("subscription_status") or "inactive").lower()
+    is_enterprise = plan == "enterprise_organizer" and status in {"active", "trialing", "paid"}
+
+    if plan:
+        merged["plan"] = plan
+        merged["subscription_plan"] = plan
+        merged["subscriptionPlan"] = plan
+    if status:
+        merged["subscription_status"] = status
+        merged["subscriptionStatus"] = status
+
+    if is_enterprise:
+        merged["featured"] = True
+        merged["promoted"] = True
+        merged["visibility_tier"] = "premium"
+        merged["visibilityTier"] = "premium"
+    elif plan == "starter" or status in {"inactive", "canceled", "cancelled", "unpaid", "incomplete_expired"}:
+        # Only clear paid placement when billing explicitly says the account is inactive.
+        merged["featured"] = False
+        merged["promoted"] = False
+        if _safe_str(merged.get("visibility_tier") or merged.get("visibilityTier")).lower() == "premium":
+            merged.pop("visibility_tier", None)
+            merged.pop("visibilityTier", None)
+
+    return merged
 
 
 def _derive_visibility_tier(profile: Dict[str, Any], public_verification_status: str) -> str:
@@ -416,7 +492,7 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
 
     profiles = _load_profiles()
-    profile = profiles.get(email) or {}
+    profile = _apply_subscription_overlay(profiles.get(email) or {}, email)
 
     events = (
         db.query(Event)
@@ -511,6 +587,8 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         if not email:
             continue
 
+        profile = _apply_subscription_overlay(profile, email)
+
         organizer_reviews = list(reviews_store.get(email, []))
         summary = _review_summary(organizer_reviews)
         name = (
@@ -550,7 +628,11 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "rating": summary.get("rating", 0),
             "review_count": summary.get("review_count", 0),
             "events_count": 0,
-            "promoted": visibility_tier == "premium",
+            "plan": profile.get("plan"),
+            "subscription_plan": profile.get("subscription_plan") or profile.get("subscriptionPlan"),
+            "subscription_status": profile.get("subscription_status") or profile.get("subscriptionStatus"),
+            "featured": bool(profile.get("featured")),
+            "promoted": bool(profile.get("promoted")) or visibility_tier == "premium",
             "logo_url": profile.get("logoDataUrl"),
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
         }
@@ -662,8 +744,10 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             },
         ]
 
+    tier_rank = {"premium": 0, "verified": 1, "standard": 2}
     rows.sort(
         key=lambda row: (
+            tier_rank.get(_safe_str(row.get("visibility_tier") or row.get("visibilityTier")).lower(), 2),
             not bool(row.get("verified")),
             str(row.get("business_name") or row.get("email") or "").lower(),
         )
