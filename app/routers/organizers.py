@@ -137,14 +137,24 @@ def _public_verification_display(verification_status: str, review_status: str = 
 
 
 def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[str, Any]:
+    """Read latest verification directly from app.store at request time.
+
+    This avoids stale imports if app.store rebinds _VERIFICATIONS during startup/load.
+    """
     normalized_email = _norm_email(email)
     normalized_role = _safe_str(role).lower()
     if not normalized_email:
         return {}
 
+    try:
+        import app.store as live_store  # type: ignore
+        verification_store = getattr(live_store, "_VERIFICATIONS", {})
+    except Exception:
+        verification_store = _VERIFICATIONS
+
     matches: List[Dict[str, Any]] = []
     try:
-        records = _VERIFICATIONS.values() if isinstance(_VERIFICATIONS, dict) else []
+        records = verification_store.values() if isinstance(verification_store, dict) else []
         for record in records:
             if not isinstance(record, dict):
                 continue
