@@ -307,14 +307,23 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             if user:
                 return user
 
-        email = getattr(session, "customer_email", None)
-        if not email and isinstance(session, dict):
-            email = session.get("customer_email")
+        # 🔥 ALWAYS PRIORITIZE METADATA FIRST
+email = metadata.get("email")
 
-        if not email:
-            customer_details = getattr(session, "customer_details", None)
-            if customer_details is None and isinstance(session, dict):
-                customer_details = session.get("customer_details") or {}
+# fallback: Stripe-provided email
+if not email:
+    email = getattr(session, "customer_email", None)
+    if not email and isinstance(session, dict):
+        email = session.get("customer_email")
+
+# fallback: customer_details
+if not email:
+    customer_details = getattr(session, "customer_details", None)
+    if customer_details is None and isinstance(session, dict):
+        customer_details = session.get("customer_details") or {}
+
+    if isinstance(customer_details, dict):
+        email = customer_details.get("email")
 
             if isinstance(customer_details, dict):
                 email = customer_details.get("email")
