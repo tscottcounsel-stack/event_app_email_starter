@@ -17,7 +17,31 @@ from app.store import (
 )
 from app.routers.verifications import _find_latest_record
 
+from app.store import find_latest_verification_by_email
+
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
+
+@router.post("/admin/set-premium")
+def set_vendor_premium(payload: dict):
+    from app.store import _VENDORS, save_store
+
+    email = (payload.get("email") or "").strip().lower()
+    featured = bool(payload.get("featured", True))
+
+    vendor = _VENDORS.get(email)
+
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    vendor["featured"] = featured
+
+    save_store()
+
+    return {
+        "ok": True,
+        "email": email,
+        "featured": featured
+    }
 
 
 def _now_iso() -> str:
@@ -445,27 +469,6 @@ def save_my_vendor_profile(
 
     return _vendor_public_payload(key, updated)
 
-@router.post("/admin/set-premium")
-def set_vendor_premium(payload: dict):
-    from app.store import _VENDORS, save_store
-
-    email = (payload.get("email") or "").strip().lower()
-    featured = bool(payload.get("featured", True))
-
-    vendor = _VENDORS.get(email)
-
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-
-    vendor["featured"] = featured
-
-    save_store()
-
-    return {
-        "ok": True,
-        "email": email,
-        "featured": featured
-    }
 @router.get("/by-email/{email}")
 def get_vendor_profile_by_email(email: str):
     vendor_key = _normalize_vendor_key(email)
