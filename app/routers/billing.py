@@ -204,11 +204,6 @@ def _apply_subscription_state(
     user["current_period_end"] = _to_iso(current_period_end)
     user["cancel_at_period_end"] = bool(cancel_at_period_end)
 
-    # 🔥 AUTO-SET PREMIUM FLAG
-if normalized_plan == "pro_vendor" and normalized_status in {"active", "trialing", "paid"}:
-    user["featured"] = True
-else:
-    user["featured"] = False
     if normalized_status in {"canceled", "cancelled", "unpaid", "incomplete_expired", "inactive"}:
         user["plan"] = "starter"
         user["subscription_status"] = "inactive"
@@ -216,9 +211,7 @@ else:
         user["cancel_at_period_end"] = False
 
     _sync_vendor_premium_from_subscription(user)
-
     _save_user_updates(user)
-
 
 def _extract_subscription_price_id(subscription: Any) -> Optional[str]:
     try:
