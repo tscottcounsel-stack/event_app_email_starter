@@ -138,7 +138,7 @@ def _env_csv(name: str) -> list[str]:
     return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
 
 
-app = FastAPI(title="Vendor Connect API")
+app = FastAPI(title="VendCore API")
 
 frontend_origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
