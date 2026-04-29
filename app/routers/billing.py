@@ -704,23 +704,22 @@ async def stripe_webhook(request: Request):
 
             if is_verification_payment:
                 try:
-                    from app.routers.verifications import mark_verification_paid
+                    from app.routers.auth import _mark_verification_paid_from_stripe_session
 
-                    email = str(metadata.get("email") or "").strip().lower()
-                    role = str(metadata.get("role") or "").strip().lower()
-
-                    record = mark_verification_paid(
-                        email=email,
-                        role=role,
-                        stripe_session_id=session_id or "",
-                        stripe_payment_intent_id=payment_intent_id or "",
-                        amount_paid=amount_total,
+                    record = _mark_verification_paid_from_stripe_session(
+                        data_object,
+                        source="billing_webhook",
+                        require_complete=False,
                     )
 
-                    if record:
-                        print("✅ Verification payment applied:", email, role)
-                    else:
-                        print("⚠️ Verification payment could not be applied:", dict(metadata))
+                    print(
+                        "✅ Verification payment applied via auth flow:",
+                        {
+                            "email": record.get("email"),
+                            "role": record.get("role"),
+                            "session_id": record.get("last_session_id"),
+                        },
+                    )
                 except Exception as exc:
                     print("🔥 Verification payment webhook error:", str(exc))
 
