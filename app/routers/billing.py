@@ -710,20 +710,42 @@ async def stripe_webhook(request: Request):
 
             if is_verification_payment:
                 try:
-                    from app.routers.auth import _mark_verification_paid_from_stripe_session
+                    from app.routers.auth import _get_verification, _save_verification_record
 
-                    record = _mark_verification_paid_from_stripe_session(
-                        data_object,
-                        source="billing_webhook",
-                        require_complete=False,
-                    )
+                    email = str(effective_metadata.get("email") or "").strip().lower()
+                    role = str(effective_metadata.get("role") or "").strip().lower()
+
+                    if role not in {"vendor", "organizer"}:
+                        role = "vendor"
+
+                    if not email:
+                        raise ValueError(f"Verification payment metadata missing email: {effective_metadata}")
+
+                    record = _get_verification(email, role)
+                    record["email"] = email
+                    record["role"] = role
+                    record["fee_paid"] = True
+                    record["payment_status"] = "paid"
+                    record["paid_at"] = int(datetime.now(tz=timezone.utc).timestamp())
+                    record["last_session_id"] = session_id
+                    record["stripe_session_id"] = session_id
+                    record["payment_intent_id"] = payment_intent_id
+                    record["stripe_payment_intent_id"] = payment_intent_id
+                    record["payment_confirmed_by"] = "billing_webhook"
+                    record["amount_paid"] = round(float(amount_total or 0) / 100, 2)
+
+                    if not record.get("status") or str(record.get("status") or "").strip().lower() in {"unpaid", "not_submitted"}:
+                        record["status"] = "not_started"
+
+                    _save_verification_record(record)
 
                     print(
-                        "✅ Verification payment applied via auth flow:",
+                        "✅ Verification payment applied directly:",
                         {
                             "email": record.get("email"),
                             "role": record.get("role"),
                             "session_id": record.get("last_session_id"),
+                            "payment_intent_id": record.get("payment_intent_id"),
                         },
                     )
                 except Exception as exc:
