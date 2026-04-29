@@ -671,32 +671,41 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
-           metadata = _extract_metadata(data_object)
+            metadata = _extract_metadata(data_object)
 
-# 🔥 ALWAYS fallback to payment intent metadata
-payment_intent_id = None
+            session_id = str(getattr(data_object, "id", None) or "").strip() or None
+            customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
+            subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
+            payment_intent_id = str(getattr(data_object, "payment_intent", None) or "").strip() or None
+            amount_total = getattr(data_object, "amount_total", None)
 
-if isinstance(data_object, dict):
-    payment_intent_id = data_object.get("payment_intent")
-else:
-    payment_intent_id = getattr(data_object, "payment_intent", None)
+            if isinstance(data_object, dict):
+                session_id = str(data_object.get("id") or "").strip() or session_id
+                customer_id = str(data_object.get("customer") or "").strip() or customer_id
+                subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
+                payment_intent_id = str(data_object.get("payment_intent") or "").strip() or payment_intent_id
+                amount_total = data_object.get("amount_total", amount_total)
 
-if payment_intent_id:
-    try:
-        pi = stripe.PaymentIntent.retrieve(payment_intent_id)
-        pi_metadata = pi.metadata or {}
+            # Verification checkout metadata may live on the PaymentIntent/Charge
+            # even when the Checkout Session metadata is empty.
+            payment_intent_metadata: Dict[str, Any] = {}
+            if payment_intent_id:
+                try:
+                    payment_intent = stripe_sdk.PaymentIntent.retrieve(payment_intent_id)
+                    payment_intent_metadata = _extract_metadata(payment_intent)
+                    if payment_intent_metadata:
+                        print("🔥 Using PaymentIntent metadata:", dict(payment_intent_metadata))
+                except Exception as exc:
+                    print("⚠️ PI metadata fetch failed:", str(exc))
 
-        if pi_metadata:
-            metadata = pi_metadata
-            print("🔥 Using PaymentIntent metadata:", metadata)
+            effective_metadata = dict(metadata or {})
+            if payment_intent_metadata:
+                effective_metadata.update(payment_intent_metadata)
 
-    except Exception as e:
-        print("⚠️ PI metadata fetch failed:", str(e))
-
-            payment_type = str(metadata.get("payment_type") or "").strip().lower()
+            payment_type = str(effective_metadata.get("payment_type") or "").strip().lower()
             is_verification_payment = (
                 payment_type == "verification_fee"
-                or str(metadata.get("verification") or "").strip().lower() == "true"
+                or str(effective_metadata.get("verification") or "").strip().lower() == "true"
             )
 
             if is_verification_payment:
@@ -747,7 +756,7 @@ if payment_intent_id:
                     except Exception as exc:
                         print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
                 else:
-                    plan = str(metadata.get("plan") or "").strip().lower()
+                    plan = str(effective_metadata.get("plan") or "").strip().lower()
 
                     if plan:
                         _apply_subscription_state(
