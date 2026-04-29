@@ -378,104 +378,6 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     return True
 
 
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value in (None, ""):
-            return default
-        return int(value)
-    except Exception:
-        return default
-
-
-def _next_verification_id(verifications: Dict[Any, Any]) -> int:
-    ids = []
-    for key in verifications.keys():
-        try:
-            ids.append(int(key))
-        except Exception:
-            continue
-    return max(ids, default=0) + 1
-
-
-def mark_verification_paid(
-    *,
-    email: str,
-    role: str,
-    verification_id: Any = None,
-    stripe_session_id: Optional[str] = None,
-    stripe_payment_intent_id: Optional[str] = None,
-    amount_paid: Any = None,
-) -> Optional[Dict[str, Any]]:
-    from app.store import _VERIFICATIONS, save_store
-
-    normalized_email = str(email or "").strip().lower()
-    normalized_role = str(role or "").strip().lower()
-
-    if not normalized_email or normalized_role not in {"vendor", "organizer"}:
-        print("⚠️ Verification payment missing email/role:", normalized_email, normalized_role)
-        return None
-
-    record: Optional[Dict[str, Any]] = None
-    record_key: Any = None
-
-    if verification_id not in (None, ""):
-        for key in (verification_id, str(verification_id), _safe_int(verification_id, -1)):
-            candidate = _VERIFICATIONS.get(key)
-            if isinstance(candidate, dict):
-                record = candidate
-                record_key = key
-                break
-
-    if record is None:
-        for key, candidate in _VERIFICATIONS.items():
-            if not isinstance(candidate, dict):
-                continue
-            candidate_email = str(candidate.get("email") or "").strip().lower()
-            candidate_role = str(candidate.get("role") or "").strip().lower()
-            if candidate_email == normalized_email and candidate_role == normalized_role:
-                record = candidate
-                record_key = key
-                break
-
-    if record is None:
-        new_id = _next_verification_id(_VERIFICATIONS)
-        record_key = new_id
-        record = {
-            "id": new_id,
-            "email": normalized_email,
-            "role": normalized_role,
-            "status": "not_submitted",
-            "submitted_at": None,
-            "reviewed_at": None,
-            "reviewed_by": None,
-            "notes": "",
-            "documents": [],
-            "fee_amount": 49 if normalized_role == "organizer" else 25,
-            "expiration_date": None,
-        }
-        _VERIFICATIONS[record_key] = record
-
-    record["id"] = _safe_int(record.get("id") or record_key, _next_verification_id(_VERIFICATIONS))
-    record["email"] = normalized_email
-    record["role"] = normalized_role
-    record["payment_status"] = "paid"
-    record["fee_paid"] = True
-    record["paid_at"] = datetime.now(tz=timezone.utc).isoformat()
-
-    if stripe_session_id:
-        record["stripe_session_id"] = stripe_session_id
-    if stripe_payment_intent_id:
-        record["stripe_payment_intent_id"] = stripe_payment_intent_id
-    if amount_paid not in (None, ""):
-        try:
-            record["amount_paid"] = round(float(amount_paid) / 100, 2)
-        except Exception:
-            record["amount_paid"] = amount_paid
-
-    save_store()
-    return record
-
-
 @router.get("/platform-fee")
 def get_current_platform_fee(user: dict = Depends(get_current_user)):
     lookup = _lookup_user(user_id=user.get("id"), email=user.get("email")) or user
@@ -770,7 +672,6 @@ async def stripe_webhook(request: Request):
     if event_type == "checkout.session.completed":
         try:
             metadata = _extract_metadata(data_object)
-            payment_type = str(metadata.get("payment_type") or "").strip().lower()
 
             session_id = str(getattr(data_object, "id", None) or "").strip() or None
             customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
@@ -785,29 +686,43 @@ async def stripe_webhook(request: Request):
                 payment_intent_id = str(data_object.get("payment_intent") or "").strip() or payment_intent_id
                 amount_total = data_object.get("amount_total", amount_total)
 
+            if (not metadata or not metadata.get("payment_type")) and payment_intent_id:
+                try:
+                    payment_intent = stripe_sdk.PaymentIntent.retrieve(payment_intent_id)
+                    payment_intent_metadata = _extract_metadata(payment_intent)
+                    if payment_intent_metadata:
+                        metadata = payment_intent_metadata
+                        print("🔥 Using PaymentIntent metadata:", dict(metadata))
+                except Exception as exc:
+                    print("⚠️ Failed to fetch PaymentIntent metadata:", str(exc))
+
+            payment_type = str(metadata.get("payment_type") or "").strip().lower()
             is_verification_payment = (
                 payment_type == "verification_fee"
                 or str(metadata.get("verification") or "").strip().lower() == "true"
             )
 
             if is_verification_payment:
-                email = str(metadata.get("email") or "").strip().lower()
-                role = str(metadata.get("role") or "").strip().lower()
-                verification_id = metadata.get("verification_id")
+                try:
+                    from app.routers.verifications import mark_verification_paid
 
-                record = mark_verification_paid(
-                    email=email,
-                    role=role,
-                    verification_id=verification_id,
-                    stripe_session_id=session_id,
-                    stripe_payment_intent_id=payment_intent_id,
-                    amount_paid=amount_total,
-                )
+                    email = str(metadata.get("email") or "").strip().lower()
+                    role = str(metadata.get("role") or "").strip().lower()
 
-                if record:
-                    print("✅ Verification payment applied:", email, role)
-                else:
-                    print("⚠️ Verification payment could not be matched:", metadata)
+                    record = mark_verification_paid(
+                        email=email,
+                        role=role,
+                        stripe_session_id=session_id or "",
+                        stripe_payment_intent_id=payment_intent_id or "",
+                        amount_paid=amount_total,
+                    )
+
+                    if record:
+                        print("✅ Verification payment applied:", email, role)
+                    else:
+                        print("⚠️ Verification payment could not be applied:", dict(metadata))
+                except Exception as exc:
+                    print("🔥 Verification payment webhook error:", str(exc))
 
                 return {"received": True, "event_type": event_type}
 

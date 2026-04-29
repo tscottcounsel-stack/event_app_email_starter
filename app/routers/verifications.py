@@ -491,6 +491,7 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
             ],
             metadata={
                 "payment_type": "verification_fee",
+                "verification": "true",
                 "verification_id": str(record.get("id") or ""),
                 "user_id": str(user.get("id") or ""),
                 "email": email,
@@ -499,6 +500,7 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
             payment_intent_data={
                 "metadata": {
                     "payment_type": "verification_fee",
+                    "verification": "true",
                     "verification_id": str(record.get("id") or ""),
                     "user_id": str(user.get("id") or ""),
                     "email": email,
@@ -539,7 +541,12 @@ def confirm_verification_payment(payload: Dict[str, Any], user: dict = Depends(g
     payment_type = _safe_lower(metadata.get("payment_type"))
     payment_status = _safe_lower(_checkout_session_value(session, "payment_status", ""))
 
-    if payment_type != "verification_fee":
+    is_verification_payment = (
+        payment_type == "verification_fee"
+        or _safe_lower(metadata.get("verification")) == "true"
+    )
+
+    if not is_verification_payment:
         raise HTTPException(status_code=400, detail="Stripe session is not a verification payment")
 
     email = _safe_lower(metadata.get("email") or user.get("email"))
