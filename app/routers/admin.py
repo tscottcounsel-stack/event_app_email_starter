@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -10,7 +10,7 @@ from app.routers.auth import (
     get_current_user,
     list_all_users,
 )
-from app.store import get_store_snapshot, load_store, save_store
+import app.store as store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -107,19 +107,60 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _delete_vendor_profile_for_account(account: Dict[str, Any]) -> list[str]:
+    """Delete orphan vendor/profile data tied to a deleted user account.
+
+    Important: use app.store module globals directly instead of importing _VENDORS
+    by value, because load_store() can replace those dictionaries.
+    """
+    email = str(account.get("email") or "").strip().lower()
+    username = str(account.get("username") or "").strip().lower()
+    account_id = str(account.get("id") or account.get("sub") or "").strip()
+
+    identifiers = {value for value in {email, username, f"user_{account_id}" if account_id else ""} if value}
+
+    vendor_keys_to_delete: set[str] = set()
+    for key, vendor in list(store._VENDORS.items()):
+        key_norm = str(key or "").strip().lower()
+        if key_norm in identifiers:
+            vendor_keys_to_delete.add(key)
+            continue
+
+        if isinstance(vendor, dict):
+            vendor_email = str(vendor.get("email") or "").strip().lower()
+            vendor_id = str(vendor.get("vendor_id") or "").strip().lower()
+            vendor_user_id = str(vendor.get("user_id") or vendor.get("owner_id") or "").strip()
+            if vendor_email in identifiers or vendor_id in identifiers or (account_id and vendor_user_id == account_id):
+                vendor_keys_to_delete.add(key)
+
+    for key in vendor_keys_to_delete:
+        store._VENDORS.pop(key, None)
+        store._REVIEWS.pop(str(key).strip().lower(), None)
+
+    if email:
+        for vid, record in list(store._VERIFICATIONS.items()):
+            if isinstance(record, dict) and str(record.get("email") or "").strip().lower() == email:
+                store._VERIFICATIONS.pop(vid, None)
+
+    if vendor_keys_to_delete or email:
+        store.save_store()
+
+    return sorted(str(key) for key in vendor_keys_to_delete)
+
+
 @router.get("/dashboard")
 async def admin_dashboard(user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
+    store.load_store()
+    snapshot = store.get_store_snapshot()
 
     accounts = list_all_users()
     vendor_items = [u for u in accounts if str(u.get("role") or "").lower() == "vendor"]
     organizer_items = [u for u in accounts if str(u.get("role") or "").lower() == "organizer"]
 
-    applications = store.get("applications", {})
-    events = store.get("events", {})
-    payments = store.get("payments", [])
-    verifications = store.get("verifications", {})
+    applications = snapshot.get("applications", {})
+    events = snapshot.get("events", {})
+    payments = snapshot.get("payments", [])
+    verifications = snapshot.get("verifications", {})
 
     event_items = [e for e in _as_list(events) if isinstance(e, dict)]
     application_items_all = [a for a in _as_list(applications) if isinstance(a, dict)]
@@ -139,7 +180,7 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
     ]
 
     pending_items = [
-        a for a in verification_items if str(a.get("status") or "").lower() == "pending"
+        v for v in verification_items if str(v.get("status") or "").lower() == "pending"
     ]
 
     gross_sales = 0.0
@@ -210,15 +251,21 @@ async def admin_accounts_delete(user_id: int, user: dict = Depends(require_admin
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
 
     deleted = admin_delete_user(user_id)
-    return {"ok": True, "account": deleted}
+    vendor_profiles_deleted = _delete_vendor_profile_for_account(deleted)
+
+    return {
+        "ok": True,
+        "account": deleted,
+        "vendor_profiles_deleted": vendor_profiles_deleted,
+    }
 
 
 @router.get("/payments")
 async def admin_payments(user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
+    store.load_store()
+    snapshot = store.get_store_snapshot()
 
-    payments = store.get("payments", {})
+    payments = snapshot.get("payments", {})
     items = [p for p in _as_list(payments) if isinstance(p, dict)]
 
     paid = []
@@ -251,10 +298,10 @@ async def admin_payments(user: dict = Depends(require_admin)):
 
 @router.put("/payments/{payment_id}/mark-payout-paid")
 async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
+    store.load_store()
+    snapshot = store.get_store_snapshot()
 
-    payments = store.get("payments", {})
+    payments = snapshot.get("payments", {})
     payment = None
 
     if isinstance(payments, dict):
@@ -273,7 +320,7 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
     payment["payout_status"] = "paid"
     payment["payout_sent_at"] = utc_now_iso()
 
-    save_store()
+    store.save_store()
 
     return {
         "ok": True,
@@ -282,23 +329,13 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payout_sent_at": payment["payout_sent_at"],
     }
 
+
 @router.post("/reset-demo-data")
 async def reset_demo_data(user: dict = Depends(require_admin)):
-    if user.get("email") != "admin@example.com":
-        raise HTTPException(status_code=403, detail="Not authorized for reset")
-
-    from app.store import (
-        _EVENTS,
-        _APPLICATIONS,
-        _PAYMENTS,
-        _VERIFICATIONS,
-        _PAYOUTS,
-        _AUDIT_LOGS,
-        _BOOTHS,
-        _LAYOUT_META,
-        _TEMPLATES,
-        save_store,
-    )
+    # Allow the currently authenticated admin to reset demo data. This avoids
+    # locking the reset tool to the old admin@example.com seed account.
+    if str(user.get("role", "")).strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     from app.routers.auth import (
         _USERS,
@@ -307,18 +344,27 @@ async def reset_demo_data(user: dict = Depends(require_admin)):
         _persist_users,
     )
 
-    _EVENTS.clear()
-    _APPLICATIONS.clear()
-    _PAYMENTS.clear()
-    _VERIFICATIONS.clear()
-    _PAYOUTS.clear()
-    _AUDIT_LOGS.clear()
-    _BOOTHS.clear()
-    _LAYOUT_META.clear()
-    _TEMPLATES.clear()
+    store.load_store()
 
-    save_store()
+    # Clear JSON-backed marketplace data, including public vendor profiles.
+    store._EVENTS.clear()
+    store._APPLICATIONS.clear()
+    store._PAYMENTS.clear()
+    store._VERIFICATIONS.clear()
+    store._PAYOUTS.clear()
+    store._AUDIT_LOGS.clear()
+    store._BOOTHS.clear()
+    store._LAYOUT_META.clear()
+    store._TEMPLATES.clear()
+    store._REQUIREMENTS.clear()
+    store._REQUIREMENT_TEMPLATES.clear()
+    store._DIAGRAMS.clear()
+    store._VENDORS.clear()
+    store._REVIEWS.clear()
 
+    store.save_store()
+
+    # Keep only admin accounts; remove demo vendor/organizer accounts.
     admin_users = {
         uid: u
         for uid, u in _USERS.items()
@@ -345,4 +391,21 @@ async def reset_demo_data(user: dict = Depends(require_admin)):
         "ok": True,
         "message": "Demo data cleared. System ready for live use.",
         "remaining_admins": len(_USERS),
+        "vendors_remaining": len(store._VENDORS),
+    }
+
+
+@router.post("/wipe-vendors")
+async def wipe_vendors(user: dict = Depends(require_admin)):
+    """Temporary safety endpoint to remove orphan public vendor profiles."""
+    store.load_store()
+    deleted_count = len(store._VENDORS)
+    store._VENDORS.clear()
+    store._REVIEWS.clear()
+    store.save_store()
+
+    return {
+        "ok": True,
+        "vendors_cleared": deleted_count,
+        "vendors_remaining": len(store._VENDORS),
     }

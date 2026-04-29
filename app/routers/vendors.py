@@ -566,6 +566,38 @@ def backfill_categories():
 
     return {"updated": updated}
 
+
+@router.get("/admin/public-vendors-status")
+def public_vendors_status(user: Dict[str, Any] = Depends(get_current_user)):
+    if str(user.get("role") or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return {
+        "ok": True,
+        "count": len(_VENDORS),
+        "vendor_keys": sorted([str(key) for key in _VENDORS.keys()]),
+    }
+
+
+@router.post("/admin/wipe-public-vendors")
+def wipe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
+    if str(user.get("role") or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    removed_count = len(_VENDORS)
+    removed_keys = sorted([str(key) for key in _VENDORS.keys()])
+
+    _VENDORS.clear()
+    _REVIEWS.clear()
+    save_store()
+
+    return {
+        "ok": True,
+        "removed_count": removed_count,
+        "removed_keys": removed_keys,
+        "remaining_count": len(_VENDORS),
+    }
+
 @router.get("/public")
 def get_public_vendors():
     results = []

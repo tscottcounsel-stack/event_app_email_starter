@@ -220,7 +220,7 @@ for module_name in [
     "app.routers.requirement_templates",
     "app.routers.organizers",
     # "app.routers.reviews",  # temporarily disabled while import issues are resolved
-    "app.routers.seed",
+    #"app.routers.seed",
     "app.routers.slots",
     "app.routers.stats",
     "app.routers.templates",
@@ -231,3 +231,8 @@ for module_name in [
     "app.routers.upload",
 ]:
     _try_include(app, module_name, "router")
+
+@app.get("/debug/vendors")
+def debug_vendors():
+    from app.store import _VENDORS
+    return _VENDORS
