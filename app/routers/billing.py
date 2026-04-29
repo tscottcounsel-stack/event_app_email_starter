@@ -389,40 +389,60 @@ def _handle_verification_checkout_completed(session: Any) -> bool:
     metadata = _extract_metadata(session)
     payment_type = str(metadata.get("payment_type") or "").strip().lower()
 
-    if payment_type != "verification_fee":
-        return False
-
-    payment_status = str(_object_value(session, "payment_status", "") or "").strip().lower()
-    if payment_status and payment_status != "paid":
-        print("⚠️ Verification checkout completed without paid status:", payment_status)
-        return True
-
-    email = str(metadata.get("email") or "").strip().lower()
-    role = str(metadata.get("role") or "").strip().lower()
-    session_id = str(_object_value(session, "id", "") or "").strip()
-    payment_intent_id = str(_object_value(session, "payment_intent", "") or "").strip()
-    amount_total = _object_value(session, "amount_total", None)
-
+    if payment_type == "verification_fee":
     try:
-        from app.routers.verifications import mark_verification_paid
+        from app.store import _VERIFICATIONS, save_store
 
-        record = mark_verification_paid(
-            email=email,
-            role=role,
-            stripe_session_id=session_id,
-            stripe_payment_intent_id=payment_intent_id,
-            amount_paid=amount_total,
-        )
+        email = str(metadata.get("email") or "").strip().lower()
+        role = str(metadata.get("role") or "").strip().lower()
 
-        if record:
-            print("✅ Verification payment applied:", email, role)
+        matched = None
+
+        # Try to find existing record
+        for vid, record in _VERIFICATIONS.items():
+            if not isinstance(record, dict):
+                continue
+
+            if (
+                str(record.get("email") or "").strip().lower() == email
+                and str(record.get("role") or "").strip().lower() == role
+            ):
+                matched = record
+                break
+
+        # 🔥 IF NOT FOUND → CREATE IT
+        if not matched:
+            new_id = max([int(k) for k in _VERIFICATIONS.keys()] or [0]) + 1
+
+            matched = {
+                "id": new_id,
+                "email": email,
+                "role": role,
+                "status": "not_submitted",
+                "payment_status": "paid",
+                "fee_paid": True,
+                "paid_at": datetime.now(timezone.utc).isoformat(),
+                "submitted_at": None,
+                "documents": [],
+            }
+
+            _VERIFICATIONS[new_id] = matched
+
+            print("🆕 Verification record created + paid:", email, role)
+
         else:
-            print("⚠️ Verification payment could not be matched:", metadata)
-    except Exception as exc:
-        print("🔥 Verification payment webhook error:", str(exc))
+            matched["payment_status"] = "paid"
+            matched["fee_paid"] = True
+            matched["paid_at"] = datetime.now(timezone.utc).isoformat()
 
-    return True
+            print("✅ Verification payment applied:", email, role)
 
+        save_store()
+
+    except Exception as e:
+        print("🔥 Verification payment error:", str(e))
+
+    return {"received": True}
 
 @router.get("/platform-fee")
 def get_current_platform_fee(user: dict = Depends(get_current_user)):
