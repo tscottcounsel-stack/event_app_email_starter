@@ -598,6 +598,76 @@ def wipe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
         "remaining_count": len(_VENDORS),
     }
 
+
+@router.post("/admin/dedupe-public-vendors")
+def dedupe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
+    if str(user.get("role") or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    seen: Dict[str, str] = {}
+    removed_keys: List[str] = []
+
+    for vendor_key, vendor in list(_VENDORS.items()):
+        key = str(vendor_key or "").strip().lower()
+        if not key:
+            removed_keys.append(str(vendor_key))
+            _VENDORS.pop(vendor_key, None)
+            continue
+
+        if not isinstance(vendor, dict):
+            removed_keys.append(key)
+            _VENDORS.pop(vendor_key, None)
+            _REVIEWS.pop(key, None)
+            continue
+
+        email_identity = _safe_str(vendor.get("email") or key).lower()
+        business_identity = _safe_str(vendor.get("business_name") or vendor.get("businessName")).lower()
+        phone_identity = _safe_str(vendor.get("phone")).lower()
+        identity = email_identity or f"name:{business_identity}|phone:{phone_identity}"
+
+        if identity in seen:
+            keep_key = seen[identity]
+            keep_vendor = _VENDORS.get(keep_key, {})
+
+            current_score = len([v for v in vendor.values() if v not in (None, "", [], {})])
+            keep_score = len([v for v in keep_vendor.values() if v not in (None, "", [], {})]) if isinstance(keep_vendor, dict) else 0
+            current_updated = _safe_str(vendor.get("updated_at"))
+            keep_updated = _safe_str(keep_vendor.get("updated_at")) if isinstance(keep_vendor, dict) else ""
+            should_replace_keep = current_score > keep_score or (current_score == keep_score and current_updated > keep_updated)
+
+            if should_replace_keep:
+                _VENDORS[key] = vendor
+                _VENDORS.pop(keep_key, None)
+                if keep_key in _REVIEWS and key not in _REVIEWS:
+                    _REVIEWS[key] = _REVIEWS.pop(keep_key)
+                else:
+                    _REVIEWS.pop(keep_key, None)
+                seen[identity] = key
+                removed_keys.append(keep_key)
+            else:
+                _VENDORS.pop(vendor_key, None)
+                _REVIEWS.pop(key, None)
+                removed_keys.append(key)
+        else:
+            normalized_key = email_identity or key
+            if normalized_key != key:
+                _VENDORS[normalized_key] = vendor
+                _VENDORS.pop(vendor_key, None)
+                if key in _REVIEWS and normalized_key not in _REVIEWS:
+                    _REVIEWS[normalized_key] = _REVIEWS.pop(key)
+                seen[identity] = normalized_key
+            else:
+                seen[identity] = key
+
+    save_store()
+
+    return {
+        "ok": True,
+        "removed_count": len(removed_keys),
+        "removed_keys": removed_keys,
+        "remaining_count": len(_VENDORS),
+    }
+
 @router.get("/public")
 def get_public_vendors():
     results = []
