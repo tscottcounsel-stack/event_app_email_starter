@@ -226,7 +226,7 @@ def _add_user(
 
 def _seed_dev_users() -> None:
     global _NEXT_ID
-    if _norm(os.getenv("AUTH_DISABLE_DEV_SEED")) in ("1", "true", "yes"):
+    if _norm(os.getenv("AUTH_ENABLE_DEV_SEED")) not in ("1", "true", "yes"):
         return
 
     seed = [
