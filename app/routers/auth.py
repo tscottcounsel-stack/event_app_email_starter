@@ -107,6 +107,134 @@ def send_welcome_email(email: str, role: str, full_name: Optional[str] = None) -
         print(f"Welcome email failed: {exc}")
 
 
+
+def _send_resend_email(*, to_email: str, subject: str, html: str, text: str = "") -> None:
+    """Send a transactional email through Resend without breaking app workflows."""
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    from_email = (os.getenv("FROM_EMAIL") or "VendCore Support <support@vendcore.co>").strip()
+    recipient = _norm(to_email)
+
+    if not api_key:
+        print(f"Email skipped to {recipient or 'unknown'}: RESEND_API_KEY not set")
+        return
+    if not recipient:
+        print("Email skipped: missing recipient")
+        return
+
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_email,
+                "to": [recipient],
+                "subject": subject,
+                "html": html,
+                "text": text or subject,
+            },
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            print(f"Email failed to {recipient}: {response.status_code} {response.text}")
+            return
+        print(f"Email sent to {recipient}: {subject}")
+    except Exception as exc:
+        print(f"Email failed to {recipient}: {exc}")
+
+
+def send_verification_approved_email(email: str, full_name: Optional[str] = None) -> None:
+    display_name = (full_name or "").strip() or "there"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+      <h1 style="color: #111827;">You're verified on VendCore 🎉</h1>
+      <p>Hi {display_name},</p>
+      <p>Your VendCore verification has been approved.</p>
+      <p>Your profile can now show stronger trust signals to organizers, vendors, and event partners.</p>
+      <p style="margin: 28px 0;">
+        <a href="https://vendcore.co/login" style="background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-weight:700;">
+          View your dashboard
+        </a>
+      </p>
+      <p>— VendCore Support</p>
+    </div>
+    """
+    text = (
+        f"Hi {display_name},\n\n"
+        "Your VendCore verification has been approved.\n\n"
+        "Log in to view your dashboard: https://vendcore.co/login\n\n"
+        "— VendCore Support"
+    )
+    _send_resend_email(
+        to_email=email,
+        subject="You're verified on VendCore",
+        html=html,
+        text=text,
+    )
+
+
+def send_vendor_accepted_email(email: str, event_name: str, full_name: Optional[str] = None) -> None:
+    display_name = (full_name or "").strip() or "there"
+    safe_event_name = (event_name or "the event").strip() or "the event"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+      <h1 style="color: #111827;">You're accepted 🎉</h1>
+      <p>Hi {display_name},</p>
+      <p>You have been accepted to <strong>{safe_event_name}</strong>.</p>
+      <p>Log in to VendCore to review next steps, event details, and any remaining requirements.</p>
+      <p style="margin: 28px 0;">
+        <a href="https://vendcore.co/login" style="background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-weight:700;">
+          View event details
+        </a>
+      </p>
+      <p>— VendCore Support</p>
+    </div>
+    """
+    text = (
+        f"Hi {display_name},\n\n"
+        f"You have been accepted to {safe_event_name}.\n\n"
+        "Log in to VendCore to review next steps: https://vendcore.co/login\n\n"
+        "— VendCore Support"
+    )
+    _send_resend_email(
+        to_email=email,
+        subject=f"You're accepted to {safe_event_name}",
+        html=html,
+        text=text,
+    )
+
+
+def send_organizer_new_application_email(email: str, vendor_name: str, event_name: str = "your event") -> None:
+    safe_vendor_name = (vendor_name or "A vendor").strip() or "A vendor"
+    safe_event_name = (event_name or "your event").strip() or "your event"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+      <h1 style="color: #111827;">New vendor application</h1>
+      <p><strong>{safe_vendor_name}</strong> just applied to <strong>{safe_event_name}</strong>.</p>
+      <p>Log in to VendCore to review the application, vendor profile, and verification status.</p>
+      <p style="margin: 28px 0;">
+        <a href="https://vendcore.co/login" style="background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-weight:700;">
+          Review application
+        </a>
+      </p>
+      <p>— VendCore Support</p>
+    </div>
+    """
+    text = (
+        f"{safe_vendor_name} just applied to {safe_event_name}.\n\n"
+        "Log in to VendCore to review the application: https://vendcore.co/login\n\n"
+        "— VendCore Support"
+    )
+    _send_resend_email(
+        to_email=email,
+        subject=f"New vendor application: {safe_vendor_name}",
+        html=html,
+        text=text,
+    )
+
+
 def _norm(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
@@ -1018,4 +1146,14 @@ def review_verification(
     record["reviewed_by"] = str(user.get("email") or "").strip().lower() or None
 
     _save_verification_record(record)
+
+    if status_value == "verified":
+        try:
+            send_verification_approved_email(
+                email=str(record.get("email") or ""),
+                full_name=str(record.get("business_name") or ""),
+            )
+        except Exception as exc:
+            print(f"Verification approved email failed: {exc}")
+
     return {"ok": True, "verification": record}
