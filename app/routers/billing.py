@@ -671,30 +671,27 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
-            metadata = _extract_metadata(data_object)
+           metadata = _extract_metadata(data_object)
 
-            session_id = str(getattr(data_object, "id", None) or "").strip() or None
-            customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
-            subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
-            payment_intent_id = str(getattr(data_object, "payment_intent", None) or "").strip() or None
-            amount_total = getattr(data_object, "amount_total", None)
+# 🔥 ALWAYS fallback to payment intent metadata
+payment_intent_id = None
 
-            if isinstance(data_object, dict):
-                session_id = str(data_object.get("id") or "").strip() or session_id
-                customer_id = str(data_object.get("customer") or "").strip() or customer_id
-                subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
-                payment_intent_id = str(data_object.get("payment_intent") or "").strip() or payment_intent_id
-                amount_total = data_object.get("amount_total", amount_total)
+if isinstance(data_object, dict):
+    payment_intent_id = data_object.get("payment_intent")
+else:
+    payment_intent_id = getattr(data_object, "payment_intent", None)
 
-            if (not metadata or not metadata.get("payment_type")) and payment_intent_id:
-                try:
-                    payment_intent = stripe_sdk.PaymentIntent.retrieve(payment_intent_id)
-                    payment_intent_metadata = _extract_metadata(payment_intent)
-                    if payment_intent_metadata:
-                        metadata = payment_intent_metadata
-                        print("🔥 Using PaymentIntent metadata:", dict(metadata))
-                except Exception as exc:
-                    print("⚠️ Failed to fetch PaymentIntent metadata:", str(exc))
+if payment_intent_id:
+    try:
+        pi = stripe.PaymentIntent.retrieve(payment_intent_id)
+        pi_metadata = pi.metadata or {}
+
+        if pi_metadata:
+            metadata = pi_metadata
+            print("🔥 Using PaymentIntent metadata:", metadata)
+
+    except Exception as e:
+        print("⚠️ PI metadata fetch failed:", str(e))
 
             payment_type = str(metadata.get("payment_type") or "").strip().lower()
             is_verification_payment = (
