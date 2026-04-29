@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -108,20 +109,12 @@ def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "is_active": bool(user.get("is_active", True)),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
-        "plan": user.get("plan", "starter"),
-        "subscription_status": user.get("subscription_status", "inactive"),
-        "stripe_customer_id": user.get("stripe_customer_id"),
-        "stripe_subscription_id": user.get("stripe_subscription_id"),
-        "current_period_end": user.get("current_period_end"),
-        "cancel_at_period_end": bool(user.get("cancel_at_period_end", False)),
     }
 
 
 def _persist_users() -> None:
     payload = {
-        "users": [
-            dict(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))
-        ],
+        "users": [dict(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))],
         "next_id": _NEXT_ID,
     }
     _atomic_write_json(_AUTH_USERS_PATH, payload)
@@ -154,12 +147,6 @@ def _load_users() -> None:
         normalized["username"] = _norm(normalized.get("username") or normalized.get("email"))
         normalized["role"] = _norm(normalized.get("role") or "vendor")
         normalized["is_active"] = bool(normalized.get("is_active", True))
-        normalized.setdefault("plan", "starter")
-        normalized.setdefault("subscription_status", "inactive")
-        normalized.setdefault("stripe_customer_id", None)
-        normalized.setdefault("stripe_subscription_id", None)
-        normalized.setdefault("current_period_end", None)
-        normalized.setdefault("cancel_at_period_end", False)
         _USERS[uid] = normalized
 
     _rebuild_indexes()
@@ -196,7 +183,6 @@ def _add_user(
     persist: bool = True,
 ) -> Dict[str, Any]:
     now = int(time.time())
-
     u = {
         "id": int(user_id),
         "email": _norm(email),
@@ -207,26 +193,17 @@ def _add_user(
         "is_active": True,
         "created_at": now,
         "updated_at": now,
-        "plan": "starter",
-        "subscription_status": "inactive",
-        "stripe_customer_id": None,
-        "stripe_subscription_id": None,
-        "current_period_end": None,
-        "cancel_at_period_end": False,
     }
-
     _USERS[int(user_id)] = u
     _index_user(u)
-
     if persist:
         _persist_users()
-
     return u
 
 
 def _seed_dev_users() -> None:
     global _NEXT_ID
-    if _norm(os.getenv("AUTH_ENABLE_DEV_SEED")) not in ("1", "true", "yes"):
+    if _norm(os.getenv("AUTH_DISABLE_DEV_SEED")) in ("1", "true", "yes"):
         return
 
     seed = [
@@ -269,16 +246,15 @@ _AUD = "event-app-clients"
 _ISS = "event-app"
 
 
-def _create_access_token(*, email: str, role: str, is_active: bool, plan: str) -> str:
+def _create_access_token(*, email: str, role: str, is_active: bool) -> str:
     if jwt is None:
-        return f"devtoken:{email}:{role}:{plan}:{int(time.time())}"
+        return f"devtoken:{email}:{role}:{int(time.time())}"
 
     now = int(time.time())
     payload = {
         "sub": email,
         "email": email,
         "role": role,
-        "plan": plan,
         "is_active": bool(is_active),
         "iat": now,
         "exp": now + _JWT_TTL_SECONDS,
@@ -294,17 +270,11 @@ def _decode_token(token: str) -> Dict[str, Any]:
             parts = token.split(":")
             email = parts[1] if len(parts) > 1 else ""
             role = parts[2] if len(parts) > 2 else "vendor"
-            plan = parts[3] if len(parts) > 3 else "starter"
-            return {"email": email, "role": role, "plan": plan, "is_active": True}
+            return {"email": email, "role": role, "is_active": True}
         raise HTTPException(status_code=401, detail="Invalid token")
 
     try:
-        return jwt.decode(
-            token,
-            _JWT_SECRET,
-            algorithms=[_JWT_ALG],
-            audience=_AUD,
-        )
+        return jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALG], audience=_AUD)
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -331,10 +301,6 @@ def _default_verification(email: str, role: str) -> Dict[str, Any]:
         "documents": [],
         "business_license_url": None,
         "government_id_url": None,
-        "certificate_of_insurance_url": None,
-        "w9_document_url": None,
-        "business_registration_url": None,
-        "sales_tax_permit_url": None,
         "last_session_id": None,
     }
 
@@ -373,10 +339,6 @@ def _get_verification(
         record.setdefault("documents", [])
         record.setdefault("business_license_url", None)
         record.setdefault("government_id_url", None)
-        record.setdefault("certificate_of_insurance_url", None)
-        record.setdefault("w9_document_url", None)
-        record.setdefault("business_registration_url", None)
-        record.setdefault("sales_tax_permit_url", None)
         if user_id is not None and not record.get("user_id"):
             record["user_id"] = user_id
         return record
@@ -446,9 +408,7 @@ def _save_upload(file: UploadFile, prefix: str) -> tuple[str, str, str]:
 
 
 def list_all_users() -> List[Dict[str, Any]]:
-    return [
-        _serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))
-    ]
+    return [_serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))]
 
 
 def admin_create_user(
@@ -528,8 +488,9 @@ def get_current_user(
         )
 
     user_id = _USERS_BY_EMAIL.get(email)
-    user_data = _USERS.get(int(user_id)) if user_id is not None else {}
-    full_name = user_data.get("full_name") if user_data else None
+    full_name = None
+    if user_id is not None:
+        full_name = _USERS.get(int(user_id), {}).get("full_name")
 
     return {
         "id": int(user_id) if user_id is not None else None,
@@ -537,18 +498,7 @@ def get_current_user(
         "role": role,
         "is_active": is_active,
         "full_name": full_name,
-        "plan": user_data.get("plan", payload.get("plan", "starter")),
-        "subscription_status": user_data.get("subscription_status", "inactive"),
-        "stripe_customer_id": user_data.get("stripe_customer_id"),
-        "stripe_subscription_id": user_data.get("stripe_subscription_id"),
-        "current_period_end": user_data.get("current_period_end"),
-        "cancel_at_period_end": user_data.get("cancel_at_period_end", False),
     }
-
-
-@router.get("/me")
-def read_current_user(user: Dict[str, Any] = Depends(get_current_user)):
-    return {"user": user}
 
 
 class LoginRequest(BaseModel):
@@ -599,15 +549,10 @@ def register(payload: RegisterRequest) -> AuthResponse:
         full_name=payload.full_name,
     )
     token = _create_access_token(
-        email=str(user["email"]),
-        role=str(user["role"]),
-        is_active=True,
-        plan=str(user.get("plan", "starter")),
+        email=str(user["email"]), role=str(user["role"]), is_active=True
     )
     return AuthResponse(
-        accessToken=token,
-        role=str(user["role"]),
-        email=str(user["email"]),
+        accessToken=token, role=str(user["role"]), email=str(user["email"])
     )
 
 
@@ -644,15 +589,10 @@ def login(payload: LoginRequest) -> AuthResponse:
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Inactive account")
     token = _create_access_token(
-        email=str(user["email"]),
-        role=str(user["role"]),
-        is_active=True,
-        plan=str(user.get("plan", "starter")),
+        email=str(user["email"]), role=str(user["role"]), is_active=True
     )
     return AuthResponse(
-        accessToken=token,
-        role=str(user["role"]),
-        email=str(user["email"]),
+        accessToken=token, role=str(user["role"]), email=str(user["email"])
     )
 
 
@@ -660,8 +600,7 @@ def login(payload: LoginRequest) -> AuthResponse:
 def refresh(user: Dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
     email = str(user.get("email") or "")
     role = str(user.get("role") or "vendor")
-    plan = str(user.get("plan") or "starter")
-    token = _create_access_token(email=email, role=role, is_active=True, plan=plan)
+    token = _create_access_token(email=email, role=role, is_active=True)
     return AuthResponse(accessToken=token, role=role, email=email)
 
 
@@ -891,6 +830,121 @@ def verification_confirm_payment(
             detail=f"Payment confirmation failed: {str(e)}",
         )
 
-@router.get("/debug/users")
-def debug_users():
-    return _USERS
+
+@router.post("/verification/submit")
+def verification_submit(
+    business_name: str = Form(...),
+    tax_id: str = Form(""),
+    notes: str = Form(""),
+    business_license: UploadFile = File(...),
+    government_id: UploadFile = File(...),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    role = str(user.get("role") or "vendor")
+    email = str(user.get("email") or "")
+    record = _get_verification(email, role, user.get("id"))
+
+    if role not in {"vendor", "organizer"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Verification is only available for vendor or organizer accounts",
+        )
+    if not record.get("fee_paid"):
+        raise HTTPException(
+            status_code=400, detail="Please pay the verification fee before submitting"
+        )
+    if (
+        role == "vendor"
+        and not str(tax_id or "").strip()
+        and not record.get("tax_id_masked")
+    ):
+        raise HTTPException(status_code=400, detail="Tax ID is required")
+    if not str(business_name or "").strip():
+        raise HTTPException(status_code=400, detail="Business name is required")
+
+    _, business_license_url, business_license_name = _save_upload(
+        business_license, "business_license"
+    )
+    _, government_id_url, government_id_name = _save_upload(
+        government_id, "government_id"
+    )
+
+    documents = [
+        {
+            "label": "Business License",
+            "name": business_license.filename or business_license_name,
+            "type": business_license.content_type or "application/octet-stream",
+            "url": business_license_url,
+        },
+        {
+            "label": "Government ID",
+            "name": government_id.filename or government_id_name,
+            "type": government_id.content_type or "application/octet-stream",
+            "url": government_id_url,
+        },
+    ]
+
+    record["user_id"] = user.get("id")
+    record["email"] = email
+    record["role"] = role
+    record["business_name"] = str(business_name or "").strip()
+    record["tax_id_masked"] = _mask_last4(str(tax_id or "")) or record.get(
+        "tax_id_masked", ""
+    )
+    record["notes"] = str(notes or "").strip()
+    record["documents"] = documents
+    record["business_license_url"] = business_license_url
+    record["government_id_url"] = government_id_url
+    record["status"] = "pending"
+    record["submitted_at"] = int(time.time())
+    record["reviewed_at"] = None
+    record["reviewed_by"] = None
+
+    _save_verification_record(record)
+    return {"ok": True, "verification": record}
+
+
+@router.get("/admin/verifications")
+def get_verifications(user: Dict[str, Any] = Depends(get_current_user)):
+    if str(user.get("role") or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    values = []
+    for key, value in list((_VERIFICATIONS or {}).items()):
+        if isinstance(value, dict):
+            if value.get("id") is None:
+                try:
+                    value["id"] = int(key)
+                except Exception:
+                    pass
+            values.append(value)
+    values.sort(key=lambda v: int(v.get("submitted_at") or 0), reverse=True)
+    return {"verifications": values}
+
+
+@router.post("/admin/verify/{verification_id}")
+def review_verification(
+    verification_id: int,
+    payload: dict,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if str(user.get("role") or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    record = _get_verification_by_id(verification_id)
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    status_value = str(payload.get("status") or "").strip().lower()
+    if status_value == "approved":
+        status_value = "verified"
+    if status_value not in {"verified", "rejected", "pending"}:
+        raise HTTPException(status_code=400, detail="Invalid verification status")
+
+    record["status"] = status_value
+    record["is_verified"] = status_value == "verified"
+    record["notes"] = str(payload.get("notes") or "").strip() or None
+    record["reviewed_at"] = int(time.time())
+    record["reviewed_by"] = str(user.get("email") or "").strip().lower() or None
+
+    _save_verification_record(record)
+    return {"ok": True, "verification": record}
