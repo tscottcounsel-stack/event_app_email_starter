@@ -785,7 +785,12 @@ async def stripe_webhook(request: Request):
                 payment_intent_id = str(data_object.get("payment_intent") or "").strip() or payment_intent_id
                 amount_total = data_object.get("amount_total", amount_total)
 
-            if payment_type == "verification_fee":
+            is_verification_payment = (
+    payment_type == "verification_fee"
+    or str(metadata.get("verification") or "").strip().lower() == "true"
+)
+
+if is_verification_payment:
                 email = str(metadata.get("email") or "").strip().lower()
                 role = str(metadata.get("role") or "").strip().lower()
                 verification_id = metadata.get("verification_id")
