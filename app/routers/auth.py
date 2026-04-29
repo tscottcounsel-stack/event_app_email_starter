@@ -607,6 +607,78 @@ def _get_verification_by_id(verification_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _find_verification_by_session_id(session_id: str) -> Optional[Dict[str, Any]]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    for key, value in list((_VERIFICATIONS or {}).items()):
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("last_session_id") or "").strip() == sid:
+            if value.get("id") is None:
+                try:
+                    value["id"] = int(key)
+                except Exception:
+                    pass
+            return value
+    return None
+
+
+def _stripe_metadata_value(metadata: Any, key: str, default: str = "") -> str:
+    try:
+        if metadata is None:
+            return default
+        if isinstance(metadata, dict):
+            return str(metadata.get(key) or default).strip()
+        return str(getattr(metadata, key, default) or default).strip()
+    except Exception:
+        return default
+
+
+def _mark_verification_paid_from_stripe_session(session: Any, source: str = "stripe") -> Dict[str, Any]:
+    session_id = str(getattr(session, "id", "") or "").strip()
+    if not session_id and isinstance(session, dict):
+        session_id = str(session.get("id") or "").strip()
+    if not session_id:
+        raise ValueError("Stripe session id missing")
+
+    metadata = getattr(session, "metadata", None)
+    if metadata is None and isinstance(session, dict):
+        metadata = session.get("metadata") or {}
+
+    metadata_email = _norm(_stripe_metadata_value(metadata, "email"))
+    metadata_role = _norm(_stripe_metadata_value(metadata, "role")) or "vendor"
+
+    payment_status = str(getattr(session, "payment_status", "") or (session.get("payment_status") if isinstance(session, dict) else "") or "").strip().lower()
+    status_value = str(getattr(session, "status", "") or (session.get("status") if isinstance(session, dict) else "") or "").strip().lower()
+
+    if payment_status != "paid" and status_value != "complete":
+        raise ValueError(f"Payment not complete yet: payment_status={payment_status or 'unknown'}, status={status_value or 'unknown'}")
+
+    record = _find_verification_by_session_id(session_id)
+    if record is None:
+        if not metadata_email or metadata_role not in {"vendor", "organizer"}:
+            raise ValueError("Stripe metadata missing verification email or role")
+        record = _get_verification(metadata_email, metadata_role)
+
+    email = _norm(record.get("email") or metadata_email)
+    role = _norm(record.get("role") or metadata_role or "vendor")
+    if role not in {"vendor", "organizer"}:
+        role = metadata_role if metadata_role in {"vendor", "organizer"} else "vendor"
+
+    record["email"] = email
+    record["role"] = role
+    record["fee_paid"] = True
+    record["payment_status"] = "paid"
+    record["paid_at"] = int(time.time())
+    record["last_session_id"] = session_id
+    record["payment_confirmed_by"] = source
+    if not record.get("status") or str(record.get("status") or "").lower() in {"not_started", "unpaid"}:
+        record["status"] = "not_started"
+    _save_verification_record(record)
+    return record
+
+
 def _mask_last4(value: str) -> str:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     if len(digits) < 4:
@@ -899,6 +971,47 @@ def verification_public(email: str):
     return {"verification": None}
 
 
+@router.post("/stripe/webhook")
+@router.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+
+    try:
+        import stripe
+        secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if secret:
+            stripe.api_key = secret
+        webhook_secret = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+        if webhook_secret:
+            event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
+        else:
+            event = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        print(f"Stripe webhook signature/payload failed: {exc}")
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook payload")
+
+    event_type = str(event.get("type") or "").strip()
+    session = (event.get("data") or {}).get("object") or {}
+
+    try:
+        if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
+            record = _mark_verification_paid_from_stripe_session(session, source="stripe_webhook")
+            print("Stripe webhook confirmed verification payment", {"email": record.get("email"), "role": record.get("role"), "session_id": record.get("last_session_id")})
+        elif event_type in {"checkout.session.async_payment_failed", "checkout.session.expired"}:
+            session_id = str(session.get("id") or "").strip() if isinstance(session, dict) else str(getattr(session, "id", "") or "").strip()
+            record = _find_verification_by_session_id(session_id)
+            if record:
+                record["payment_status"] = "failed" if event_type.endswith("failed") else "expired"
+                record["payment_failed_at"] = int(time.time())
+                _save_verification_record(record)
+    except Exception as exc:
+        print(f"Stripe webhook processing failed: {exc}")
+        raise HTTPException(status_code=400, detail=f"Stripe webhook processing failed: {exc}")
+
+    return {"ok": True, "received": True, "type": event_type}
+
+
 @router.post("/verification/create-checkout")
 def verification_create_checkout(
     payload: VerificationCheckoutRequest,
@@ -984,8 +1097,10 @@ def verification_confirm_payment(
     payload: VerificationConfirmRequest,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    role = str(user.get("role") or "vendor")
-    email = str(user.get("email") or "")
+    # Browser-return fallback. Stripe webhook is the production source of truth,
+    # but this keeps the UX responsive immediately after checkout redirect.
+    role = str(user.get("role") or "vendor").strip().lower()
+    email = str(user.get("email") or "").strip().lower()
     record = _get_verification(email, role, user.get("id"))
 
     if record.get("fee_paid"):
@@ -1004,64 +1119,24 @@ def verification_confirm_payment(
 
         stripe.api_key = secret
         session = stripe.checkout.Session.retrieve(session_id)
-
         if not session:
             raise HTTPException(status_code=404, detail="Stripe session not found")
 
-        payment_status = str(getattr(session, "payment_status", "") or "").strip().lower()
-        status_value = str(getattr(session, "status", "") or "").strip().lower()
-
-        metadata_obj = getattr(session, "metadata", None)
-        metadata_email = ""
-
-        try:
-            if metadata_obj is None:
-                metadata_email = ""
-            elif isinstance(metadata_obj, dict):
-                metadata_email = _norm(metadata_obj.get("email"))
-            else:
-                metadata_email = _norm(getattr(metadata_obj, "email", ""))
-        except Exception:
-            metadata_email = ""
-
-        if payment_status != "paid" and status_value != "complete":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Payment not complete yet: payment_status={payment_status or 'unknown'}, status={status_value or 'unknown'}",
-            )
-
-        if metadata_email and metadata_email != _norm(email):
-            print(
-                "WARNING verification_confirm_payment: metadata email mismatch",
-                {
-                    "session_id": session_id,
-                    "metadata_email": metadata_email,
-                    "user_email": _norm(email),
-                },
-            )
-
-        record["fee_paid"] = True
-        record["payment_status"] = "paid"
-        record["paid_at"] = int(time.time())
-        record["last_session_id"] = session_id
-        _save_verification_record(record)
+        confirmed = _mark_verification_paid_from_stripe_session(session, source="authenticated_confirm")
+        confirmed_email = _norm(confirmed.get("email"))
+        if confirmed_email and confirmed_email != _norm(email):
+            print("WARNING verification_confirm_payment: confirmed email mismatch", {"session_id": session_id, "confirmed_email": confirmed_email, "user_email": _norm(email)})
 
         return {
             "ok": True,
-            "verification": record,
-            "stripe_status": {
-                "payment_status": payment_status,
-                "status": status_value,
-            },
+            "verification": confirmed,
+            "stripe_status": {"payment_status": "paid", "status": "complete"},
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payment confirmation failed: {str(e)}",
-        )
+        raise HTTPException(status_code=400, detail=f"Payment confirmation failed: {str(e)}")
 
 
 @router.post("/verification/submit")
