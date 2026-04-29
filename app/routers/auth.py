@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 
@@ -931,8 +931,9 @@ def verification_create_checkout(
     record["email"] = email
     record["role"] = role
 
-    success_default = f"http://localhost:5173/{role}/verify?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_default = f"http://localhost:5173/{role}/verify?payment=cancel"
+    frontend_url = (os.getenv("FRONTEND_URL") or "https://vendcore.co").strip().rstrip("/")
+    success_default = f"{frontend_url}/{role}/verify?payment=success&session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_default = f"{frontend_url}/{role}/verify?payment=cancel"
     success_url = (payload.success_url or success_default).strip()
     cancel_url = (payload.cancel_url or cancel_default).strip()
 
@@ -945,6 +946,7 @@ def verification_create_checkout(
         stripe.api_key = secret
         session = stripe.checkout.Session.create(
             mode="payment",
+            customer_email=email,
             success_url=success_url,
             cancel_url=cancel_url,
             line_items=[
@@ -1063,67 +1065,131 @@ def verification_confirm_payment(
 
 
 @router.post("/verification/submit")
-def verification_submit(
-    business_name: str = Form(...),
-    tax_id: str = Form(""),
-    notes: str = Form(""),
-    business_license: UploadFile = File(...),
-    government_id: UploadFile = File(...),
+async def verification_submit(
+    request: Request,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    role = str(user.get("role") or "vendor")
-    email = str(user.get("email") or "")
-    record = _get_verification(email, role, user.get("id"))
+    """Submit verification documents.
+
+    Supports both legacy multipart form uploads and the newer frontend flow that
+    uploads documents to Cloudinary first and posts JSON document metadata.
+    The authenticated user always owns the record; email/role from the client
+    are ignored for ownership.
+    """
+    role = str(user.get("role") or "vendor").strip().lower()
+    email = str(user.get("email") or "").strip().lower()
 
     if role not in {"vendor", "organizer"}:
         raise HTTPException(
             status_code=403,
             detail="Verification is only available for vendor or organizer accounts",
         )
-    if not record.get("fee_paid"):
+
+    record = _get_verification(email, role, user.get("id"))
+
+    if not record.get("fee_paid") and str(record.get("payment_status") or "").lower() != "paid":
         raise HTTPException(
             status_code=400, detail="Please pay the verification fee before submitting"
         )
-    if (
-        role == "vendor"
-        and not str(tax_id or "").strip()
-        and not record.get("tax_id_masked")
-    ):
-        raise HTTPException(status_code=400, detail="Tax ID is required")
-    if not str(business_name or "").strip():
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    business_name = ""
+    tax_id = ""
+    notes = ""
+    documents: List[Dict[str, Any]] = []
+    business_license_url = record.get("business_license_url")
+    government_id_url = record.get("government_id_url")
+
+    if "application/json" in content_type:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid verification payload")
+
+        business_name = str(payload.get("business_name") or payload.get("businessName") or "").strip()
+        tax_id = str(payload.get("tax_id") or payload.get("taxId") or "").strip()
+        notes = str(payload.get("notes") or "").strip()
+
+        raw_documents = payload.get("documents") or []
+        if isinstance(raw_documents, list):
+            for item in raw_documents:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                label = str(item.get("label") or item.get("name") or "Document").strip()
+                doc_type = str(item.get("type") or "").strip()
+                doc = {
+                    "label": label,
+                    "name": str(item.get("name") or label).strip(),
+                    "type": doc_type or str(item.get("mime_type") or "application/octet-stream"),
+                    "url": url,
+                }
+                if item.get("size") is not None:
+                    doc["size"] = item.get("size")
+                if item.get("expiration_date"):
+                    doc["expiration_date"] = item.get("expiration_date")
+                documents.append(doc)
+
+        for doc in documents:
+            dtype = str(doc.get("type") or "").lower()
+            label = str(doc.get("label") or "").lower()
+            if not business_license_url and ("business_license" in dtype or "license" in label or "registration" in label):
+                business_license_url = doc.get("url")
+            if not government_id_url and ("government_id" in dtype or "government" in label or "id" == dtype):
+                government_id_url = doc.get("url")
+
+    else:
+        form = await request.form()
+        business_name = str(form.get("business_name") or form.get("businessName") or "").strip()
+        tax_id = str(form.get("tax_id") or form.get("taxId") or "").strip()
+        notes = str(form.get("notes") or "").strip()
+
+        business_license = form.get("business_license") or form.get("businessLicense")
+        government_id = form.get("government_id") or form.get("governmentId")
+
+        if business_license is not None and hasattr(business_license, "filename"):
+            _, business_license_url, business_license_name = _save_upload(business_license, "business_license")
+            documents.append(
+                {
+                    "label": "Business License",
+                    "name": getattr(business_license, "filename", None) or business_license_name,
+                    "type": getattr(business_license, "content_type", None) or "application/octet-stream",
+                    "url": business_license_url,
+                }
+            )
+
+        if government_id is not None and hasattr(government_id, "filename"):
+            _, government_id_url, government_id_name = _save_upload(government_id, "government_id")
+            documents.append(
+                {
+                    "label": "Government ID",
+                    "name": getattr(government_id, "filename", None) or government_id_name,
+                    "type": getattr(government_id, "content_type", None) or "application/octet-stream",
+                    "url": government_id_url,
+                }
+            )
+
+    if not business_name:
         raise HTTPException(status_code=400, detail="Business name is required")
 
-    _, business_license_url, business_license_name = _save_upload(
-        business_license, "business_license"
-    )
-    _, government_id_url, government_id_name = _save_upload(
-        government_id, "government_id"
-    )
+    if role == "vendor" and not tax_id and not record.get("tax_id_masked"):
+        raise HTTPException(status_code=400, detail="Tax ID is required")
 
-    documents = [
-        {
-            "label": "Business License",
-            "name": business_license.filename or business_license_name,
-            "type": business_license.content_type or "application/octet-stream",
-            "url": business_license_url,
-        },
-        {
-            "label": "Government ID",
-            "name": government_id.filename or government_id_name,
-            "type": government_id.content_type or "application/octet-stream",
-            "url": government_id_url,
-        },
-    ]
+    if not documents and not (business_license_url and government_id_url):
+        raise HTTPException(status_code=400, detail="Verification documents are required")
 
     record["user_id"] = user.get("id")
     record["email"] = email
     record["role"] = role
-    record["business_name"] = str(business_name or "").strip()
-    record["tax_id_masked"] = _mask_last4(str(tax_id or "")) or record.get(
-        "tax_id_masked", ""
-    )
-    record["notes"] = str(notes or "").strip()
-    record["documents"] = documents
+    record["business_name"] = business_name
+
+    masked = _mask_last4(tax_id)
+    if masked:
+        record["tax_id_masked"] = masked
+
+    record["notes"] = notes
+    record["documents"] = documents or record.get("documents", []) or []
     record["business_license_url"] = business_license_url
     record["government_id_url"] = government_id_url
     record["status"] = "pending"
