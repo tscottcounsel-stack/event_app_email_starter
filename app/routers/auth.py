@@ -66,15 +66,47 @@ def send_welcome_email(email: str, role: str, full_name: Optional[str] = None) -
 
     subject = "Welcome to VendCore"
     html = f"""
-    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
-      <h1 style="color: #111827;">Welcome to VendCore</h1>
-      <p>Hi {display_name},</p>
-      <p>Your {role_label} account is ready.</p>
-      <p>VendCore helps organizers and vendors build trust through profiles, verification, applications, and event tools.</p>
-      <p><strong>Next step:</strong> log in, complete your profile, and start your verification when you are ready.</p>
-      <p style="margin-top: 28px;">— VendCore Support</p>
-    </div>
-    """
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
+    
+    <h2 style="color:#111;">Welcome to VendCore 🚀</h2>
+
+    <p>Hey {display_name},</p>
+
+    <p>Your {role_label} account is officially live.</p>
+
+    <p>
+        VendCore connects you with real opportunities — but the real advantage
+        comes after you complete your profile.
+    </p>
+
+    <h3 style="margin-top:20px;">Next Step: Get Verified</h3>
+
+    <p>
+        Verified users get priority placement, increased trust, and access to
+        better event opportunities.
+    </p>
+
+    <a href="https://vendcore.co/{role}/verify"
+       style="
+            display:inline-block;
+            padding:12px 20px;
+            background-color:#111;
+            color:#fff;
+            text-decoration:none;
+            border-radius:6px;
+            margin-top:15px;
+       ">
+        Complete Verification
+    </a>
+
+    <hr style="margin:30px 0;" />
+
+    <p style="font-size:12px; color:#777;">
+        VendCore • Built on verified connections
+    </p>
+
+</div>
+"""
 
     text = (
         f"Hi {display_name},\n\n"
