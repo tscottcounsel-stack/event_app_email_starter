@@ -464,33 +464,29 @@ def _review_summary(organizer_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 @router.post("/organizer/profile")
-def save_organizer_profile(payload: Dict[str, Any]):
-    profile = _profile_from_payload(payload or {})
-    email = _norm_email(profile.get("email"))
+def save_organizer_profile(
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    email = user.get("email")  # 🔥 FORCE AUTH USER
 
     if not email:
-        raise HTTPException(status_code=400, detail="Email required")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not profile.get("organizationName"):
-        raise HTTPException(status_code=400, detail="Organization name required")
+    profile = _profile_from_payload(payload or {})
 
-    if not profile.get("contactName"):
-        raise HTTPException(status_code=400, detail="Primary contact name required")
+    # 🔥 OVERRIDE ANY EMAIL COMING FROM FRONTEND
+    profile["email"] = email
 
     profiles = _load_profiles()
     existing = profiles.get(email) or {}
 
-    # Preserve verification fields unless incoming payload explicitly updates them.
-    if "verified" not in (payload or {}):
-        profile["verified"] = bool(existing.get("verified", False))
-    if not profile.get("verification_status"):
-        profile["verification_status"] = _safe_str(existing.get("verification_status") or existing.get("verificationStatus"))
-    if not profile.get("documents") and isinstance(existing.get("documents"), list):
-        profile["documents"] = existing.get("documents")
+    # preserve verification fields
+    if "verified" not in payload:
+        profile["verified"] = existing.get("verified", False)
 
-    for premium_key in ("plan", "subscription_plan", "subscription_status", "featured", "promoted"):
-        if premium_key not in (payload or {}) and premium_key in existing:
-            profile[premium_key] = existing.get(premium_key)
+    if not profile.get("verification_status"):
+        profile["verification_status"] = existing.get("verification_status")
 
     profile["verification_status"] = compute_verification_status(profile)
     profile["verified"] = profile["verification_status"] == "verified"
@@ -504,12 +500,10 @@ def save_organizer_profile(payload: Dict[str, Any]):
         "organizer": {
             "email": email,
             "profile": profile,
-            "verified": bool(profile.get("verified", False)),
-            "verification_status": compute_verification_status(profile),
+            "verified": profile["verified"],
+            "verification_status": profile["verification_status"],
         },
     }
-
-
 @router.get("/organizer/profile/{email}")
 def get_organizer_profile(email: str):
     email = _norm_email(email)
