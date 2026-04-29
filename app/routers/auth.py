@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import requests
 import shutil
 import tempfile
 import time
@@ -44,6 +45,66 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 AUTH_DATA_DIR = Path(os.getenv("DATA_DIR", "/data/vendorconnect"))
 AUTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 _AUTH_USERS_PATH = AUTH_DATA_DIR / "_auth_users.json"
+
+
+def send_welcome_email(email: str, role: str, full_name: Optional[str] = None) -> None:
+    """Send a welcome email through Resend. Never let email failure break signup."""
+    api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    from_email = (os.getenv("FROM_EMAIL") or "VendCore Support <support@vendcore.co>").strip()
+
+    if not api_key:
+        print("Welcome email skipped: RESEND_API_KEY not set")
+        return
+
+    recipient = _norm(email)
+    if not recipient:
+        print("Welcome email skipped: missing recipient")
+        return
+
+    role_label = (role or "user").strip().title()
+    display_name = (full_name or "").strip() or "there"
+
+    subject = "Welcome to VendCore"
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+      <h1 style="color: #111827;">Welcome to VendCore</h1>
+      <p>Hi {display_name},</p>
+      <p>Your {role_label} account is ready.</p>
+      <p>VendCore helps organizers and vendors build trust through profiles, verification, applications, and event tools.</p>
+      <p><strong>Next step:</strong> log in, complete your profile, and start your verification when you are ready.</p>
+      <p style="margin-top: 28px;">— VendCore Support</p>
+    </div>
+    """
+
+    text = (
+        f"Hi {display_name},\n\n"
+        f"Welcome to VendCore. Your {role_label} account is ready.\n\n"
+        "Next step: log in, complete your profile, and start your verification when you are ready.\n\n"
+        "— VendCore Support"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_email,
+                "to": [recipient],
+                "subject": subject,
+                "html": html,
+                "text": text,
+            },
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            print(f"Welcome email failed: {response.status_code} {response.text}")
+            return
+        print(f"Welcome email sent to {recipient}")
+    except Exception as exc:
+        print(f"Welcome email failed: {exc}")
 
 
 def _norm(s: Optional[str]) -> str:
@@ -203,7 +264,7 @@ def _add_user(
 
 def _seed_dev_users() -> None:
     global _NEXT_ID
-    if _norm(os.getenv("AUTH_DISABLE_DEV_SEED")) in ("1", "true", "yes"):
+    if _norm(os.getenv("AUTH_ENABLE_DEV_SEED")) not in ("1", "true", "yes"):
         return
 
     seed = [
@@ -548,6 +609,16 @@ def register(payload: RegisterRequest) -> AuthResponse:
         username=payload.username,
         full_name=payload.full_name,
     )
+
+    try:
+        send_welcome_email(
+            email=str(user.get("email") or ""),
+            role=str(user.get("role") or payload.role or "user"),
+            full_name=user.get("full_name") or payload.full_name,
+        )
+    except Exception as exc:
+        print(f"Welcome email failed: {exc}")
+
     token = _create_access_token(
         email=str(user["email"]), role=str(user["role"]), is_active=True
     )
