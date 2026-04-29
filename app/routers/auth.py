@@ -1012,6 +1012,14 @@ def refresh(user: Dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
     token = _create_access_token(email=email, role=role, is_active=True)
     return AuthResponse(accessToken=token, role=role, email=email)
 
+@router.get("/me")
+def get_me(user: Dict[str, Any] = Depends(get_current_user)):
+    return {
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "role": user.get("role"),
+        "full_name": user.get("full_name"),
+    }
 
 @router.get("/verification/me")
 def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
