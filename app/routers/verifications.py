@@ -1,18 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 
-from app.routers.auth import get_current_user
 from app.store import _VERIFICATIONS, save_store
-
-try:
-    import stripe
-except Exception:
-    stripe = None
 
 router = APIRouter(tags=["Verifications"])
 
@@ -20,136 +13,6 @@ VALID_ROLES = {"vendor", "organizer"}
 VALID_REVIEW_STATUSES = {"verified", "rejected"}
 EXPIRING_SOON_DAYS = 30
 DEFAULT_VERIFICATION_DURATION_DAYS = 365
-
-
-DEFAULT_VERIFICATION_FEES = {
-    "vendor": 25,
-    "organizer": 49,
-}
-
-
-def _require_stripe() -> Any:
-    if stripe is None:
-        raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
-
-    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-    if not secret:
-        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY is not set")
-
-    stripe.api_key = secret
-    return stripe
-
-
-def _verification_fee_amount(role: str) -> int:
-    normalized_role = _safe_lower(role)
-    env_name = "STRIPE_VERIFICATION_FEE_ORGANIZER" if normalized_role == "organizer" else "STRIPE_VERIFICATION_FEE_VENDOR"
-    raw = (os.getenv(env_name) or "").strip()
-    try:
-        value = float(raw) if raw else float(DEFAULT_VERIFICATION_FEES.get(normalized_role, 25))
-    except Exception:
-        value = float(DEFAULT_VERIFICATION_FEES.get(normalized_role, 25))
-    return int(round(value))
-
-
-def _checkout_session_value(session: Any, key: str, default: Any = None) -> Any:
-    if isinstance(session, dict):
-        return session.get(key, default)
-    return getattr(session, key, default)
-
-
-def _checkout_metadata(session: Any) -> Dict[str, Any]:
-    metadata = _checkout_session_value(session, "metadata", {})
-    if isinstance(metadata, dict):
-        return metadata
-    try:
-        return dict(metadata or {})
-    except Exception:
-        return {}
-
-
-def _find_record_entry(email: str, role: str) -> tuple[Any, Optional[Dict[str, Any]]]:
-    normalized_email = _safe_lower(email)
-    normalized_role = _safe_lower(role)
-
-    for verification_id, record in _VERIFICATIONS.items():
-        if isinstance(record, dict) and _record_matches_identity(record, normalized_email, normalized_role):
-            return verification_id, record
-
-    return None, None
-
-
-def _get_or_create_payment_record(email: str, role: str, *, fee_amount: int) -> Dict[str, Any]:
-    normalized_email = _safe_lower(email)
-    normalized_role = _safe_lower(role)
-
-    if not normalized_email:
-        raise HTTPException(status_code=400, detail="Email required")
-    if normalized_role not in VALID_ROLES:
-        raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
-
-    verification_id, record = _find_record_entry(normalized_email, normalized_role)
-    if isinstance(record, dict):
-        record.setdefault("id", int(verification_id) if str(verification_id).isdigit() else verification_id)
-        record.setdefault("email", normalized_email)
-        record.setdefault("role", normalized_role)
-        record.setdefault("status", "not_started")
-        record.setdefault("payment_status", "unpaid")
-        record.setdefault("fee_paid", False)
-        record["fee_amount"] = record.get("fee_amount") or fee_amount
-        return record
-
-    verification_id = _next_verification_id()
-    record = {
-        "id": verification_id,
-        "email": normalized_email,
-        "role": normalized_role,
-        "status": "not_started",
-        "submitted_at": None,
-        "reviewed_at": None,
-        "reviewed_by": None,
-        "notes": "",
-        "documents": [],
-        "payment_status": "unpaid",
-        "fee_paid": False,
-        "fee_amount": fee_amount,
-        "expiration_date": None,
-        "created_at": _now_iso(),
-    }
-    _VERIFICATIONS[verification_id] = record
-    return record
-
-
-def mark_verification_paid(
-    *,
-    email: str,
-    role: str,
-    stripe_session_id: str = "",
-    stripe_payment_intent_id: str = "",
-    amount_paid: Any = None,
-) -> Optional[Dict[str, Any]]:
-    normalized_email = _safe_lower(email)
-    normalized_role = _safe_lower(role)
-    if not normalized_email or normalized_role not in VALID_ROLES:
-        return None
-
-    fee_amount = _verification_fee_amount(normalized_role)
-    record = _get_or_create_payment_record(normalized_email, normalized_role, fee_amount=fee_amount)
-
-    record["payment_status"] = "paid"
-    record["fee_paid"] = True
-    record["paid_at"] = _now_iso()
-    if stripe_session_id:
-        record["stripe_checkout_session_id"] = stripe_session_id
-    if stripe_payment_intent_id:
-        record["stripe_payment_intent_id"] = stripe_payment_intent_id
-    if amount_paid not in (None, ""):
-        try:
-            record["amount_paid"] = round(float(amount_paid) / 100, 2)
-        except Exception:
-            record["amount_paid"] = amount_paid
-
-    save_store()
-    return record
 
 
 def _now() -> datetime:
@@ -251,42 +114,16 @@ def _find_latest_record(email: str, role: str = "") -> Optional[Dict[str, Any]]:
     return matches[0]
 
 
-def _earliest_expiration_from_documents(record: Optional[Dict[str, Any]]) -> Optional[datetime]:
-    if not isinstance(record, dict):
-        return None
-
-    documents = record.get("documents") or record.get("verification_documents") or record.get("verificationDocuments") or []
-    if isinstance(documents, dict):
-        documents = list(documents.values())
-
-    expirations: List[datetime] = []
-    if isinstance(documents, list):
-        for doc in documents:
-            if not isinstance(doc, dict):
-                continue
-            exp = _parse_datetime(
-                doc.get("expiration_date")
-                or doc.get("expirationDate")
-                or doc.get("expires_at")
-                or doc.get("expiresAt")
-            )
-            if exp:
-                expirations.append(exp)
-
-    return min(expirations) if expirations else None
-
-
 def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
-    """Internal verification truth used by admin/review flows."""
     if not record:
         return "unverified"
 
-    status = _safe_lower(record.get("status")) or "not_started"
+    status = _safe_lower(record.get("status")) or "pending"
 
     if status != "verified":
         return status
 
-    expiration = _earliest_expiration_from_documents(record) or _parse_datetime(record.get("expiration_date"))
+    expiration = _parse_datetime(record.get("expiration_date"))
     if not expiration:
         return "verified"
 
@@ -300,63 +137,17 @@ def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
     return "verified"
 
 
-def _review_status(record: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(record, dict):
-        return "none"
-
-    explicit = _safe_lower(record.get("review_status") or record.get("reviewStatus"))
-    if explicit:
-        return explicit
-
-    raw = _safe_lower(record.get("status"))
-    if raw == "verified":
-        return "approved"
-    if raw == "pending":
-        return "renewal_pending"
-    if raw == "rejected":
-        return "rejected"
-    return raw or "none"
-
-
-def _public_verification_display(record: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    """Reputation-safe public display. Keep raw lifecycle details internal/admin-only."""
-    lifecycle_status = _compute_lifecycle_status(record)
-    review_status = _review_status(record)
-
-    if lifecycle_status in {"verified", "expiring_soon"}:
-        return {
-            "public_verification_status": "verified",
-            "public_verification_label": "Verified",
-        }
-
-    if review_status in {"pending", "renewal_pending"}:
-        return {
-            "public_verification_status": "renewal_pending",
-            "public_verification_label": "Renewal pending",
-        }
-
-    return {
-        "public_verification_status": "not_verified",
-        "public_verification_label": "Not verified",
-    }
-
-
 def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    lifecycle_status = _compute_lifecycle_status(record)
-    review_status = _review_status(record)
-    public_display = _public_verification_display(record)
     return {
         **record,
-        "verification_status": lifecycle_status,
-        "review_status": review_status,
-        **public_display,
+        "verification_status": _compute_lifecycle_status(record),
     }
 
 
 @router.post("/verification/submit")
-def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_current_user)):
-    email = _safe_lower(payload.get("email") or user.get("email"))
-    role = _safe_lower(payload.get("role") or user.get("role"))
+def submit_verification(payload: Dict[str, Any]):
+    email = _safe_lower(payload.get("email"))
+    role = _safe_lower(payload.get("role"))
 
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
@@ -387,11 +178,7 @@ def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_curren
                 "notes": _safe_str(payload.get("notes") or record.get("notes")),
                 "documents": documents,
                 "payment_status": _safe_str(payload.get("payment_status") or record.get("payment_status") or "unpaid"),
-                "fee_paid": bool(record.get("fee_paid") or _safe_lower(payload.get("payment_status")) == "paid"),
-                "paid_at": record.get("paid_at"),
-                "stripe_checkout_session_id": record.get("stripe_checkout_session_id"),
-                "stripe_payment_intent_id": record.get("stripe_payment_intent_id"),
-                "fee_amount": payload.get("fee_amount", record.get("fee_amount", _verification_fee_amount(role))),
+                "fee_amount": payload.get("fee_amount", record.get("fee_amount", 0)),
                 "expiration_date": payload.get("expiration_date") or record.get("expiration_date"),
             }
         )
@@ -409,9 +196,7 @@ def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_curren
             "notes": _safe_str(payload.get("notes")),
             "documents": documents,
             "payment_status": _safe_str(payload.get("payment_status") or "unpaid"),
-            "fee_paid": _safe_lower(payload.get("payment_status")) == "paid",
-            "paid_at": _now_iso() if _safe_lower(payload.get("payment_status")) == "paid" else None,
-            "fee_amount": payload.get("fee_amount", _verification_fee_amount(role)),
+            "fee_amount": payload.get("fee_amount", 0),
             "expiration_date": payload.get("expiration_date"),
         }
         _VERIFICATIONS[verification_id] = saved
@@ -422,151 +207,6 @@ def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_curren
         "ok": True,
         "verification": _public_record(saved),
     }
-
-
-
-
-@router.get("/verification/me")
-def get_my_verification(user: dict = Depends(get_current_user)):
-    email = _safe_lower(user.get("email"))
-    role = _safe_lower(user.get("role"))
-
-    if role not in VALID_ROLES:
-        raise HTTPException(status_code=403, detail="Verification is only available for vendor and organizer accounts")
-
-    record = _find_latest_record(email, role)
-    if not record:
-        record = _get_or_create_payment_record(email, role, fee_amount=_verification_fee_amount(role))
-        save_store()
-
-    return {
-        "ok": True,
-        "email": email,
-        "role": role,
-        "verification_status": _compute_lifecycle_status(record),
-        "verification": _public_record(record),
-    }
-
-
-@router.post("/verification/create-checkout")
-def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(get_current_user)):
-    stripe_sdk = _require_stripe()
-
-    email = _safe_lower(user.get("email"))
-    role = _safe_lower(user.get("role"))
-
-    if role not in VALID_ROLES:
-        raise HTTPException(status_code=403, detail="Verification checkout is only available for vendor and organizer accounts")
-
-    success_url = _safe_str(payload.get("success_url"))
-    cancel_url = _safe_str(payload.get("cancel_url"))
-    if not success_url or not cancel_url:
-        raise HTTPException(status_code=400, detail="Missing success_url or cancel_url")
-
-    fee_amount = _verification_fee_amount(role)
-    record = _get_or_create_payment_record(email, role, fee_amount=fee_amount)
-
-    if record.get("fee_paid") is True or _safe_lower(record.get("payment_status")) == "paid":
-        return {"ok": True, "already_paid": True, "verification": _public_record(record)}
-
-    try:
-        session = stripe_sdk.checkout.Session.create(
-            mode="payment",
-            payment_method_types=["card"],
-            success_url=success_url,
-            cancel_url=cancel_url,
-            client_reference_id=str(user.get("id") or ""),
-            customer_email=email or None,
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "usd",
-                        "product_data": {
-                            "name": f"VendCore {role.title()} Verification Fee",
-                        },
-                        "unit_amount": int(fee_amount * 100),
-                    },
-                    "quantity": 1,
-                }
-            ],
-            metadata={
-                "payment_type": "verification_fee",
-                "verification": "true",
-                "verification_id": str(record.get("id") or ""),
-                "user_id": str(user.get("id") or ""),
-                "email": email,
-                "role": role,
-            },
-            payment_intent_data={
-                "metadata": {
-                    "payment_type": "verification_fee",
-                    "verification": "true",
-                    "verification_id": str(record.get("id") or ""),
-                    "user_id": str(user.get("id") or ""),
-                    "email": email,
-                    "role": role,
-                }
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe verification checkout failed: {exc}")
-
-    record["stripe_checkout_session_id"] = str(_checkout_session_value(session, "id", "") or "")
-    record["checkout_created_at"] = _now_iso()
-    save_store()
-
-    return {
-        "ok": True,
-        "url": _checkout_session_value(session, "url", None),
-        "session_id": _checkout_session_value(session, "id", None),
-        "verification": _public_record(record),
-    }
-
-
-@router.post("/verification/confirm-payment")
-def confirm_verification_payment(payload: Dict[str, Any], user: dict = Depends(get_current_user)):
-    """Manual fallback for checkout redirects. Webhooks are still the source of truth."""
-    stripe_sdk = _require_stripe()
-
-    session_id = _safe_str(payload.get("session_id"))
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id required")
-
-    try:
-        session = stripe_sdk.checkout.Session.retrieve(session_id)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to retrieve Stripe session: {exc}")
-
-    metadata = _checkout_metadata(session)
-    payment_type = _safe_lower(metadata.get("payment_type"))
-    payment_status = _safe_lower(_checkout_session_value(session, "payment_status", ""))
-
-    is_verification_payment = (
-        payment_type == "verification_fee"
-        or _safe_lower(metadata.get("verification")) == "true"
-    )
-
-    if not is_verification_payment:
-        raise HTTPException(status_code=400, detail="Stripe session is not a verification payment")
-
-    email = _safe_lower(metadata.get("email") or user.get("email"))
-    role = _safe_lower(metadata.get("role") or user.get("role"))
-
-    if email != _safe_lower(user.get("email")) or role != _safe_lower(user.get("role")):
-        raise HTTPException(status_code=403, detail="Stripe session does not belong to this account")
-
-    if payment_status != "paid":
-        raise HTTPException(status_code=400, detail="Payment is not marked paid yet")
-
-    record = mark_verification_paid(
-        email=email,
-        role=role,
-        stripe_session_id=session_id,
-        stripe_payment_intent_id=str(_checkout_session_value(session, "payment_intent", "") or ""),
-        amount_paid=_checkout_session_value(session, "amount_total", None),
-    )
-
-    return {"ok": True, "verification": _public_record(record)}
 
 
 @router.get("/verification/status")
