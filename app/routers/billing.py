@@ -786,77 +786,28 @@ async def stripe_webhook(request: Request):
                 amount_total = data_object.get("amount_total", amount_total)
 
             is_verification_payment = (
-    payment_type == "verification_fee"
-    or str(metadata.get("verification") or "").strip().lower() == "true"
-)
+                payment_type == "verification_fee"
+                or str(metadata.get("verification") or "").strip().lower() == "true"
+            )
 
-if is_verification_payment:
+            if is_verification_payment:
                 email = str(metadata.get("email") or "").strip().lower()
                 role = str(metadata.get("role") or "").strip().lower()
                 verification_id = metadata.get("verification_id")
 
-                from app.store import _VERIFICATIONS, save_store
+                record = mark_verification_paid(
+                    email=email,
+                    role=role,
+                    verification_id=verification_id,
+                    stripe_session_id=session_id,
+                    stripe_payment_intent_id=payment_intent_id,
+                    amount_paid=amount_total,
+                )
 
-                matched = None
-
-                for vid, existing_record in _VERIFICATIONS.items():
-                    if not isinstance(existing_record, dict):
-                        continue
-
-                    if (
-                        str(existing_record.get("email") or "").strip().lower() == email
-                        and str(existing_record.get("role") or "").strip().lower() == role
-                    ):
-                        matched = existing_record
-                        break
-
-                if not matched:
-                    valid_ids = []
-                    for key in _VERIFICATIONS.keys():
-                        try:
-                            valid_ids.append(int(key))
-                        except Exception:
-                            continue
-
-                    new_id = max(valid_ids or [0]) + 1
-
-                    matched = {
-                        "id": new_id,
-                        "email": email,
-                        "role": role,
-                        "status": "not_submitted",
-                        "payment_status": "paid",
-                        "fee_paid": True,
-                        "paid_at": datetime.now(timezone.utc).isoformat(),
-                        "submitted_at": None,
-                        "reviewed_at": None,
-                        "reviewed_by": None,
-                        "notes": "",
-                        "documents": [],
-                        "fee_amount": 49 if role == "organizer" else 25,
-                        "expiration_date": None,
-                    }
-
-                    _VERIFICATIONS[new_id] = matched
-                    print("🆕 CREATED verification record:", email, role)
-
+                if record:
+                    print("✅ Verification payment applied:", email, role)
                 else:
-                    matched["payment_status"] = "paid"
-                    matched["fee_paid"] = True
-                    matched["paid_at"] = datetime.now(timezone.utc).isoformat()
-                    print("✅ UPDATED verification record:", email, role)
-
-                if session_id:
-                    matched["stripe_session_id"] = session_id
-                if payment_intent_id:
-                    matched["stripe_payment_intent_id"] = payment_intent_id
-                if amount_total not in (None, ""):
-                    try:
-                        matched["amount_paid"] = round(float(amount_total) / 100, 2)
-                    except Exception:
-                        matched["amount_paid"] = amount_total
-
-                save_store()
+                    print("⚠️ Verification payment could not be matched:", metadata)
 
                 return {"received": True, "event_type": event_type}
 
