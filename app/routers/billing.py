@@ -378,6 +378,52 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     return True
 
 
+def _object_value(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _handle_verification_checkout_completed(session: Any) -> bool:
+    """Return True when this checkout session was handled as a verification payment."""
+    metadata = _extract_metadata(session)
+    payment_type = str(metadata.get("payment_type") or "").strip().lower()
+
+    if payment_type != "verification_fee":
+        return False
+
+    payment_status = str(_object_value(session, "payment_status", "") or "").strip().lower()
+    if payment_status and payment_status != "paid":
+        print("⚠️ Verification checkout completed without paid status:", payment_status)
+        return True
+
+    email = str(metadata.get("email") or "").strip().lower()
+    role = str(metadata.get("role") or "").strip().lower()
+    session_id = str(_object_value(session, "id", "") or "").strip()
+    payment_intent_id = str(_object_value(session, "payment_intent", "") or "").strip()
+    amount_total = _object_value(session, "amount_total", None)
+
+    try:
+        from app.routers.verifications import mark_verification_paid
+
+        record = mark_verification_paid(
+            email=email,
+            role=role,
+            stripe_session_id=session_id,
+            stripe_payment_intent_id=payment_intent_id,
+            amount_paid=amount_total,
+        )
+
+        if record:
+            print("✅ Verification payment applied:", email, role)
+        else:
+            print("⚠️ Verification payment could not be matched:", metadata)
+    except Exception as exc:
+        print("🔥 Verification payment webhook error:", str(exc))
+
+    return True
+
+
 @router.get("/platform-fee")
 def get_current_platform_fee(user: dict = Depends(get_current_user)):
     lookup = _lookup_user(user_id=user.get("id"), email=user.get("email")) or user
@@ -671,6 +717,9 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
+            if _handle_verification_checkout_completed(data_object):
+                return {"received": True, "event_type": event_type, "handled_as": "verification_fee"}
+
             user = _find_user_from_checkout_session(data_object)
 
             customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
