@@ -4,6 +4,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from pathlib import Path
+
 from app.routers.auth import (
     admin_create_user,
     admin_delete_user,
@@ -408,4 +410,39 @@ async def wipe_vendors(user: dict = Depends(require_admin)):
         "ok": True,
         "vendors_cleared": deleted_count,
         "vendors_remaining": len(store._VENDORS),
+    }
+
+@router.post("/clear-organizer-profiles")
+def clear_organizer_profiles(user: dict = Depends(require_admin)):
+    """Remove saved organizer profile JSON files so new accounts do not inherit stale test data.
+
+    This router already has prefix="/admin", so the live URL is:
+    POST /admin/clear-organizer-profiles
+    """
+    candidate_paths = [
+        Path("/data/organizer_profiles.json"),
+        Path("/data/vendorconnect/organizer_profiles.json"),
+    ]
+
+    deleted_paths: list[str] = []
+    missing_paths: list[str] = []
+
+    for path in candidate_paths:
+        try:
+            if path.exists():
+                path.unlink()
+                deleted_paths.append(str(path))
+            else:
+                missing_paths.append(str(path))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete {path}: {exc}",
+            )
+
+    return {
+        "ok": True,
+        "message": "Organizer profile store cleared.",
+        "deleted_paths": deleted_paths,
+        "missing_paths": missing_paths,
     }
