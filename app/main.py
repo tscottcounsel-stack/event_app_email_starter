@@ -183,6 +183,7 @@ from app.models.event import Event  # noqa: F401
 from app.models.application import Application  # noqa: F401
 from app.models.booth import Booth  # noqa: F401
 from app.models.diagram import Diagram  # noqa: F401
+from app.models.profile import Profile  # noqa: F401
 
 _init_db_if_available()
 _sync_events_store_from_db_if_available()

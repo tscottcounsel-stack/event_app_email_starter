@@ -18,6 +18,9 @@ from app.store import (
     upsert_vendor,
 )
 from app.routers.verifications import _find_latest_record
+from app.models.profile import Profile
+from app.db import get_db
+from sqlalchemy.orm import Session
 
 from app.store import find_latest_verification_by_email
 
@@ -61,7 +64,7 @@ def force_verify_vendor_help():
 
 
 @router.post("/admin/force-verify-vendor")
-def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_current_user)):
+def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     _require_admin(user)
 
     email = _safe_str(payload.get("email")).lower()
@@ -86,6 +89,8 @@ def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_curren
         "last_verified_at": vendor.get("last_verified_at") or now,
         "updated_at": now,
     })
+
+    _upsert_profile_row(db, email=email, role="vendor", data=updated)
 
     return {
         "ok": True,
@@ -196,6 +201,137 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     return mapped
+
+
+
+def _profile_row_to_vendor(row: Profile) -> Dict[str, Any]:
+    data = dict(row.data or {})
+    email = _safe_str(row.email).lower()
+
+    vendor = {
+        **data,
+        "email": email,
+        "vendor_id": data.get("vendor_id") or email,
+        "business_name": data.get("business_name") or data.get("businessName") or row.business_name or "",
+        "businessName": data.get("businessName") or row.business_name or "",
+        "contact_name": data.get("contact_name") or data.get("contactName") or row.display_name or "",
+        "city": data.get("city") or row.city or "",
+        "state": data.get("state") or row.state or "",
+        "categories": data.get("categories") or row.categories or [],
+        "vendor_categories": data.get("vendor_categories") or data.get("categories") or row.categories or [],
+        "verified": bool(row.verified),
+        "verification_status": row.verification_status or data.get("verification_status") or "",
+        "verificationStatus": row.verification_status or data.get("verificationStatus") or "",
+        "public_verification_status": row.public_verification_status or data.get("public_verification_status") or "",
+        "public_verification_label": row.public_verification_label or data.get("public_verification_label") or "",
+        "review_status": row.review_status or data.get("review_status") or "",
+        "reviewStatus": row.review_status or data.get("reviewStatus") or "",
+        "visibility_tier": row.visibility_tier or data.get("visibility_tier") or "",
+        "visibilityTier": row.visibility_tier or data.get("visibilityTier") or "",
+        "plan": data.get("plan") or row.subscription_plan or "",
+        "subscription_plan": row.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan") or "",
+        "subscription_status": row.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus") or "",
+        "featured": bool(row.featured),
+        "promoted": bool(row.promoted),
+    }
+    return vendor
+
+
+def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, Any]) -> Profile:
+    email = _safe_str(email or data.get("email")).lower()
+    role = _safe_str(role).lower()
+    if not email or role not in {"organizer", "vendor"}:
+        raise ValueError("Valid email and role are required")
+
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    if row is None:
+        row = Profile(email=email, role=role)
+        db.add(row)
+
+    name = _safe_str(
+        data.get("business_name")
+        or data.get("businessName")
+        or data.get("organizationName")
+        or data.get("name")
+    )
+    display_name = _safe_str(data.get("contact_name") or data.get("contactName") or name)
+    categories = data.get("categories") or data.get("vendor_categories") or []
+    if not isinstance(categories, list):
+        categories = [str(categories)] if categories else []
+
+    verified = bool(data.get("verified") is True or data.get("is_verified") is True)
+    verification_status = _safe_str(
+        data.get("verification_status")
+        or data.get("verificationStatus")
+        or data.get("public_verification_status")
+    ).lower()
+    review_status = _safe_str(data.get("review_status") or data.get("reviewStatus")).lower()
+
+    if verification_status in {"approved", "complete"}:
+        verification_status = "verified"
+    if review_status in {"approved", "verified"}:
+        verification_status = "verified"
+        verified = True
+    if verified and not verification_status:
+        verification_status = "verified"
+
+    public_status = _safe_str(data.get("public_verification_status")).lower()
+    public_label = _safe_str(data.get("public_verification_label"))
+
+    if verification_status in {"verified", "expiring_soon"}:
+        public_status = "verified"
+        public_label = public_label or "Verified"
+        verified = True
+    elif not public_status:
+        public_status = "renewal_pending" if verification_status in {"pending", "renewal_pending"} else "not_verified"
+        public_label = "Renewal pending" if public_status == "renewal_pending" else "Not verified"
+
+    row.business_name = name
+    row.display_name = display_name
+    row.city = _safe_str(data.get("city"))
+    row.state = _safe_str(data.get("state"))
+    row.categories = categories
+    row.data = {**dict(data or {}), "email": email, "vendor_id": data.get("vendor_id") or email}
+    row.verified = verified
+    row.verification_status = verification_status or None
+    row.public_verification_status = public_status or None
+    row.public_verification_label = public_label or None
+    row.review_status = review_status or None
+    row.visibility_tier = _safe_str(data.get("visibility_tier") or data.get("visibilityTier")) or None
+    row.subscription_plan = _safe_str(data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan")) or None
+    row.subscription_status = _safe_str(data.get("subscription_status") or data.get("subscriptionStatus")) or None
+    row.featured = bool(data.get("featured"))
+    row.promoted = bool(data.get("promoted"))
+
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _load_vendor_from_db(db: Session, email: str) -> Dict[str, Any] | None:
+    email = _safe_str(email).lower()
+    if not email:
+        return None
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == "vendor")
+        .one_or_none()
+    )
+    return _profile_row_to_vendor(row) if row else None
+
+
+def _load_all_vendors_from_db(db: Session) -> Dict[str, Dict[str, Any]]:
+    rows = db.query(Profile).filter(Profile.role == "vendor").all()
+    return {
+        _safe_str(row.email).lower(): _profile_row_to_vendor(row)
+        for row in rows
+        if _safe_str(row.email)
+    }
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -486,9 +622,9 @@ class VendorReviewCreate(BaseModel):
 
 
 @router.get("/me")
-def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
+def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     key = _user_vendor_key(user)
-    vendor = _VENDORS.get(key) or {}
+    vendor = _load_vendor_from_db(db, key) or _VENDORS.get(key) or {}
     if not vendor:
         vendor = upsert_vendor(key, {
             "vendor_id": key,
@@ -496,6 +632,8 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
         })
+    if vendor:
+        _upsert_profile_row(db, email=key, role="vendor", data=vendor)
     return _vendor_public_payload(key, vendor)
 
 
@@ -503,6 +641,7 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
 def save_my_vendor_profile(
     payload: VendorProfileUpsert,
     user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     key = _user_vendor_key(user)
     existing = _VENDORS.get(key, {})
@@ -524,21 +663,22 @@ def save_my_vendor_profile(
     updated["updated_at"] = _now_iso()
 
     updated = upsert_vendor(key, updated)
+    _upsert_profile_row(db, email=key, role="vendor", data=updated)
     _sync_vendor_category_to_applications(key, updated)
 
     return _vendor_public_payload(key, updated)
 
 @router.get("/by-email/{email}")
-def get_vendor_profile_by_email(email: str):
+def get_vendor_profile_by_email(email: str, db: Session = Depends(get_db)):
     vendor_key = _normalize_vendor_key(email)
-    vendor = _get_vendor_or_404(vendor_key)
+    vendor = _load_vendor_from_db(db, vendor_key) or _get_vendor_or_404(vendor_key)
     return _vendor_public_payload(vendor_key, vendor)
 
 
 @router.get("/public/{vendor_id}")
-def get_vendor_profile(vendor_id: str):
+def get_vendor_profile(vendor_id: str, db: Session = Depends(get_db)):
     vendor_key = _normalize_vendor_key(vendor_id)
-    vendor = _get_vendor_or_404(vendor_key)
+    vendor = _load_vendor_from_db(db, vendor_key) or _get_vendor_or_404(vendor_key)
     return _vendor_public_payload(vendor_key, vendor)
 
 
@@ -728,10 +868,12 @@ def dedupe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
     }
 
 @router.get("/public")
-def get_public_vendors():
+def get_public_vendors(db: Session = Depends(get_db)):
     results = []
+    vendors = dict(_VENDORS)
+    vendors.update(_load_all_vendors_from_db(db))
 
-    for vendor_key, vendor in _VENDORS.items():
+    for vendor_key, vendor in vendors.items():
         if not isinstance(vendor, dict):
             continue
 
@@ -752,6 +894,28 @@ def get_public_vendors():
     )
     return results
 
+
+
+@router.post("/admin/migrate-profiles-to-db")
+def migrate_vendor_profiles_to_db(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    migrated = 0
+
+    for vendor_key, vendor in _VENDORS.items():
+        if not isinstance(vendor, dict):
+            continue
+        email = _safe_str(vendor.get("email") or vendor_key).lower()
+        if not email:
+            continue
+        vendor["email"] = email
+        vendor["vendor_id"] = vendor.get("vendor_id") or email
+        _upsert_profile_row(db, email=email, role="vendor", data=vendor)
+        migrated += 1
+
+    return {"ok": True, "migrated": migrated}
 
 @router.post("/debug/seed-vendors")
 def seed_vendors():

@@ -11,6 +11,7 @@ from app.routers.auth import get_current_user
 
 from app.db import get_db
 from app.models.event import Event
+from app.models.profile import Profile
 
 try:
     from app.routers.auth import _USERS, _USERS_BY_EMAIL
@@ -438,6 +439,136 @@ def _save_profiles(profiles: Dict[str, Dict[str, Any]]) -> None:
     )
 
 
+
+def _profile_row_to_organizer_profile(row: Profile) -> Dict[str, Any]:
+    data = dict(row.data or {})
+    email = _norm_email(row.email)
+
+    profile = {
+        **data,
+        "email": email,
+        "organizationName": data.get("organizationName") or row.business_name or row.display_name or "",
+        "businessName": data.get("businessName") or row.business_name or "",
+        "contactName": data.get("contactName") or row.display_name or "",
+        "city": data.get("city") or row.city or "",
+        "state": data.get("state") or row.state or "",
+        "categories": data.get("categories") or row.categories or [],
+        "verified": bool(row.verified),
+        "is_verified": bool(row.verified),
+        "verification_status": row.verification_status or data.get("verification_status") or "",
+        "verificationStatus": row.verification_status or data.get("verificationStatus") or "",
+        "public_verification_status": row.public_verification_status or data.get("public_verification_status") or "",
+        "public_verification_label": row.public_verification_label or data.get("public_verification_label") or "",
+        "review_status": row.review_status or data.get("review_status") or "",
+        "reviewStatus": row.review_status or data.get("reviewStatus") or "",
+        "visibility_tier": row.visibility_tier or data.get("visibility_tier") or "",
+        "visibilityTier": row.visibility_tier or data.get("visibilityTier") or "",
+        "plan": data.get("plan") or row.subscription_plan or "",
+        "subscription_plan": row.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan") or "",
+        "subscription_status": row.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus") or "",
+        "featured": bool(row.featured),
+        "promoted": bool(row.promoted),
+    }
+    return profile
+
+
+def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, Any]) -> Profile:
+    email = _norm_email(email or data.get("email"))
+    role = _safe_str(role).lower()
+    if not email or role not in {"organizer", "vendor"}:
+        raise ValueError("Valid email and role are required")
+
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    if row is None:
+        row = Profile(email=email, role=role)
+        db.add(row)
+
+    name = _safe_str(
+        data.get("organizationName")
+        or data.get("businessName")
+        or data.get("business_name")
+        or data.get("name")
+    )
+    display_name = _safe_str(data.get("contactName") or data.get("contact_name") or name)
+    categories = data.get("categories") or data.get("event_categories") or []
+    if not isinstance(categories, list):
+        categories = [str(categories)] if categories else []
+
+    verified = bool(data.get("verified") is True or data.get("is_verified") is True)
+    verification_status = _safe_str(
+        data.get("verification_status")
+        or data.get("verificationStatus")
+        or data.get("public_verification_status")
+    ).lower()
+    review_status = _safe_str(data.get("review_status") or data.get("reviewStatus")).lower()
+
+    if verification_status in {"approved", "complete"}:
+        verification_status = "verified"
+    if review_status in {"approved", "verified"}:
+        verification_status = "verified"
+        verified = True
+    if verified and not verification_status:
+        verification_status = "verified"
+
+    public_status = _safe_str(data.get("public_verification_status")).lower()
+    public_label = _safe_str(data.get("public_verification_label"))
+
+    if verification_status in {"verified", "expiring_soon"}:
+        public_status = "verified"
+        public_label = public_label or "Verified"
+        verified = True
+    elif not public_status:
+        public_status = "renewal_pending" if verification_status in {"pending", "renewal_pending"} else "not_verified"
+        public_label = "Renewal pending" if public_status == "renewal_pending" else "Not verified"
+
+    row.business_name = name
+    row.display_name = display_name
+    row.city = _safe_str(data.get("city"))
+    row.state = _safe_str(data.get("state"))
+    row.categories = categories
+    row.data = {**dict(data or {}), "email": email}
+    row.verified = verified
+    row.verification_status = verification_status or None
+    row.public_verification_status = public_status or None
+    row.public_verification_label = public_label or None
+    row.review_status = review_status or None
+    row.visibility_tier = _safe_str(data.get("visibility_tier") or data.get("visibilityTier")) or None
+    row.subscription_plan = _safe_str(data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan")) or None
+    row.subscription_status = _safe_str(data.get("subscription_status") or data.get("subscriptionStatus")) or None
+    row.featured = bool(data.get("featured"))
+    row.promoted = bool(data.get("promoted"))
+
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _load_organizer_profile_from_db(db: Session, email: str) -> Dict[str, Any] | None:
+    email = _norm_email(email)
+    if not email:
+        return None
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == "organizer")
+        .one_or_none()
+    )
+    return _profile_row_to_organizer_profile(row) if row else None
+
+
+def _load_all_organizer_profiles_from_db(db: Session) -> Dict[str, Dict[str, Any]]:
+    rows = db.query(Profile).filter(Profile.role == "organizer").all()
+    return {
+        _norm_email(row.email): _profile_row_to_organizer_profile(row)
+        for row in rows
+        if _norm_email(row.email)
+    }
+
+
 def _load_reviews() -> Dict[str, List[Dict[str, Any]]]:
     try:
         if not REVIEWS_STORE_PATH.exists():
@@ -593,7 +724,7 @@ def force_verify_organizer_help():
 
 
 @router.post("/organizers/admin/force-verify-organizer")
-def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
+def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     _require_admin(user)
 
     email = _norm_email(payload.get("email"))
@@ -624,6 +755,7 @@ def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depen
 
     profiles[email] = existing
     _save_profiles(profiles)
+    _upsert_profile_row(db, email=email, role="organizer", data=existing)
 
     return {
         "ok": True,
@@ -640,12 +772,12 @@ def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depen
 
 
 @router.get("/organizer/profile")
-def get_my_organizer_profile(user: Dict[str, Any] = Depends(get_current_user)):
+def get_my_organizer_profile(user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     email = _norm_email(user.get("email"))
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    profile = _load_profiles().get(email)
+    profile = _load_organizer_profile_from_db(db, email) or _load_profiles().get(email)
     if not isinstance(profile, dict) or not profile:
         return {"ok": True, "profile": None}
 
@@ -671,6 +803,7 @@ def get_my_organizer_profile(user: Dict[str, Any] = Depends(get_current_user)):
 def save_organizer_profile(
     payload: Dict[str, Any],
     user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     email = _norm_email(user.get("email"))  # force authenticated user identity
 
@@ -721,6 +854,7 @@ def save_organizer_profile(
 
     profiles[email] = profile
     _save_profiles(profiles)
+    _upsert_profile_row(db, email=email, role="organizer", data=profile)
 
     return {
         "ok": True,
@@ -734,9 +868,9 @@ def save_organizer_profile(
     }
 
 @router.get("/organizer/profile/{email}")
-def get_organizer_profile(email: str):
+def get_organizer_profile(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
-    profile = _load_profiles().get(email)
+    profile = _load_organizer_profile_from_db(db, email) or _load_profiles().get(email)
 
     if not isinstance(profile, dict) or not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -822,7 +956,7 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     email = _norm_email(email)
 
     profiles = _load_profiles()
-    profile = _apply_subscription_overlay(profiles.get(email) or {}, email)
+    profile = _apply_subscription_overlay(_load_organizer_profile_from_db(db, email) or profiles.get(email) or {}, email)
 
     events = (
         db.query(Event)
@@ -907,6 +1041,7 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
 
 def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
     profiles = _load_profiles()
+    profiles.update(_load_all_organizer_profiles_from_db(db))
     reviews_store = _load_reviews()
     rows_by_email: Dict[str, Dict[str, Any]] = {}
 
@@ -1030,6 +1165,28 @@ def get_public_organizers(db: Session = Depends(get_db)):
 @router.get("/organizers/{email}")
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
     return get_public_organizer(email, db)
+
+
+@router.post("/organizers/admin/migrate-profiles-to-db")
+def migrate_organizer_profiles_to_db(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
+    profiles = _load_profiles()
+    migrated = 0
+
+    for raw_email, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        email = _norm_email(raw_email or profile.get("email"))
+        if not email:
+            continue
+        profile["email"] = email
+        _upsert_profile_row(db, email=email, role="organizer", data=profile)
+        migrated += 1
+
+    return {"ok": True, "migrated": migrated}
 
 @router.post("/debug/seed-organizers")
 def seed_organizers():
