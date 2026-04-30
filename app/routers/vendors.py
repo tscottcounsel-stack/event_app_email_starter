@@ -46,6 +46,54 @@ def set_vendor_premium(payload: dict):
     }
 
 
+def _require_admin(user: Dict[str, Any]) -> None:
+    role = _safe_str(user.get("role")).lower()
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@router.get("/admin/force-verify-vendor")
+def force_verify_vendor_help():
+    return {
+        "ok": False,
+        "detail": "Use POST with JSON body {\"email\": \"vendor@example.com\"}. This admin route updates the stored vendor verification display fields.",
+    }
+
+
+@router.post("/admin/force-verify-vendor")
+def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_current_user)):
+    _require_admin(user)
+
+    email = _safe_str(payload.get("email")).lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Vendor email required")
+
+    vendor = _VENDORS.get(email)
+    if not isinstance(vendor, dict) or not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    now = _now_iso()
+    updated = upsert_vendor(email, {
+        **vendor,
+        "email": email,
+        "vendor_id": vendor.get("vendor_id") or email,
+        "verified": True,
+        "verification_status": "verified",
+        "public_verification_status": "verified",
+        "public_verification_label": "Verified",
+        "review_status": "approved",
+        "verified_at": vendor.get("verified_at") or now,
+        "last_verified_at": vendor.get("last_verified_at") or now,
+        "updated_at": now,
+    })
+
+    return {
+        "ok": True,
+        "email": email,
+        "vendor": _vendor_public_payload(email, updated),
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -170,7 +218,12 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
     """Return the public verification lifecycle status for a vendor profile."""
     source = verification if isinstance(verification, dict) and verification else profile
     now = datetime.utcnow()
-    explicit_status = _safe_str(source.get("status") or source.get("verification_status") or source.get("verificationStatus")).lower()
+    explicit_status = _safe_str(
+        source.get("verification_status")
+        or source.get("verificationStatus")
+        or source.get("public_verification_status")
+        or source.get("status")
+    ).lower()
 
     if explicit_status in {"pending", "rejected"}:
         return explicit_status
@@ -689,6 +742,14 @@ def get_public_vendors():
         if _safe_str(payload.get("business_name")):
             results.append(payload)
 
+    tier_rank = {"premium": 0, "verified": 1, "standard": 2}
+    results.sort(
+        key=lambda item: (
+            tier_rank.get(_safe_str(item.get("visibility_tier") or item.get("visibilityTier")).lower(), 2),
+            not bool(item.get("verified")),
+            _safe_str(item.get("business_name") or item.get("email")).lower(),
+        )
+    )
     return results
 
 
