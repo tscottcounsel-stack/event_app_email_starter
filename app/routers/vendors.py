@@ -870,8 +870,9 @@ def dedupe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
 @router.get("/public")
 def get_public_vendors(db: Session = Depends(get_db)):
     results = []
-    vendors = dict(_VENDORS)
-    vendors.update(_load_all_vendors_from_db(db))
+    vendors = _load_all_vendors_from_db(db)
+    if not vendors:
+        vendors = dict(_VENDORS)
 
     for vendor_key, vendor in vendors.items():
         if not isinstance(vendor, dict):

@@ -753,8 +753,7 @@ def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depen
         "updatedAt": now,
     })
 
-    profiles[email] = existing
-    _save_profiles(profiles)
+    # DB is the primary source of truth. JSON is migration fallback only.
     _upsert_profile_row(db, email=email, role="organizer", data=existing)
 
     return {
@@ -814,7 +813,7 @@ def save_organizer_profile(
     profile["email"] = email
 
     profiles = _load_profiles()
-    existing = profiles.get(email) if isinstance(profiles.get(email), dict) else {}
+    existing = _load_organizer_profile_from_db(db, email) or (profiles.get(email) if isinstance(profiles.get(email), dict) else {})
 
     # Profile edits must never reset a verified organizer back to pending.
     # The verification/review system owns these lifecycle fields.
@@ -852,8 +851,7 @@ def save_organizer_profile(
     profile["verified"] = public_display["public_verification_status"] == "verified"
     profile["updatedAt"] = profile.get("updatedAt") or _utc_now_iso()
 
-    profiles[email] = profile
-    _save_profiles(profiles)
+    # DB is the primary source of truth. JSON is migration fallback only.
     _upsert_profile_row(db, email=email, role="organizer", data=profile)
 
     return {
@@ -1040,8 +1038,9 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     }
 
 def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
-    profiles = _load_profiles()
-    profiles.update(_load_all_organizer_profiles_from_db(db))
+    profiles = _load_all_organizer_profiles_from_db(db)
+    if not profiles:
+        profiles = _load_profiles()
     reviews_store = _load_reviews()
     rows_by_email: Dict[str, Dict[str, Any]] = {}
 
