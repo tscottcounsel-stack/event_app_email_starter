@@ -679,8 +679,9 @@ def get_public_vendors():
 
         payload = _vendor_public_payload(vendor_key, vendor)
 
-        # Only show vendors with at least basic profile data
-        if payload.get("business_name") or payload.get("email"):
+        # Only show vendors with enough real public profile data.
+        # Auto-created signup shells stay hidden until the vendor saves a profile.
+        if _safe_str(payload.get("business_name")):
             results.append(payload)
 
     return results

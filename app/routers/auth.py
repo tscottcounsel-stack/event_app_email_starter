@@ -47,6 +47,96 @@ AUTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 _AUTH_USERS_PATH = AUTH_DATA_DIR / "_auth_users.json"
 
 
+PUBLIC_DATA_DIR = Path("/data") if Path("/data").exists() else AUTH_DATA_DIR
+ORGANIZER_PROFILE_STORE_PATH = PUBLIC_DATA_DIR / "organizer_profiles.json"
+
+
+def _read_public_json(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_public_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(path, payload)
+
+
+def _ensure_public_profile_for_user(user: Dict[str, Any]) -> None:
+    """Create a lightweight public profile shell on signup.
+
+    This prevents new organizers/vendors from disappearing from setup flows while
+    still keeping public directories clean: incomplete profiles remain hidden until
+    they have enough display information.
+    """
+    email = _norm(user.get("email"))
+    role = _norm(user.get("role"))
+    now = int(time.time())
+
+    if not email or role not in {"vendor", "organizer"}:
+        return
+
+    if role == "organizer":
+        profiles = _read_public_json(ORGANIZER_PROFILE_STORE_PATH)
+        existing = profiles.get(email)
+        if isinstance(existing, dict) and existing:
+            return
+
+        profiles[email] = {
+            "email": email,
+            "organizationName": "",
+            "organizationType": "",
+            "contactName": user.get("full_name") or "",
+            "location": "",
+            "city": "",
+            "state": "",
+            "logoDataUrl": "",
+            "imageUrls": [],
+            "verified": False,
+            "verification_status": "pending",
+            "profileComplete": False,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        _write_public_json(ORGANIZER_PROFILE_STORE_PATH, profiles)
+        return
+
+    if role == "vendor":
+        try:
+            from app.store import _VENDORS, save_store as _save_main_store  # type: ignore
+        except Exception:
+            return
+
+        existing = _VENDORS.get(email)
+        if isinstance(existing, dict) and existing:
+            return
+
+        _VENDORS[email] = {
+            "vendor_id": email,
+            "email": email,
+            "business_name": "",
+            "contact_name": user.get("full_name") or "",
+            "city": "",
+            "state": "",
+            "categories": [],
+            "vendor_categories": [],
+            "description": "",
+            "logo_url": "",
+            "banner_url": "",
+            "image_urls": [],
+            "verified": False,
+            "verification_status": "unverified",
+            "profile_complete": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        _save_main_store()
+
+
 def send_welcome_email(email: str, role: str, full_name: Optional[str] = None) -> None:
     """Send a welcome email through Resend. Never let email failure break signup."""
     api_key = (os.getenv("RESEND_API_KEY") or "").strip()
@@ -846,6 +936,10 @@ def admin_create_user(
     )
     _NEXT_ID = max(_NEXT_ID + 1, _next_user_id())
     _persist_users()
+    try:
+        _ensure_public_profile_for_user(user)
+    except Exception as exc:
+        print(f"Public profile auto-create skipped: {exc}")
     return _serialize_user(user)
 
 
