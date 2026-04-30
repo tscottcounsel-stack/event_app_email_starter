@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException
 
 from app.store import _VERIFICATIONS, save_store
 
+from datetime import timedelta
+
 router = APIRouter(tags=["Verifications"])
 
 VALID_ROLES = {"vendor", "organizer"}
@@ -254,11 +256,17 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
     record["reviewed_by"] = _safe_str(payload.get("reviewed_by") or payload.get("reviewedBy"))
     record["notes"] = _safe_str(payload.get("notes"))
 
-    if status == "verified":
-        provided_expiration = _safe_str(payload.get("expiration_date") or payload.get("expirationDate"))
-        record["expiration_date"] = provided_expiration or (
-            _now() + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
-        ).isoformat()
+   if status == "verified":
+    now = _now()
+    expires_at = now + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
+
+    provided_expiration = _safe_str(
+        payload.get("expiration_date") or payload.get("expirationDate")
+    )
+
+    record["last_verified_at"] = now.isoformat()
+    record["expires_at"] = provided_expiration or expires_at.isoformat()
+    record["expiration_date"] = record["expires_at"]
 
     save_store()
 
