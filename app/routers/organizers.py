@@ -197,17 +197,34 @@ def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[
     if not matches:
         return {}
 
-    matches.sort(
-        key=lambda item: _safe_str(
+    def _verification_rank(item: Dict[str, Any]) -> tuple[int, str]:
+        status = _safe_str(
+            item.get("verification_status")
+            or item.get("verificationStatus")
+            or item.get("public_verification_status")
+            or item.get("status")
+        ).lower()
+        review = _safe_str(item.get("review_status") or item.get("reviewStatus")).lower()
+        verified_flag = bool(item.get("verified") is True or item.get("is_verified") is True)
+        if verified_flag or status in {"verified", "approved", "complete", "expiring_soon"} or review in {"approved", "verified"}:
+            bucket = 4
+        elif status in {"pending", "renewal_pending"} or review in {"pending", "renewal_pending"}:
+            bucket = 2
+        elif status in {"rejected", "expired", "needs_renewal"}:
+            bucket = 1
+        else:
+            bucket = 0
+        timestamp = _safe_str(
             item.get("reviewed_at")
             or item.get("last_verified_at")
             or item.get("submitted_at")
             or item.get("created_at")
             or item.get("id")
             or ""
-        ),
-        reverse=True,
-    )
+        )
+        return (bucket, timestamp)
+
+    matches.sort(key=_verification_rank, reverse=True)
     return matches[0]
 
 
