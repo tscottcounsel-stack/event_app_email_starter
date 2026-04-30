@@ -228,45 +228,99 @@ def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[
     return matches[0]
 
 
-def _verification_truth(profile: Dict[str, Any], email: str) -> Dict[str, str]:
-    """Resolve public organizer verification from admin records first, profile second.
-
-    This function is intentionally tolerant of older field names because the
-    verification flow has evolved. A premium organizer can be premium and
-    verified at the same time; this returns verification truth only.
-    """
-    admin_record = _latest_verification_for_email(email, "organizer")
-
-    source = admin_record if isinstance(admin_record, dict) and admin_record else (profile or {})
+def _profile_says_verified(profile: Dict[str, Any]) -> bool:
+    """Return True when saved organizer profile already carries approved/verified truth."""
+    if not isinstance(profile, dict):
+        return False
 
     status = _safe_str(
-        source.get("verification_status")
-        or source.get("verificationStatus")
-        or source.get("public_verification_status")
-        or source.get("status")
+        profile.get("verification_status")
+        or profile.get("verificationStatus")
+        or profile.get("public_verification_status")
+        or profile.get("status")
     ).lower()
-
     review_status = _safe_str(
-        source.get("review_status")
-        or source.get("reviewStatus")
-        or source.get("review")
+        profile.get("review_status")
+        or profile.get("reviewStatus")
+        or profile.get("review")
+    ).lower()
+    label = _safe_str(
+        profile.get("public_verification_label")
+        or profile.get("verification_label")
+        or profile.get("verificationLabel")
     ).lower()
 
-    if status in {"approved", "complete"}:
-        status = "verified"
+    return (
+        profile.get("verified") is True
+        or profile.get("is_verified") is True
+        or status in {"verified", "approved", "complete", "expiring_soon"}
+        or review_status in {"approved", "verified"}
+        or "verified" in label
+    )
 
-    if review_status in {"approved", "verified"}:
-        status = "verified"
 
-    if source.get("verified") is True or source.get("is_verified") is True:
-        status = "verified"
+def _verification_truth(profile: Dict[str, Any], email: str) -> Dict[str, str]:
+    """Resolve public organizer verification using the same pattern as vendors.
 
-    if status not in {"verified", "expired", "expiring_soon", "pending", "renewal_pending", "rejected", "needs_renewal"}:
-        status = compute_verification_status(source)
+    Important rule:
+    - Premium placement and verification are separate.
+    - A pending/renewal record must NOT downgrade an already verified profile.
+    - Approved/verified admin records win.
+    """
+    profile = profile or {}
+    admin_record = _latest_verification_for_email(email, "organizer")
 
+    profile_verified = _profile_says_verified(profile)
+
+    admin_status = ""
+    admin_review = ""
+    if isinstance(admin_record, dict) and admin_record:
+        admin_status = _safe_str(
+            admin_record.get("verification_status")
+            or admin_record.get("verificationStatus")
+            or admin_record.get("public_verification_status")
+            or admin_record.get("status")
+        ).lower()
+        admin_review = _safe_str(
+            admin_record.get("review_status")
+            or admin_record.get("reviewStatus")
+            or admin_record.get("review")
+        ).lower()
+
+        if admin_status in {"approved", "complete"}:
+            admin_status = "verified"
+        if admin_review in {"approved", "verified"}:
+            admin_status = "verified"
+        if admin_record.get("verified") is True or admin_record.get("is_verified") is True:
+            admin_status = "verified"
+
+    # Verified/approved verification records always win.
+    if admin_status in {"verified", "expiring_soon"}:
+        return {
+            "verification_status": "verified" if admin_status == "verified" else admin_status,
+            "review_status": admin_review or "approved",
+        }
+
+    # A saved verified profile must not be downgraded by pending/renewal records.
+    if profile_verified and admin_status not in {"rejected", "expired", "needs_renewal"}:
+        return {"verification_status": "verified", "review_status": "approved"}
+
+    # If admin has a hard negative lifecycle state, respect it.
+    if admin_status in {"rejected", "expired", "needs_renewal"}:
+        return {
+            "verification_status": admin_status,
+            "review_status": admin_review or ("rejected" if admin_status == "rejected" else "renewal_pending"),
+        }
+
+    # Otherwise use admin pending if present, then profile lifecycle.
+    if admin_status in {"pending", "renewal_pending"} or admin_review in {"pending", "renewal_pending"}:
+        return {"verification_status": "pending", "review_status": admin_review or "renewal_pending"}
+
+    status = compute_verification_status(profile)
     if status == "renewal_pending":
         status = "pending"
 
+    review_status = _safe_str(profile.get("review_status") or profile.get("reviewStatus")).lower()
     if not review_status:
         review_status = (
             "approved"
@@ -406,6 +460,14 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+def _require_admin(user: Dict[str, Any]) -> None:
+    role = _safe_str(user.get("role")).lower()
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -522,6 +584,61 @@ def _review_summary(organizer_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+@router.get("/organizers/admin/force-verify-organizer")
+def force_verify_organizer_help():
+    return {
+        "ok": False,
+        "detail": "Use POST with JSON body {\"email\": \"organizer@example.com\"}. This admin route updates the stored organizer verification display fields.",
+    }
+
+
+@router.post("/organizers/admin/force-verify-organizer")
+def force_verify_organizer(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
+    _require_admin(user)
+
+    email = _norm_email(payload.get("email"))
+    if not email:
+        raise HTTPException(status_code=400, detail="Organizer email required")
+
+    profiles = _load_profiles()
+    existing = profiles.get(email)
+    if not isinstance(existing, dict) or not existing:
+        # Create a shell only when the admin explicitly asks to verify this organizer.
+        existing = {"email": email, "organizationName": email.split("@")[0]}
+
+    now = _utc_now_iso()
+    existing.update({
+        "email": email,
+        "verified": True,
+        "is_verified": True,
+        "verification_status": "verified",
+        "verificationStatus": "verified",
+        "public_verification_status": "verified",
+        "public_verification_label": "Verified",
+        "review_status": "approved",
+        "reviewStatus": "approved",
+        "verified_at": existing.get("verified_at") or now,
+        "last_verified_at": existing.get("last_verified_at") or now,
+        "updatedAt": now,
+    })
+
+    profiles[email] = existing
+    _save_profiles(profiles)
+
+    return {
+        "ok": True,
+        "email": email,
+        "profile": existing,
+        "organizer": {
+            "email": email,
+            "verified": True,
+            "verification_status": "verified",
+            "public_verification_status": "verified",
+            "review_status": "approved",
+        },
+    }
+
+
 @router.get("/organizer/profile")
 def get_my_organizer_profile(user: Dict[str, Any] = Depends(get_current_user)):
     email = _norm_email(user.get("email"))
@@ -565,6 +682,11 @@ def save_organizer_profile(
 
     profiles = _load_profiles()
     existing = profiles.get(email) if isinstance(profiles.get(email), dict) else {}
+
+    # Profile edits must never reset a verified organizer back to pending.
+    # The verification/review system owns these lifecycle fields.
+    if existing.get("verified") is True and not profile.get("verified"):
+        profile["verified"] = True
 
     # Preserve verification/lifecycle fields that are owned by the review system.
     for key in [
@@ -913,8 +1035,9 @@ def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
 def seed_organizers():
     profiles = _load_profiles()
 
-    profiles["atlantaevents@example.com"] = {
-        "organizationName": "Atlanta Events Collective",
+    if "atlantaevents@example.com" not in profiles:
+        profiles["atlantaevents@example.com"] = {
+            "organizationName": "Atlanta Events Collective",
         "organizationType": "Festival",
         "contactName": "Atlanta Events Collective",
         "email": "atlantaevents@example.com",
