@@ -27,6 +27,24 @@ DEFAULT_VERIFICATION_FEES = {
     "organizer": 49,
 }
 
+# Required documents are role-specific. A user is only fully verified while all
+# required documents exist and are unexpired. Verification expiration is the
+# earliest required document expiration date, with one-year approval fallback
+# only when no document expiration dates were supplied.
+REQUIRED_DOCS = {
+    "vendor": ["business_license", "government_id"],
+    "organizer": ["business_license", "government_id"],
+}
+
+DOC_LABELS = {
+    "business_license": "Business license / registration",
+    "government_id": "Government ID / legitimacy document",
+    "certificate_of_insurance": "Certificate of insurance",
+    "w9_document": "W-9",
+    "business_registration": "DBA / business registration",
+    "sales_tax_permit": "Sales tax / resale permit",
+}
+
 
 def _require_stripe() -> Any:
     if stripe is None:
@@ -280,13 +298,78 @@ def _earliest_expiration_from_documents(record: Optional[Dict[str, Any]]) -> Opt
     return min(expirations) if expirations else None
 
 
+def _document_status_summary(record: Dict[str, Any]) -> Dict[str, Any]:
+    role = _safe_lower(record.get("role"))
+    required = REQUIRED_DOCS.get(role, [])
+    documents = record.get("documents") or record.get("verification_documents") or record.get("verificationDocuments") or []
+    if isinstance(documents, dict):
+        documents = list(documents.values())
+
+    now = _now()
+    found_types = set()
+    missing_expiration_docs: List[str] = []
+    expired_docs: List[Dict[str, Any]] = []
+    expiring_soon_docs: List[Dict[str, Any]] = []
+    active_docs: List[Dict[str, Any]] = []
+
+    if isinstance(documents, list):
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+            doc_type = _safe_lower(doc.get("type") or doc.get("document_type") or doc.get("category"))
+            if doc_type:
+                found_types.add(doc_type)
+
+            label = _safe_str(doc.get("label") or doc.get("name") or DOC_LABELS.get(doc_type, doc_type or "Document"))
+            expiration = _parse_datetime(
+                doc.get("expiration_date")
+                or doc.get("expirationDate")
+                or doc.get("expires_at")
+                or doc.get("expiresAt")
+            )
+
+            item = {
+                "type": doc_type,
+                "label": label,
+                "name": _safe_str(doc.get("name")),
+                "expiration_date": expiration.isoformat() if expiration else None,
+                "url": _safe_str(doc.get("url")),
+            }
+
+            if not expiration:
+                missing_expiration_docs.append(doc_type or label)
+                continue
+
+            if expiration < now:
+                expired_docs.append(item)
+            elif expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
+                expiring_soon_docs.append(item)
+            else:
+                active_docs.append(item)
+
+    missing_docs = [doc_type for doc_type in required if doc_type not in found_types]
+    return {
+        "required_docs": required,
+        "missing_docs": missing_docs,
+        "missing_expiration_docs": missing_expiration_docs,
+        "expired_docs": expired_docs,
+        "expiring_soon_docs": expiring_soon_docs,
+        "active_docs": active_docs,
+        "all_required_present": not missing_docs,
+        "all_required_unexpired": not missing_docs and not expired_docs and not missing_expiration_docs,
+    }
+
+
 def _record_expiration(record: Optional[Dict[str, Any]]) -> Optional[datetime]:
     if not isinstance(record, dict):
         return None
 
+    # The verification is only as current as the earliest expiring document.
+    # Keep document expiration as source of truth; admin-level expires_at is a
+    # fallback for legacy records or records with non-expiring documents.
     return (
-        _parse_datetime(record.get("expires_at"))
-        or _earliest_expiration_from_documents(record)
+        _earliest_expiration_from_documents(record)
+        or _parse_datetime(record.get("expires_at"))
         or _parse_datetime(record.get("expiration_date"))
     )
 
@@ -305,17 +388,26 @@ def _expires_in_days(record: Optional[Dict[str, Any]]) -> Optional[int]:
 
 
 def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
-    """Internal verification truth used by admin/review flows."""
+    """Internal verification truth used by admin/review flows.
+
+    A verified account remains verified only while every required document is
+    present and unexpired. The overall verification expiration is the earliest
+    expiring document date.
+    """
     if not record:
         return "unverified"
 
     status = _safe_lower(record.get("status")) or "not_started"
 
-    if status in {"expired", "needs_renewal"}:
-        return status
-
     if status != "verified":
         return status
+
+    doc_status = _document_status_summary(record)
+    if doc_status.get("missing_docs") or doc_status.get("missing_expiration_docs"):
+        return "needs_renewal"
+
+    if doc_status.get("expired_docs"):
+        return "expired"
 
     expiration = _record_expiration(record)
     if not expiration:
@@ -378,15 +470,19 @@ def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
     public_display = _public_verification_display(record)
     expiration = _record_expiration(record)
 
+    document_status = _document_status_summary(record)
+
     return {
         **record,
         "verification_status": lifecycle_status,
         "review_status": review_status,
-        "expires_at": record.get("expires_at") or (expiration.isoformat() if expiration else None),
+        "expires_at": expiration.isoformat() if expiration else record.get("expires_at"),
+        "expiration_date": expiration.isoformat() if expiration else record.get("expiration_date"),
         "last_verified_at": record.get("last_verified_at") or record.get("reviewed_at"),
         "expires_in_days": _expires_in_days(record),
         "is_expired": lifecycle_status == "expired",
         "is_expiring_soon": lifecycle_status == "expiring_soon",
+        "document_status": document_status,
         **public_display,
     }
 
@@ -409,6 +505,13 @@ def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_curren
             break
 
     documents = _normalize_documents(payload.get("documents"))
+    document_check = _document_status_summary({"role": role, "documents": documents})
+    if document_check.get("missing_docs"):
+        labels = [DOC_LABELS.get(item, item) for item in document_check["missing_docs"]]
+        raise HTTPException(status_code=400, detail="Missing required document(s): " + ", ".join(labels))
+    if document_check.get("missing_expiration_docs"):
+        labels = [DOC_LABELS.get(item, item) for item in document_check["missing_expiration_docs"]]
+        raise HTTPException(status_code=400, detail="Expiration date required for: " + ", ".join(labels))
     submitted_at = _now_iso()
 
     if existing:
@@ -689,8 +792,10 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
             or payload.get("expiration_date")
             or payload.get("expirationDate")
         )
-        expiration = _parse_datetime(provided_expiration) or (
-            now + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
+        expiration = (
+            _parse_datetime(provided_expiration)
+            or _earliest_expiration_from_documents(record)
+            or (now + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS))
         )
         record["last_verified_at"] = now.isoformat()
         record["expires_at"] = expiration.isoformat()
