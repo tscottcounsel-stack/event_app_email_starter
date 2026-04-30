@@ -15,6 +15,7 @@ from app.store import (
     _VENDORS,
     next_review_id,
     save_store,
+    upsert_vendor,
 )
 from app.routers.verifications import _find_latest_record
 
@@ -436,7 +437,12 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user)):
     key = _user_vendor_key(user)
     vendor = _VENDORS.get(key) or {}
     if not vendor:
-        return {}
+        vendor = upsert_vendor(key, {
+            "vendor_id": key,
+            "email": key,
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        })
     return _vendor_public_payload(key, vendor)
 
 
@@ -464,8 +470,7 @@ def save_my_vendor_profile(
     updated["business_type"] = primary_category
     updated["updated_at"] = _now_iso()
 
-    _VENDORS[key] = updated
-    save_store()
+    updated = upsert_vendor(key, updated)
     _sync_vendor_category_to_applications(key, updated)
 
     return _vendor_public_payload(key, updated)
@@ -689,17 +694,21 @@ def get_public_vendors():
 
 @router.post("/debug/seed-vendors")
 def seed_vendors():
-    _VENDORS["test1"] = {
-        "vendor_id": "test1",
-        "business_name": "Atlanta Food Truck Co",
-        "city": "Atlanta",
-        "state": "GA",
-        "categories": ["Food"],
-        "description": "Top rated street food vendor",
-        "verified": True,
-        "public_verification_status": "verified",
-        "rating": 4.8,
-    }
+    # Debug-only seed. Do not overwrite real or existing vendor data.
+    if "test1" not in _VENDORS:
+        upsert_vendor("test1", {
+            "vendor_id": "test1",
+            "email": "test1",
+            "business_name": "Atlanta Food Truck Co",
+            "city": "Atlanta",
+            "state": "GA",
+            "categories": ["Food"],
+            "description": "Top rated street food vendor",
+            "verified": True,
+            "public_verification_status": "verified",
+            "rating": 4.8,
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        })
 
-    save_store()
-    return {"ok": True}
+    return {"ok": True, "seeded": "test1", "count": len(_VENDORS)}

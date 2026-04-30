@@ -406,6 +406,28 @@ def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+
+
+def upsert_vendor(email: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    key = _norm_email(email)
+    if not key:
+        raise ValueError("Vendor email required")
+
+    with _LOCK:
+        existing = _VENDORS.get(key, {}) if isinstance(_VENDORS.get(key, {}), dict) else {}
+        record: Dict[str, Any] = {
+            "email": key,
+            "vendor_id": existing.get("vendor_id") or key,
+            **existing,
+            **dict(payload or {}),
+        }
+        record["email"] = key
+        record["vendor_id"] = record.get("vendor_id") or key
+        _VENDORS[key] = record
+        save_store()
+        return dict(record)
+
+
 def find_latest_verification_by_email(email: Any, role: Any = None) -> Dict[str, Any] | None:
     target_email = _norm_email(email)
     target_role = str(role or "").strip().lower()
