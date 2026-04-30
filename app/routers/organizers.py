@@ -421,6 +421,59 @@ def _derive_visibility_tier(profile: Dict[str, Any], public_verification_status:
     return "standard"
 
 
+def _is_internal_or_demo_identity(email: Any, name: Any = "") -> bool:
+    normalized_email = _norm_email(email)
+    normalized_name = _safe_str(name).lower()
+
+    if not normalized_email and not normalized_name:
+        return True
+
+    if normalized_email in {"admin@example.com", "test1", "test@example.com"}:
+        return True
+
+    if normalized_email.endswith("@example.com"):
+        return True
+
+    if normalized_name in {"admin", "test", "test1"}:
+        return True
+
+    return False
+
+
+def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
+    """Only publish organizers that have earned marketplace visibility.
+
+    Public directory visibility is intentionally strict:
+    - verified organizers are visible
+    - active premium/enterprise organizers are visible
+    - pending/standard/inactive profiles stay private
+    """
+    public_status = _safe_str(row.get("public_verification_status")).lower()
+    verification_status = _safe_str(row.get("verification_status") or row.get("status")).lower()
+    review_status = _safe_str(row.get("review_status")).lower()
+    visibility_tier = _safe_str(row.get("visibility_tier") or row.get("visibilityTier")).lower()
+    plan = _safe_str(row.get("subscription_plan") or row.get("plan")).lower()
+    subscription_status = _safe_str(row.get("subscription_status")).lower()
+
+    is_verified = (
+        row.get("verified") is True
+        or public_status == "verified"
+        or verification_status in {"verified", "approved", "complete", "expiring_soon"}
+        or review_status in {"approved", "verified"}
+    )
+
+    has_premium_plan = any(token in plan for token in ["enterprise", "premium", "pro", "growth"])
+    is_active_subscription = subscription_status in {"active", "trialing", "paid"}
+    is_premium = (
+        visibility_tier == "premium"
+        or bool(row.get("featured"))
+        or bool(row.get("promoted"))
+        or (has_premium_plan and is_active_subscription)
+    )
+
+    return bool(is_verified or is_premium)
+
+
 def _load_profiles() -> Dict[str, Dict[str, Any]]:
     try:
         if not PROFILE_STORE_PATH.exists():
@@ -1052,8 +1105,8 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         if not email:
             continue
 
-        # Keep admin/test shell accounts out of the public organizer directory.
-        if email == "admin@example.com":
+        # Keep admin/test/demo shell accounts out of the public organizer directory.
+        if _is_internal_or_demo_identity(email, profile.get("organizationName") or profile.get("businessName")):
             continue
 
         profile = _apply_subscription_overlay(profile, email)
@@ -1115,6 +1168,9 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "logo_url": profile.get("logoDataUrl"),
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
         }
+
+        if not _is_public_marketplace_visible(new_row):
+            continue
 
         existing = rows_by_email.get(email)
         if existing and existing.get("verified") and not new_row.get("verified"):

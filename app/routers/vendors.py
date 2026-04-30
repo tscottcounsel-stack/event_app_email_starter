@@ -334,6 +334,59 @@ def _load_all_vendors_from_db(db: Session) -> Dict[str, Dict[str, Any]]:
     }
 
 
+def _is_internal_or_demo_identity(email: Any, name: Any = "") -> bool:
+    normalized_email = _safe_str(email).lower()
+    normalized_name = _safe_str(name).lower()
+
+    if not normalized_email and not normalized_name:
+        return True
+
+    if normalized_email in {"admin@example.com", "test1", "test@example.com"}:
+        return True
+
+    if normalized_email.endswith("@example.com"):
+        return True
+
+    if normalized_name in {"admin", "test", "test1"}:
+        return True
+
+    return False
+
+
+def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
+    """Only publish vendors that have earned marketplace visibility.
+
+    Public directory visibility is intentionally strict:
+    - verified vendors are visible
+    - active premium/pro/growth/enterprise vendors are visible
+    - pending/standard/inactive profiles stay private
+    """
+    public_status = _safe_str(row.get("public_verification_status")).lower()
+    verification_status = _safe_str(row.get("verification_status") or row.get("status")).lower()
+    review_status = _safe_str(row.get("review_status")).lower()
+    visibility_tier = _safe_str(row.get("visibility_tier") or row.get("visibilityTier")).lower()
+    plan = _safe_str(row.get("subscription_plan") or row.get("plan")).lower()
+    subscription_status = _safe_str(row.get("subscription_status")).lower()
+
+    is_verified = (
+        row.get("verified") is True
+        or public_status == "verified"
+        or verification_status in {"verified", "approved", "complete", "expiring_soon"}
+        or review_status in {"approved", "verified"}
+    )
+
+    has_premium_plan = any(token in plan for token in ["enterprise", "premium", "pro", "growth"])
+    is_active_subscription = subscription_status in {"active", "trialing", "paid"}
+    is_premium = (
+        visibility_tier == "premium"
+        or bool(row.get("featured"))
+        or bool(row.get("promoted"))
+        or (has_premium_plan and is_active_subscription)
+    )
+
+    return bool(is_verified or is_premium)
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     raw = _safe_str(value)
     if not raw:
@@ -880,9 +933,13 @@ def get_public_vendors(db: Session = Depends(get_db)):
 
         payload = _vendor_public_payload(vendor_key, vendor)
 
-        # Only show vendors with enough real public profile data.
-        # Auto-created signup shells stay hidden until the vendor saves a profile.
-        if _safe_str(payload.get("business_name")):
+        # Only show vendors with enough real public profile data AND earned marketplace visibility.
+        # Auto-created signup shells, standard pending users, and demo/test accounts stay hidden.
+        if (
+            _safe_str(payload.get("business_name"))
+            and not _is_internal_or_demo_identity(payload.get("email") or vendor_key, payload.get("business_name"))
+            and _is_public_marketplace_visible(payload)
+        ):
             results.append(payload)
 
     tier_rank = {"premium": 0, "verified": 1, "standard": 2}
