@@ -866,3 +866,32 @@ def get_public_organizers(db: Session = Depends(get_db)):
 @router.get("/organizers/{email}")
 def get_public_organizer_alias(email: str, db: Session = Depends(get_db)):
     return get_public_organizer(email, db)
+
+@router.post("/debug/seed-organizers")
+def seed_organizers():
+    profiles = _load_profiles()
+
+    profiles["atlantaevents@example.com"] = {
+        "organizationName": "Atlanta Events Collective",
+        "organizationType": "Festival",
+        "contactName": "Atlanta Events Collective",
+        "email": "atlantaevents@example.com",
+        "city": "Atlanta",
+        "state": "GA",
+        "location": "Atlanta, GA",
+        "logoDataUrl": "",
+        "verified": True,
+        "verification_status": "verified",
+        "visibility_tier": "verified",
+        "visibilityTier": "verified",
+        "profileComplete": True,
+        "updatedAt": _utc_now_iso(),
+    }
+
+    _save_profiles(profiles)
+
+    return {
+        "ok": True,
+        "seeded": ["atlantaevents@example.com"],
+        "count": len(profiles),
+    }
