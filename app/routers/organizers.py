@@ -129,13 +129,16 @@ def _public_verification_display(verification_status: str, review_status: str = 
     status = _safe_str(verification_status).lower()
     review = _safe_str(review_status).lower()
 
-    if status in {"verified", "expiring_soon"}:
+    # Public pages should show verified when either the lifecycle status or
+    # review status says the organizer is approved. Premium placement should
+    # not replace this verified signal.
+    if status in {"verified", "approved", "complete", "expiring_soon"} or review in {"approved", "verified"}:
         return {
             "public_verification_status": "verified",
             "public_verification_label": "Verified",
         }
 
-    if status == "pending" or review in {"pending", "renewal_pending"}:
+    if status in {"pending", "renewal_pending"} or review in {"pending", "renewal_pending"}:
         return {
             "public_verification_status": "renewal_pending",
             "public_verification_label": "Renewal pending",
@@ -150,9 +153,12 @@ def _public_verification_display(verification_status: str, review_status: str = 
 
 
 def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[str, Any]:
-    """Read latest verification directly from app.store at request time.
+    """Read the latest verification record for an organizer email.
 
-    This avoids stale imports if app.store rebinds _VERIFICATIONS during startup/load.
+    The public organizer directory must not lose verified status just because a
+    legacy record is missing a role value or stored the role slightly differently.
+    We prefer exact organizer matches, but fall back to any record for the same
+    email so existing approved records still surface as verified.
     """
     normalized_email = _norm_email(email)
     normalized_role = _safe_str(role).lower()
@@ -165,7 +171,9 @@ def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[
     except Exception:
         verification_store = _VERIFICATIONS
 
-    matches: List[Dict[str, Any]] = []
+    exact_matches: List[Dict[str, Any]] = []
+    fallback_matches: List[Dict[str, Any]] = []
+
     try:
         records = verification_store.values() if isinstance(verification_store, dict) else []
         for record in records:
@@ -173,18 +181,26 @@ def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[
                 continue
             if _norm_email(record.get("email")) != normalized_email:
                 continue
-            if normalized_role and _safe_str(record.get("role")).lower() != normalized_role:
-                continue
-            matches.append(record)
+
+            record_role = _safe_str(record.get("role")).lower()
+            if normalized_role and record_role == normalized_role:
+                exact_matches.append(record)
+            elif not record_role or record_role in {"organizer", "org"}:
+                fallback_matches.append(record)
+            else:
+                # Final fallback: same email but different/missing legacy role.
+                fallback_matches.append(record)
     except Exception:
         return {}
 
+    matches = exact_matches or fallback_matches
     if not matches:
         return {}
 
     matches.sort(
         key=lambda item: _safe_str(
             item.get("reviewed_at")
+            or item.get("last_verified_at")
             or item.get("submitted_at")
             or item.get("created_at")
             or item.get("id")
@@ -196,35 +212,44 @@ def _latest_verification_for_email(email: str, role: str = "organizer") -> Dict[
 
 
 def _verification_truth(profile: Dict[str, Any], email: str) -> Dict[str, str]:
-    """Resolve public organizer verification from admin records first, profile second."""
+    """Resolve public organizer verification from admin records first, profile second.
+
+    This function is intentionally tolerant of older field names because the
+    verification flow has evolved. A premium organizer can be premium and
+    verified at the same time; this returns verification truth only.
+    """
     admin_record = _latest_verification_for_email(email, "organizer")
 
-    if admin_record:
-        status = _safe_str(admin_record.get("verification_status") or admin_record.get("status")).lower()
-        if status == "approved":
-            status = "verified"
-        if status not in {"verified", "expired", "expiring_soon", "pending", "rejected"}:
-            status = compute_verification_status(admin_record)
+    source = admin_record if isinstance(admin_record, dict) and admin_record else (profile or {})
 
-        review_status = _safe_str(admin_record.get("review_status") or admin_record.get("reviewStatus")).lower()
-        if not review_status:
-            review_status = (
-                "approved"
-                if status in {"verified", "expiring_soon"}
-                else "renewal_pending"
-                if status == "pending"
-                else "rejected"
-                if status == "rejected"
-                else "none"
-            )
+    status = _safe_str(
+        source.get("verification_status")
+        or source.get("verificationStatus")
+        or source.get("public_verification_status")
+        or source.get("status")
+    ).lower()
 
-        return {"verification_status": status or "pending", "review_status": review_status or "none"}
+    review_status = _safe_str(
+        source.get("review_status")
+        or source.get("reviewStatus")
+        or source.get("review")
+    ).lower()
 
-    status = compute_verification_status(profile)
-    if profile.get("verified") is True:
+    if status in {"approved", "complete"}:
         status = "verified"
 
-    review_status = _safe_str(profile.get("review_status") or profile.get("reviewStatus")).lower()
+    if review_status in {"approved", "verified"}:
+        status = "verified"
+
+    if source.get("verified") is True or source.get("is_verified") is True:
+        status = "verified"
+
+    if status not in {"verified", "expired", "expiring_soon", "pending", "renewal_pending", "rejected", "needs_renewal"}:
+        status = compute_verification_status(source)
+
+    if status == "renewal_pending":
+        status = "pending"
+
     if not review_status:
         review_status = (
             "approved"
@@ -279,9 +304,9 @@ def _apply_subscription_overlay(profile: Dict[str, Any], email: str) -> Dict[str
     if role and role != "organizer":
         return merged
 
-    plan = _safe_str(user.get("plan") or "starter").lower()
-    status = _safe_str(user.get("subscription_status") or "inactive").lower()
-    is_enterprise = plan == "enterprise_organizer" and status in {"active", "trialing", "paid"}
+    plan = _safe_str(user.get("plan") or user.get("subscription_plan") or user.get("subscriptionPlan") or "starter").lower()
+    status = _safe_str(user.get("subscription_status") or user.get("subscriptionStatus") or "inactive").lower()
+    is_enterprise = any(token in plan for token in ["enterprise", "premium", "pro", "growth"]) and status in {"active", "trialing", "paid"}
 
     if plan:
         merged["plan"] = plan
