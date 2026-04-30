@@ -112,6 +112,18 @@ def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _split_location(value: Any) -> tuple[str, str]:
+    raw = _safe_str(value)
+    if not raw:
+        return "", ""
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return raw, ""
+
+def _looks_like_email(value: Any) -> bool:
+    raw = _safe_str(value).lower()
+    return "@" in raw and "." in raw.split("@")[-1]
 
 def _public_verification_display(verification_status: str, review_status: str = "") -> Dict[str, str]:
     status = _safe_str(verification_status).lower()
@@ -382,6 +394,10 @@ def _event_to_public(event: Event) -> Dict[str, Any]:
 
 def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     email = _norm_email(payload.get("email"))
+    raw_location = str(payload.get("location") or "").strip()
+    parsed_city, parsed_state = _split_location(raw_location)
+    city = str(payload.get("city") or parsed_city or "").strip()
+    state = str(payload.get("state") or parsed_state or "").strip()
 
     return {
         "organizationName": str(payload.get("organizationName") or "").strip(),
@@ -391,8 +407,8 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "phone": str(payload.get("phone") or "").strip(),
         "website": str(payload.get("website") or "").strip(),
         "business_address": str(payload.get("business_address") or payload.get("businessAddress") or "").strip(),
-        "city": str(payload.get("city") or "").strip(),
-        "state": str(payload.get("state") or "").strip(),
+        "city": city,
+        "state": state,
         "zip": str(payload.get("zip") or payload.get("zipcode") or payload.get("postal_code") or "").strip(),
         "location": str(payload.get("location") or "").strip(),
         "logoDataUrl": str(payload.get("logoDataUrl") or "").strip(),
@@ -464,33 +480,80 @@ def _review_summary(organizer_reviews: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+@router.get("/organizer/profile")
+def get_my_organizer_profile(user: Dict[str, Any] = Depends(get_current_user)):
+    email = _norm_email(user.get("email"))
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    profile = _load_profiles().get(email)
+    if not isinstance(profile, dict) or not profile:
+        return {"ok": True, "profile": None}
+
+    profile = _apply_subscription_overlay(profile, email)
+    truth = _verification_truth(profile, email)
+    verification_status = truth["verification_status"]
+    review_status = truth["review_status"]
+    public_display = _public_verification_display(verification_status, review_status)
+
+    profile = {
+        **profile,
+        "email": email,
+        "verification_status": verification_status,
+        "review_status": review_status,
+        **public_display,
+        "verified": public_display["public_verification_status"] == "verified",
+    }
+
+    return {"ok": True, "profile": profile}
+
+
 @router.post("/organizer/profile")
 def save_organizer_profile(
     payload: Dict[str, Any],
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    email = user.get("email")  # 🔥 FORCE AUTH USER
+    email = _norm_email(user.get("email"))  # force authenticated user identity
 
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     profile = _profile_from_payload(payload or {})
-
-    # 🔥 OVERRIDE ANY EMAIL COMING FROM FRONTEND
     profile["email"] = email
 
     profiles = _load_profiles()
-    existing = profiles.get(email) or {}
+    existing = profiles.get(email) if isinstance(profiles.get(email), dict) else {}
 
-    # preserve verification fields
-    if "verified" not in payload:
-        profile["verified"] = existing.get("verified", False)
+    # Preserve verification/lifecycle fields that are owned by the review system.
+    for key in [
+        "verified",
+        "verification_status",
+        "verificationStatus",
+        "review_status",
+        "reviewStatus",
+        "public_verification_status",
+        "public_verification_label",
+        "visibility_tier",
+        "visibilityTier",
+        "documents",
+        "expiration_date",
+        "expires_at",
+        "last_verified_at",
+    ]:
+        if key not in profile or profile.get(key) in (None, "", [], {}):
+            if key in existing:
+                profile[key] = existing.get(key)
 
-    if not profile.get("verification_status"):
-        profile["verification_status"] = existing.get("verification_status")
+    truth = _verification_truth(profile, email)
+    verification_status = truth["verification_status"]
+    review_status = truth["review_status"]
+    public_display = _public_verification_display(verification_status, review_status)
 
-    profile["verification_status"] = compute_verification_status(profile)
-    profile["verified"] = profile["verification_status"] == "verified"
+    profile["verification_status"] = verification_status
+    profile["review_status"] = review_status
+    profile.update(public_display)
+    profile["verified"] = public_display["public_verification_status"] == "verified"
+    profile["updatedAt"] = profile.get("updatedAt") or _utc_now_iso()
 
     profiles[email] = profile
     _save_profiles(profiles)
@@ -505,18 +568,31 @@ def save_organizer_profile(
             "verification_status": profile["verification_status"],
         },
     }
+
 @router.get("/organizer/profile/{email}")
 def get_organizer_profile(email: str):
     email = _norm_email(email)
     profile = _load_profiles().get(email)
 
-    if not profile:
+    if not isinstance(profile, dict) or not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    profile = {**profile, "verification_status": compute_verification_status(profile)}
-    profile["verified"] = profile["verification_status"] == "verified"
+    profile = _apply_subscription_overlay(profile, email)
+    truth = _verification_truth(profile, email)
+    verification_status = truth["verification_status"]
+    review_status = truth["review_status"]
+    public_display = _public_verification_display(verification_status, review_status)
 
-    return {"profile": profile}
+    profile = {
+        **profile,
+        "email": email,
+        "verification_status": verification_status,
+        "review_status": review_status,
+        **public_display,
+        "verified": public_display["public_verification_status"] == "verified",
+    }
+
+    return {"ok": True, "profile": profile}
 
 
 @router.get("/organizers/public/{email}/reviews")
@@ -679,19 +755,28 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             continue
 
         profile = _apply_subscription_overlay(profile, email)
+        name = _safe_str(
+            profile.get("organizationName")
+            or profile.get("businessName")
+            or profile.get("organization_name")
+            or profile.get("business_name")
+        )
+
+        # Do not publish incomplete placeholder rows or email-as-name rows.
+        if not name or _looks_like_email(name):
+            continue
+
+        city = _safe_str(profile.get("city"))
+        state = _safe_str(profile.get("state"))
+        raw_location = _safe_str(profile.get("location"))
+        if raw_location and (not city or not state):
+            parsed_city, parsed_state = _split_location(raw_location)
+            city = city or parsed_city
+            state = state or parsed_state
+        location = raw_location or ", ".join([part for part in [city, state] if part])
 
         organizer_reviews = list(reviews_store.get(email, []))
         summary = _review_summary(organizer_reviews)
-        name = (
-            profile.get("organizationName")
-            or profile.get("contactName")
-            or email
-        )
-        location = str(
-            profile.get("location")
-            or ", ".join([x for x in [profile.get("city"), profile.get("state")] if x])
-            or ""
-        ).strip()
 
         truth = _verification_truth(profile, email)
         verification_status = truth["verification_status"]
@@ -703,10 +788,10 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "email": email,
             "business_name": name,
             "name": name,
-            "city": location,
+            "city": city,
+            "state": state,
             "location": location,
             "business_address": profile.get("business_address"),
-            "state": profile.get("state"),
             "zip": profile.get("zip"),
             "status": verification_status,
             "verification_status": verification_status,
@@ -729,118 +814,24 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
             "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
         }
 
+    # Count events for real saved organizer profiles only. Do not create public
+    # directory rows from event owner emails, because that leaks placeholder/test accounts.
     events = db.query(Event).order_by(Event.id.desc()).all()
     for event in events:
         email = _norm_email(getattr(event, "organizer_email", ""))
-        if not email:
-            continue
-
         existing = rows_by_email.get(email)
-        if existing:
-            existing["events_count"] = int(existing.get("events_count") or 0) + 1
-            if not existing.get("city"):
-                existing["city"] = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
-                existing["location"] = existing["city"]
+        if not existing:
             continue
 
-        location = ", ".join([x for x in [getattr(event, "city", ""), getattr(event, "state", "")] if x])
-        profile = _apply_subscription_overlay({}, email)
-        truth = _verification_truth(profile, email)
-        verification_status = truth["verification_status"]
-        review_status = truth["review_status"]
-        public_display = _public_verification_display(verification_status, review_status)
-        visibility_tier = _derive_visibility_tier(profile, public_display["public_verification_status"])
-
-        rows_by_email[email] = {
-            "email": email,
-            "business_name": email,
-            "name": email,
-            "city": location,
-            "location": location,
-            "status": verification_status,
-            "verification_status": verification_status,
-            "review_status": review_status,
-            **public_display,
-            "verified": public_display["public_verification_status"] == "verified",
-            "visibility_tier": visibility_tier,
-            "visibilityTier": visibility_tier,
-            "categories": [getattr(event, "category", "")] if getattr(event, "category", "") else [],
-            "bio": "Organizer hosting events on VendCore",
-            "rating": 0,
-            "review_count": 0,
-            "events_count": 1,
-            "promoted": False,
-        }
+        existing["events_count"] = int(existing.get("events_count") or 0) + 1
+        if not existing.get("city"):
+            event_city = _safe_str(getattr(event, "city", ""))
+            event_state = _safe_str(getattr(event, "state", ""))
+            existing["city"] = event_city
+            existing["state"] = existing.get("state") or event_state
+            existing["location"] = ", ".join([part for part in [event_city, event_state] if part])
 
     rows = list(rows_by_email.values())
-
-    # --- FALLBACK DATA (so directory is never empty while live profiles/events ramp up) ---
-    if not rows:
-        rows = [
-            {
-                "email": "demo@festivalco.com",
-                "business_name": "Festival Co.",
-                "name": "Festival Co.",
-                "city": "Atlanta, GA",
-                "location": "Atlanta, GA",
-                "status": "verified",
-                "verification_status": "verified",
-                "review_status": "approved",
-                "public_verification_status": "verified",
-                "public_verification_label": "Verified",
-                "verified": True,
-                "visibility_tier": "premium",
-                "visibilityTier": "premium",
-                "categories": ["Festival"],
-                "bio": "Large-scale festival organizer",
-                "rating": 4.8,
-                "review_count": 12,
-                "events_count": 5,
-                "promoted": True,
-            },
-            {
-                "email": "events@citymarket.com",
-                "business_name": "City Market Events",
-                "name": "City Market Events",
-                "city": "Atlanta, GA",
-                "location": "Atlanta, GA",
-                "status": "verified",
-                "verification_status": "verified",
-                "review_status": "approved",
-                "public_verification_status": "verified",
-                "public_verification_label": "Verified",
-                "verified": True,
-                "visibility_tier": "verified",
-                "visibilityTier": "verified",
-                "categories": ["Market"],
-                "bio": "Weekly community market organizer",
-                "rating": 4.5,
-                "review_count": 6,
-                "events_count": 2,
-                "promoted": False,
-            },
-            {
-                "email": "new@organizer.com",
-                "business_name": "New Organizer",
-                "name": "New Organizer",
-                "city": "Atlanta, GA",
-                "location": "Atlanta, GA",
-                "status": "pending",
-                "verification_status": "pending",
-                "review_status": "renewal_pending",
-                "public_verification_status": "renewal_pending",
-                "public_verification_label": "Renewal pending",
-                "verified": False,
-                "visibility_tier": "standard",
-                "visibilityTier": "standard",
-                "categories": ["Pop-up"],
-                "bio": "Emerging event organizer",
-                "rating": 0,
-                "review_count": 0,
-                "events_count": 0,
-                "promoted": False,
-            },
-        ]
 
     tier_rank = {"premium": 0, "verified": 1, "standard": 2}
     rows.sort(
