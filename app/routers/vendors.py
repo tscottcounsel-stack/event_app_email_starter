@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+from app.store import _VENDORS, save_store
 
 from app.routers.auth import get_current_user
 from app.store import (
@@ -684,3 +685,20 @@ def get_public_vendors():
 
     return results
 
+
+@router.post("/debug/seed-vendors")
+def seed_vendors():
+    _VENDORS["test1"] = {
+        "vendor_id": "test1",
+        "business_name": "Atlanta Food Truck Co",
+        "city": "Atlanta",
+        "state": "GA",
+        "categories": ["Food"],
+        "description": "Top rated street food vendor",
+        "verified": True,
+        "public_verification_status": "verified",
+        "rating": 4.8,
+    }
+
+    save_store()
+    return {"ok": True}
