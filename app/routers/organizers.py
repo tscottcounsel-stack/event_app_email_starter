@@ -779,6 +779,10 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         if not email:
             continue
 
+        # Keep admin/test shell accounts out of the public organizer directory.
+        if email == "admin@example.com":
+            continue
+
         profile = _apply_subscription_overlay(profile, email)
         name = _safe_str(
             profile.get("organizationName")
@@ -809,46 +813,42 @@ def _public_directory_rows(db: Session) -> List[Dict[str, Any]]:
         public_display = _public_verification_display(verification_status, review_status)
         visibility_tier = _derive_visibility_tier(profile, public_display["public_verification_status"])
 
+        new_row = {
+            "email": email,
+            "business_name": name,
+            "name": name,
+            "city": city,
+            "state": state,
+            "location": location,
+            "business_address": profile.get("business_address"),
+            "zip": profile.get("zip"),
+            "status": verification_status,
+            "verification_status": verification_status,
+            "review_status": review_status,
+            **public_display,
+            "verified": public_display["public_verification_status"] == "verified",
+            "visibility_tier": visibility_tier,
+            "visibilityTier": visibility_tier,
+            "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
+            "bio": profile.get("organizationType") or f"{name} profile on VendCore",
+            "rating": summary.get("rating", 0),
+            "review_count": summary.get("review_count", 0),
+            "events_count": 0,
+            "plan": profile.get("plan"),
+            "subscription_plan": profile.get("subscription_plan") or profile.get("subscriptionPlan"),
+            "subscription_status": profile.get("subscription_status") or profile.get("subscriptionStatus"),
+            "featured": bool(profile.get("featured")),
+            "promoted": bool(profile.get("promoted")) or visibility_tier == "premium",
+            "logo_url": profile.get("logoDataUrl"),
+            "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
+        }
+
         existing = rows_by_email.get(email)
+        if existing and existing.get("verified") and not new_row.get("verified"):
+            # Never downgrade an already-verified public row if stale profile data is encountered later.
+            continue
 
-new_row = {
-    "email": email,
-    "business_name": name,
-    "name": name,
-    "city": city,
-    "state": state,
-    "location": location,
-    "business_address": profile.get("business_address"),
-    "zip": profile.get("zip"),
-    "status": verification_status,
-    "verification_status": verification_status,
-    "review_status": review_status,
-    **public_display,
-    "verified": public_display["public_verification_status"] == "verified",
-    "visibility_tier": visibility_tier,
-    "visibilityTier": visibility_tier,
-    "categories": [profile.get("organizationType")] if profile.get("organizationType") else [],
-    "bio": profile.get("organizationType") or f"{name} profile on VendCore",
-    "rating": summary.get("rating", 0),
-    "review_count": summary.get("review_count", 0),
-    "events_count": 0,
-    "plan": profile.get("plan"),
-    "subscription_plan": profile.get("subscription_plan") or profile.get("subscriptionPlan"),
-    "subscription_status": profile.get("subscription_status") or profile.get("subscriptionStatus"),
-    "featured": bool(profile.get("featured")),
-    "promoted": bool(profile.get("promoted")) or visibility_tier == "premium",
-    "logo_url": profile.get("logoDataUrl"),
-    "banner_url": profile.get("bannerUrl") or profile.get("banner_url"),
-}
-
-# 🔥 CRITICAL: Never downgrade verified
-if existing:
-    if existing.get("verified"):
-        rows_by_email[email] = existing
-    else:
         rows_by_email[email] = new_row
-else:
-    rows_by_email[email] = new_row
 
     # Count events for real saved organizer profiles only. Do not create public
     # directory rows from event owner emails, because that leaks placeholder/test accounts.
@@ -878,8 +878,6 @@ else:
         )
     )
     return rows
-
-
 @router.get("/organizers/public-directory")
 def get_public_organizers_directory(db: Session = Depends(get_db)):
     return _public_directory_rows(db)
