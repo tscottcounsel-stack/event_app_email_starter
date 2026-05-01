@@ -1195,22 +1195,136 @@ def refresh(user: Dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
     token = _create_access_token(email=email, role=role, is_active=True)
     return AuthResponse(accessToken=token, role=role, email=email)
 
-@router.get("/me")
-def get_me(user: Dict[str, Any] = Depends(get_current_user)):
-    return {
+def _subscription_user_from_profile(email: Optional[str], role: Optional[str]) -> Dict[str, Any]:
+    """Return the durable subscription fields from Postgres profiles.
+
+    Auth users are still stored in the lightweight auth store for login, but
+    paid upgrade state must survive Railway redeploys. The profiles table is the
+    persistent source of truth for plan/status/badge fields. Keep this helper
+    local to auth.py to avoid importing billing.py, because billing.py imports
+    auth.py and importing it here would create a circular import.
+    """
+    normalized_email = _norm(email)
+    normalized_role = _norm(role)
+
+    if not normalized_email or normalized_role not in {"vendor", "organizer"}:
+        return {}
+
+    try:
+        from sqlalchemy import func  # type: ignore
+        from app.db import SessionLocal  # type: ignore
+        from app.models.profile import Profile  # type: ignore
+    except Exception as exc:
+        print("⚠️ /me profile subscription lookup unavailable:", str(exc))
+        return {}
+
+    if SessionLocal is None:
+        return {}
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == normalized_email, Profile.role == normalized_role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+
+        if profile is None:
+            return {}
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+
+        plan = _norm(
+            profile.subscription_plan
+            or data.get("subscription_plan")
+            or data.get("subscriptionPlan")
+            or data.get("plan")
+            or "starter"
+        )
+        status_value = _norm(
+            profile.subscription_status
+            or data.get("subscription_status")
+            or data.get("subscriptionStatus")
+            or "inactive"
+        )
+        visibility_tier = (
+            profile.visibility_tier
+            or data.get("visibility_tier")
+            or data.get("visibilityTier")
+            or ("premium" if status_value in {"active", "trialing", "paid"} and plan != "starter" else None)
+        )
+
+        return {
+            "plan": plan or "starter",
+            "subscription_plan": plan or "starter",
+            "subscriptionPlan": plan or "starter",
+            "subscription_status": status_value or "inactive",
+            "subscriptionStatus": status_value or "inactive",
+            "visibility_tier": visibility_tier,
+            "visibilityTier": visibility_tier,
+            "featured": bool(profile.featured or data.get("featured")),
+            "promoted": bool(profile.promoted or data.get("promoted")),
+            "stripe_customer_id": data.get("stripe_customer_id"),
+            "stripe_subscription_id": data.get("stripe_subscription_id"),
+            "current_period_end": data.get("current_period_end"),
+            "cancel_at_period_end": data.get("cancel_at_period_end"),
+        }
+    except Exception as exc:
+        print("⚠️ /me profile subscription lookup failed:", str(exc))
+        return {}
+    finally:
+        db.close()
+
+
+def _public_current_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
+    profile_subscription = _subscription_user_from_profile(user.get("email"), user.get("role"))
+
+    merged = {
         "id": user.get("id"),
         "email": user.get("email"),
         "role": user.get("role"),
         "full_name": user.get("full_name"),
-        "plan": user.get("plan") or "starter",
+        "plan": user.get("plan") or user.get("subscription_plan") or "starter",
         "subscription_plan": user.get("subscription_plan") or user.get("plan") or "starter",
-        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscriptionPlan": user.get("subscriptionPlan") or user.get("subscription_plan") or user.get("plan") or "starter",
+        "subscription_status": user.get("subscription_status") or user.get("subscriptionStatus") or "inactive",
         "subscriptionStatus": user.get("subscriptionStatus") or user.get("subscription_status") or "inactive",
         "visibility_tier": user.get("visibility_tier"),
         "visibilityTier": user.get("visibilityTier") or user.get("visibility_tier"),
         "featured": bool(user.get("featured", False)),
         "promoted": bool(user.get("promoted", False)),
     }
+
+    # Postgres profile fields win, because they survive Railway redeploys.
+    for key, value in profile_subscription.items():
+        if value not in (None, ""):
+            merged[key] = value
+
+    active_statuses = {"active", "trialing", "paid"}
+    current_plan = _norm(merged.get("subscription_plan") or merged.get("plan"))
+    current_status = _norm(merged.get("subscription_status") or merged.get("subscriptionStatus"))
+
+    if current_status in active_statuses and current_plan and current_plan != "starter":
+        merged["plan"] = current_plan
+        merged["subscription_plan"] = current_plan
+        merged["subscriptionPlan"] = current_plan
+        merged["subscription_status"] = current_status
+        merged["subscriptionStatus"] = current_status
+        merged["visibility_tier"] = merged.get("visibility_tier") or "premium"
+        merged["visibilityTier"] = merged.get("visibilityTier") or merged.get("visibility_tier") or "premium"
+        merged["featured"] = True if merged.get("featured") is None else bool(merged.get("featured"))
+        merged["promoted"] = True if merged.get("promoted") is None else bool(merged.get("promoted"))
+
+    return merged
+
+
+@router.get("/me")
+def get_me(user: Dict[str, Any] = Depends(get_current_user)):
+    payload = _public_current_user_payload(user)
+    # Keep the historical flat response while also supporting consumers that
+    # expect { user }.
+    return {**payload, "user": payload}
 
 @router.get("/verification/me")
 def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
