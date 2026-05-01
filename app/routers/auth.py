@@ -1465,52 +1465,48 @@ def _persist_verification_to_profile(record: Dict[str, Any], status_value: str) 
 @router.get("/verification/me")
 def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
     role = str(user.get("role") or "vendor")
+    email = str(user.get("email") or "").strip().lower()
+
     if role not in {"vendor", "organizer"}:
         raise HTTPException(
             status_code=403,
             detail="Verification is only available for vendor or organizer accounts",
         )
 
-    email = str(user.get("email") or "")
     record = dict(_get_verification(email, role, user.get("id")))
 
-    # Postgres profile verification wins when JSON is missing after redeploy.
-    durable = _verification_snapshot_from_profile(email, role)
-    if durable:
-        record.update({k: v for k, v in durable.items() if v not in (None, "")})
-        record["email"] = _norm(record.get("email") or email)
-        record["role"] = _norm(record.get("role") or role)
-        record["user_id"] = record.get("user_id") or user.get("id")
-
-    return {"verification": record}
-def verification_public_list():
-    items: List[Dict[str, Any]] = []
-
-    for _, value in list((_VERIFICATIONS or {}).items()):
-        if not isinstance(value, dict):
-            continue
-        if (value.get("role") or "").strip().lower() != "organizer":
-            continue
-
-        email = (value.get("email") or "").strip().lower()
-        if not email:
-            continue
-
-        items.append(
-            {
-                "email": email,
-                "business_name": value.get("business_name") or email,
-                "status": value.get("status") or "not_started",
-            }
+    # 🔥 RESTORE verification from Postgres
+    try:
+        db = SessionLocal()
+        profile = (
+            db.query(Profile)
+            .filter(
+                func.lower(Profile.email) == email,
+                Profile.role == role,
+            )
+            .first()
         )
 
-    deduped: Dict[str, Dict[str, Any]] = {}
-    for item in items:
-        deduped[item["email"]] = item
+        if profile:
+            data = profile.data or {}
 
-    return list(deduped.values())
+            if (
+                profile.verified is True
+                or data.get("verified") is True
+                or str(profile.verification_status or "").lower() == "verified"
+            ):
+                record["status"] = "verified"
+                record["is_verified"] = True
 
+    except Exception as e:
+        print("Verification restore failed:", e)
+    finally:
+        try:
+            db.close()
+        except:
+            pass
 
+    return {"verification": record}
 @router.get("/verification/public/{email}")
 def verification_public(email: str):
     email = (email or "").strip().lower()
