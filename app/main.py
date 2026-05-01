@@ -207,6 +207,7 @@ def health():
 
 for module_name in [
     "app.routers.admin",
+    "app.routers.presence",
     "app.routers.applications",
     "app.routers.auth",
     "app.routers.billing",
