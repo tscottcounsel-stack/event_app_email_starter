@@ -4,6 +4,10 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from app.db import get_db
+from app.models import Profile
 
 from app.routers.auth import (
     admin_create_user,
@@ -216,4 +220,53 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payment_id": payment_id,
         "payout_status": payment["payout_status"],
         "payout_sent_at": payment["payout_sent_at"],
+    }
+
+
+
+
+@router.get("/profile")
+def admin_get_profile(
+    email: str,
+    role: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+):
+    email = (email or "").strip().lower()
+    role = (role or "").strip().lower()
+
+    if not email or role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Invalid email or role")
+
+    profile = (
+        db.query(Profile)
+        .filter(
+            func.lower(Profile.email) == email,
+            Profile.role == role,
+        )
+        .one_or_none()
+    )
+
+    if not profile:
+        return {"ok": True, "exists": False}
+
+    return {
+        "ok": True,
+        "exists": True,
+        "email": profile.email,
+        "role": profile.role,
+        "display_name": getattr(profile, "display_name", None),
+        "business_name": getattr(profile, "business_name", None),
+        "city": getattr(profile, "city", None),
+        "state": getattr(profile, "state", None),
+        "verified": getattr(profile, "verified", False),
+        "verification_status": getattr(profile, "verification_status", None),
+        "public_verification_status": getattr(profile, "public_verification_status", None),
+        "review_status": getattr(profile, "review_status", None),
+        "visibility_tier": getattr(profile, "visibility_tier", None),
+        "subscription_plan": getattr(profile, "subscription_plan", None),
+        "subscription_status": getattr(profile, "subscription_status", None),
+        "featured": getattr(profile, "featured", False),
+        "promoted": getattr(profile, "promoted", False),
+        "updated_at": getattr(profile, "updated_at", None),
     }
