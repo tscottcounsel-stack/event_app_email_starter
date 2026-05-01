@@ -579,22 +579,33 @@ def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, A
         public_status = "renewal_pending" if verification_status in {"pending", "renewal_pending"} else "not_verified"
         public_label = "Renewal pending" if public_status == "renewal_pending" else "Not verified"
 
-    row.business_name = name
-    row.display_name = display_name
-    row.city = _safe_str(data.get("city"))
-    row.state = _safe_str(data.get("state"))
-    row.categories = categories
-    row.data = {**dict(data or {}), "email": email}
-    row.verified = verified
-    row.verification_status = verification_status or None
-    row.public_verification_status = public_status or None
-    row.public_verification_label = public_label or None
-    row.review_status = review_status or None
-    row.visibility_tier = _safe_str(data.get("visibility_tier") or data.get("visibilityTier")) or None
-    row.subscription_plan = _safe_str(data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan")) or None
-    row.subscription_status = _safe_str(data.get("subscription_status") or data.get("subscriptionStatus")) or None
-    row.featured = bool(data.get("featured"))
-    row.promoted = bool(data.get("promoted"))
+    existing_data = dict(row.data or {})
+    merged_data = {**existing_data, **dict(data or {}), "email": email}
+
+    row.business_name = name or row.business_name
+    row.display_name = display_name or row.display_name
+    row.city = _safe_str(data.get("city")) or row.city
+    row.state = _safe_str(data.get("state")) or row.state
+    row.categories = categories or row.categories or []
+    row.data = merged_data
+    row.verified = bool(verified or row.verified)
+    row.verification_status = verification_status or row.verification_status
+    row.public_verification_status = public_status or row.public_verification_status
+    row.public_verification_label = public_label or row.public_verification_label
+    row.review_status = review_status or row.review_status
+
+    incoming_visibility_tier = _safe_str(data.get("visibility_tier") or data.get("visibilityTier"))
+    incoming_subscription_plan = _safe_str(data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan"))
+    incoming_subscription_status = _safe_str(data.get("subscription_status") or data.get("subscriptionStatus"))
+
+    row.visibility_tier = incoming_visibility_tier or row.visibility_tier
+    row.subscription_plan = incoming_subscription_plan or row.subscription_plan
+    row.subscription_status = incoming_subscription_status or row.subscription_status
+
+    if "featured" in data:
+        row.featured = bool(data.get("featured"))
+    if "promoted" in data:
+        row.promoted = bool(data.get("promoted"))
 
     db.commit()
     db.refresh(row)
