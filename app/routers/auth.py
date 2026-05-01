@@ -15,6 +15,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 
+from sqlalchemy import func
+from app.db import SessionLocal
+from app.models.profile import Profile
+
 from app.store import _VERIFICATIONS, save_store
 
 try:
@@ -1853,6 +1857,38 @@ def review_verification(
     record["reviewed_by"] = str(user.get("email") or "").strip().lower() or None
 
     _save_verification_record(record)
+
+# Persist verification to Postgres so it survives redeploy
+if status_value == "verified":
+    try:
+        db = SessionLocal()
+        profile = (
+            db.query(Profile)
+            .filter(
+                func.lower(Profile.email) == str(record.get("email") or "").strip().lower(),
+                Profile.role == str(record.get("role") or "").strip().lower(),
+            )
+            .first()
+        )
+
+        if profile:
+            data = profile.data or {}
+            data["verified"] = True
+            data["verification_status"] = "verified"
+            profile.data = data
+            profile.verified = True
+            profile.verification_status = "verified"
+            profile.public_verification_status = "verified"
+            profile.public_verification_label = "Verified"
+
+            db.commit()
+    except Exception as e:
+        print("Persist verified failed:", e)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
     if status_value == "verified":
         try:
