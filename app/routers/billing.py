@@ -9,8 +9,6 @@ from pydantic import BaseModel, ConfigDict
 
 from app.routers.auth import _USERS, _USERS_BY_EMAIL, _persist_users, get_current_user
 
-from app.store import _VENDORS, save_store
-
 try:
     import stripe
 except Exception:
@@ -30,27 +28,6 @@ class CheckoutSessionRequest(BaseModel):
 class PortalSessionRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     return_url: str
-
-
-class ConnectAccountLinkRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    return_url: Optional[str] = None
-    refresh_url: Optional[str] = None
-
-
-def _public_app_url() -> str:
-    for name in (
-        "PUBLIC_APP_URL",
-        "APP_BASE_URL",
-        "FRONTEND_BASE_URL",
-        "FRONTEND_URL",
-        "VITE_PUBLIC_APP_URL",
-        "VITE_FRONTEND_URL",
-    ):
-        value = (os.getenv(name) or "").strip().rstrip("/")
-        if value:
-            return value
-    return "https://vendcore.co"
 
 
 def _require_stripe() -> Any:
@@ -84,35 +61,6 @@ def _price_id_to_plan(price_id: Optional[str]) -> str:
         (os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER") or "").strip(): "enterprise_organizer",
     }
     return mapping.get(price_id, "starter")
-
-
-def is_active_paid_subscription(user: Dict[str, Any]) -> bool:
-    plan = str(user.get("plan") or "starter").strip().lower()
-    status = str(user.get("subscription_status") or "inactive").strip().lower()
-
-    return (
-        plan in {"pro_vendor", "enterprise_organizer"}
-        and status in {"active", "trialing", "paid"}
-    )
-
-
-def get_platform_fee_percent(user: Dict[str, Any]) -> float:
-    """
-    VendCore platform fee policy:
-    - Starter/free users: 5%
-    - Active paid subscribers: 3%
-
-    Return value is a decimal percentage, e.g. 0.05 = 5%.
-    """
-    return 0.03 if is_active_paid_subscription(user) else 0.05
-
-
-def get_platform_fee_basis_points(user: Dict[str, Any]) -> int:
-    return int(round(get_platform_fee_percent(user) * 10_000))
-
-
-def get_platform_fee_label(user: Dict[str, Any]) -> str:
-    return "3%" if is_active_paid_subscription(user) else "5%"
 
 
 def _to_iso(ts: Any) -> Optional[str]:
@@ -160,62 +108,6 @@ def _set_customer_fields(
     if subscription_id:
         user["stripe_subscription_id"] = subscription_id
 
-def _sync_vendor_premium_from_subscription(user: Dict[str, Any]) -> None:
-    email = str(user.get("email") or "").strip().lower()
-    role = str(user.get("role") or "").strip().lower()
-    plan = str(user.get("plan") or "starter").strip().lower()
-    status = str(user.get("subscription_status") or "inactive").strip().lower()
-
-    if role != "vendor" or not email:
-        return
-
-    vendor = _VENDORS.get(email)
-    if not isinstance(vendor, dict):
-        return
-
-    is_premium = plan == "pro_vendor" and status in {"active", "trialing", "paid"}
-
-    vendor["plan"] = plan
-    vendor["subscription_plan"] = plan
-    vendor["subscription_status"] = status
-    vendor["featured"] = is_premium
-    vendor["promoted"] = is_premium
-    vendor["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
-
-    save_store()
-
-def _sync_organizer_premium_from_subscription(user: Dict[str, Any]) -> None:
-    email = str(user.get("email") or "").strip().lower()
-    role = str(user.get("role") or "").strip().lower()
-    plan = str(user.get("plan") or "starter").strip().lower()
-    status = str(user.get("subscription_status") or "inactive").strip().lower()
-
-    if role != "organizer" or not email:
-        return
-
-    try:
-        from app.routers.organizers import _load_profiles, _save_profiles
-    except Exception as exc:
-        print("⚠️ Organizer premium sync skipped:", str(exc))
-        return
-
-    profiles = _load_profiles()
-    profile = profiles.get(email)
-
-    if not isinstance(profile, dict):
-        return
-
-    is_premium = plan == "enterprise_organizer" and status in {"active", "trialing", "paid"}
-
-    profile["plan"] = plan
-    profile["subscription_plan"] = plan
-    profile["subscription_status"] = status
-    profile["featured"] = is_premium
-    profile["promoted"] = is_premium
-    profile["updatedAt"] = datetime.now(tz=timezone.utc).isoformat()
-
-    profiles[email] = profile
-    _save_profiles(profiles)
 
 def _apply_subscription_state(
     user: Dict[str, Any],
@@ -243,9 +135,8 @@ def _apply_subscription_state(
         user["stripe_subscription_id"] = None
         user["cancel_at_period_end"] = False
 
-    _sync_vendor_premium_from_subscription(user)
-    _sync_organizer_premium_from_subscription(user)
     _save_user_updates(user)
+
 
 def _extract_subscription_price_id(subscription: Any) -> Optional[str]:
     try:
@@ -307,15 +198,9 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             if user:
                 return user
 
-        # Prefer our checkout metadata first because Stripe customer_email can be empty
-        # when an existing customer is attached to the session.
-        email = str(metadata.get("email") or "").strip().lower()
-
-        if not email:
-            raw_email = getattr(session, "customer_email", None)
-            if raw_email is None and isinstance(session, dict):
-                raw_email = session.get("customer_email")
-            email = str(raw_email or "").strip().lower()
+        email = getattr(session, "customer_email", None)
+        if not email and isinstance(session, dict):
+            email = session.get("customer_email")
 
         if not email:
             customer_details = getattr(session, "customer_details", None)
@@ -323,9 +208,12 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
                 customer_details = session.get("customer_details") or {}
 
             if isinstance(customer_details, dict):
-                email = str(customer_details.get("email") or "").strip().lower()
+                email = customer_details.get("email")
             else:
-                email = str(getattr(customer_details, "email", "") or "").strip().lower()
+                email = getattr(customer_details, "email", None)
+
+        if not email:
+            email = metadata.get("email")
 
         if email:
             user = _lookup_user(email=email)
@@ -340,6 +228,7 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         print("🔥 USER LOOKUP ERROR:", str(exc))
         return None
+
 
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
@@ -378,177 +267,6 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     return True
 
 
-@router.get("/platform-fee")
-def get_current_platform_fee(user: dict = Depends(get_current_user)):
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email")) or user
-    fee_percent = get_platform_fee_percent(lookup)
-
-    return {
-        "ok": True,
-        "plan": str(lookup.get("plan") or "starter"),
-        "subscription_status": str(lookup.get("subscription_status") or "inactive"),
-        "is_paid_subscriber": is_active_paid_subscription(lookup),
-        "platform_fee_percent": fee_percent,
-        "platform_fee_basis_points": get_platform_fee_basis_points(lookup),
-        "platform_fee_label": get_platform_fee_label(lookup),
-        "policy": {
-            "starter": "5% platform fee on paid booth transactions",
-            "paid_subscription": "3% platform fee on paid booth transactions",
-        },
-    }
-
-
-@router.post("/connect/account")
-def create_connect_account(user: dict = Depends(get_current_user)):
-    stripe_sdk = _require_stripe()
-
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
-    if lookup is None:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    if str(lookup.get("role") or "").strip().lower() != "organizer":
-        raise HTTPException(status_code=403, detail="Stripe Connect is only available for organizer accounts")
-
-    existing_account_id = str(
-        lookup.get("stripe_connect_account_id")
-        or lookup.get("stripe_account_id")
-        or ""
-    ).strip()
-
-    if existing_account_id:
-        try:
-            account = stripe_sdk.Account.retrieve(existing_account_id)
-            return {
-                "ok": True,
-                "account_id": existing_account_id,
-                "charges_enabled": bool(getattr(account, "charges_enabled", False)),
-                "payouts_enabled": bool(getattr(account, "payouts_enabled", False)),
-                "details_submitted": bool(getattr(account, "details_submitted", False)),
-            }
-        except Exception:
-            # If the account was deleted in Stripe, create a fresh one below.
-            pass
-
-    try:
-        account = stripe_sdk.Account.create(
-            type="express",
-            email=str(lookup.get("email") or "") or None,
-            country=(os.getenv("STRIPE_CONNECT_COUNTRY") or "US").strip() or "US",
-            capabilities={
-                "card_payments": {"requested": True},
-                "transfers": {"requested": True},
-            },
-            metadata={
-                "user_id": str(lookup.get("id") or ""),
-                "email": str(lookup.get("email") or ""),
-                "role": str(lookup.get("role") or "organizer"),
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe Connect account failed: {exc}")
-
-    account_id = str(getattr(account, "id", "") or "").strip()
-    lookup["stripe_connect_account_id"] = account_id
-    lookup["stripe_account_id"] = account_id
-    lookup["stripe_connect_charges_enabled"] = bool(getattr(account, "charges_enabled", False))
-    lookup["stripe_connect_payouts_enabled"] = bool(getattr(account, "payouts_enabled", False))
-    lookup["stripe_connect_details_submitted"] = bool(getattr(account, "details_submitted", False))
-    _save_user_updates(lookup)
-
-    return {
-        "ok": True,
-        "account_id": account_id,
-        "charges_enabled": lookup["stripe_connect_charges_enabled"],
-        "payouts_enabled": lookup["stripe_connect_payouts_enabled"],
-        "details_submitted": lookup["stripe_connect_details_submitted"],
-    }
-
-
-@router.post("/connect/onboarding-link")
-def create_connect_onboarding_link(
-    payload: ConnectAccountLinkRequest,
-    user: dict = Depends(get_current_user),
-):
-    stripe_sdk = _require_stripe()
-
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
-    if lookup is None:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    if str(lookup.get("role") or "").strip().lower() != "organizer":
-        raise HTTPException(status_code=403, detail="Stripe Connect is only available for organizer accounts")
-
-    account_id = str(
-        lookup.get("stripe_connect_account_id")
-        or lookup.get("stripe_account_id")
-        or ""
-    ).strip()
-
-    if not account_id:
-        created = create_connect_account(user)
-        account_id = str(created.get("account_id") or "").strip()
-
-    base_url = _public_app_url()
-    return_url = str(payload.return_url or f"{base_url}/organizer/settings?stripe=connected").strip()
-    refresh_url = str(payload.refresh_url or f"{base_url}/organizer/settings?stripe=refresh").strip()
-
-    try:
-        link = stripe_sdk.AccountLink.create(
-            account=account_id,
-            refresh_url=refresh_url,
-            return_url=return_url,
-            type="account_onboarding",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe Connect onboarding failed: {exc}")
-
-    return {"ok": True, "url": link.url, "account_id": account_id}
-
-
-@router.get("/connect/status")
-def get_connect_status(user: dict = Depends(get_current_user)):
-    stripe_sdk = _require_stripe()
-
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
-    if lookup is None:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    account_id = str(
-        lookup.get("stripe_connect_account_id")
-        or lookup.get("stripe_account_id")
-        or ""
-    ).strip()
-
-    if not account_id:
-        return {
-            "ok": True,
-            "connected": False,
-            "account_id": None,
-            "charges_enabled": False,
-            "payouts_enabled": False,
-            "details_submitted": False,
-        }
-
-    try:
-        account = stripe_sdk.Account.retrieve(account_id)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe Connect status failed: {exc}")
-
-    lookup["stripe_connect_charges_enabled"] = bool(getattr(account, "charges_enabled", False))
-    lookup["stripe_connect_payouts_enabled"] = bool(getattr(account, "payouts_enabled", False))
-    lookup["stripe_connect_details_submitted"] = bool(getattr(account, "details_submitted", False))
-    _save_user_updates(lookup)
-
-    return {
-        "ok": True,
-        "connected": True,
-        "account_id": account_id,
-        "charges_enabled": lookup["stripe_connect_charges_enabled"],
-        "payouts_enabled": lookup["stripe_connect_payouts_enabled"],
-        "details_submitted": lookup["stripe_connect_details_submitted"],
-    }
-
-
 @router.post("/create-checkout-session")
 def create_checkout_session(
     payload: CheckoutSessionRequest,
@@ -583,7 +301,6 @@ def create_checkout_session(
             "email": str(lookup.get("email") or ""),
             "plan": plan,
             "role": str(lookup.get("role") or ""),
-            "platform_fee_policy": "paid_subscribers_3_percent_otherwise_5_percent",
         },
         "subscription_data": {
             "metadata": {
@@ -591,7 +308,6 @@ def create_checkout_session(
                 "email": str(lookup.get("email") or ""),
                 "plan": plan,
                 "role": str(lookup.get("role") or ""),
-                "platform_fee_policy": "paid_subscribers_3_percent_otherwise_5_percent",
             }
         },
         "allow_promotion_codes": True,
@@ -671,89 +387,14 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
-            metadata = _extract_metadata(data_object)
+            user = _find_user_from_checkout_session(data_object)
 
-            session_id = str(getattr(data_object, "id", None) or "").strip() or None
             customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
             subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
-            payment_intent_id = str(getattr(data_object, "payment_intent", None) or "").strip() or None
-            amount_total = getattr(data_object, "amount_total", None)
 
             if isinstance(data_object, dict):
-                session_id = str(data_object.get("id") or "").strip() or session_id
                 customer_id = str(data_object.get("customer") or "").strip() or customer_id
                 subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
-                payment_intent_id = str(data_object.get("payment_intent") or "").strip() or payment_intent_id
-                amount_total = data_object.get("amount_total", amount_total)
-
-            # Verification checkout metadata may live on the PaymentIntent/Charge
-            # even when the Checkout Session metadata is empty.
-            payment_intent_metadata: Dict[str, Any] = {}
-            if payment_intent_id:
-                try:
-                    payment_intent = stripe_sdk.PaymentIntent.retrieve(payment_intent_id)
-                    payment_intent_metadata = _extract_metadata(payment_intent)
-                    if payment_intent_metadata:
-                        print("🔥 Using PaymentIntent metadata:", dict(payment_intent_metadata))
-                except Exception as exc:
-                    print("⚠️ PI metadata fetch failed:", str(exc))
-
-            effective_metadata = dict(metadata or {})
-            if payment_intent_metadata:
-                effective_metadata.update(payment_intent_metadata)
-
-            payment_type = str(effective_metadata.get("payment_type") or "").strip().lower()
-            is_verification_payment = (
-                payment_type == "verification_fee"
-                or str(effective_metadata.get("verification") or "").strip().lower() == "true"
-            )
-
-            if is_verification_payment:
-                try:
-                    from app.routers.auth import _get_verification, _save_verification_record
-
-                    email = str(effective_metadata.get("email") or "").strip().lower()
-                    role = str(effective_metadata.get("role") or "").strip().lower()
-
-                    if role not in {"vendor", "organizer"}:
-                        role = "vendor"
-
-                    if not email:
-                        raise ValueError(f"Verification payment metadata missing email: {effective_metadata}")
-
-                    record = _get_verification(email, role)
-                    record["email"] = email
-                    record["role"] = role
-                    record["fee_paid"] = True
-                    record["payment_status"] = "paid"
-                    record["paid_at"] = int(datetime.now(tz=timezone.utc).timestamp())
-                    record["last_session_id"] = session_id
-                    record["stripe_session_id"] = session_id
-                    record["payment_intent_id"] = payment_intent_id
-                    record["stripe_payment_intent_id"] = payment_intent_id
-                    record["payment_confirmed_by"] = "billing_webhook"
-                    record["amount_paid"] = round(float(amount_total or 0) / 100, 2)
-
-                    if not record.get("status") or str(record.get("status") or "").strip().lower() in {"unpaid", "not_submitted"}:
-                        record["status"] = "not_started"
-
-                    _save_verification_record(record)
-
-                    print(
-                        "✅ Verification payment applied directly:",
-                        {
-                            "email": record.get("email"),
-                            "role": record.get("role"),
-                            "session_id": record.get("last_session_id"),
-                            "payment_intent_id": record.get("payment_intent_id"),
-                        },
-                    )
-                except Exception as exc:
-                    print("🔥 Verification payment webhook error:", str(exc))
-
-                return {"received": True, "event_type": event_type}
-
-            user = _find_user_from_checkout_session(data_object)
 
             if user:
                 _set_customer_fields(user, customer_id=customer_id, subscription_id=subscription_id)
@@ -766,30 +407,19 @@ async def stripe_webhook(request: Request):
                         plan = _price_id_to_plan(price_id)
 
                         if plan and plan != "starter":
-                            _apply_subscription_state(
-                                user,
-                                plan=plan,
-                                subscription_status=str(getattr(subscription, "status", None) or "active"),
-                                customer_id=customer_id,
-                                subscription_id=subscription_id,
-                                current_period_end=getattr(subscription, "current_period_end", None),
-                                cancel_at_period_end=bool(getattr(subscription, "cancel_at_period_end", False)),
-                            )
+                            user["plan"] = plan
+                            user["subscription_status"] = "active"
+                            _save_user_updates(user)
                     except Exception as exc:
                         print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
                 else:
-                    plan = str(effective_metadata.get("plan") or "").strip().lower()
+                    metadata = _extract_metadata(data_object)
+                    plan = str(metadata.get("plan") or "").strip().lower()
 
                     if plan:
-                        _apply_subscription_state(
-                            user,
-                            plan=plan,
-                            subscription_status="active",
-                            customer_id=customer_id,
-                            subscription_id=subscription_id,
-                            current_period_end=None,
-                            cancel_at_period_end=False,
-                        )
+                        user["plan"] = plan
+                        user["subscription_status"] = "active"
+                        _save_user_updates(user)
             else:
                 print("⚠️ No user found for checkout session")
         except Exception as exc:
