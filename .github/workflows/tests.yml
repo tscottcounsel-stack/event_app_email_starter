@@ -1,4 +1,4 @@
-﻿name: Tests (All Branches)
+name: Tests (All Branches)
 
 on:
   push:
@@ -113,7 +113,7 @@ jobs:
           retention-days: 7
 
       - name: Upload coverage to Codecov (Linux)
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v6
         with:
           files: ./coverage.xml
           flags: linux
@@ -178,7 +178,7 @@ jobs:
           retention-days: 7
 
       - name: Upload coverage to Codecov (Windows)
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v6
         with:
           files: ./coverage.xml
           flags: windows
