@@ -940,23 +940,39 @@ def get_admin_verifications(db: Session = Depends(get_db)):
 
     by_identity: Dict[str, Dict[str, Any]] = {}
 
-    for raw_record in _VERIFICATIONS.values():
-        if not isinstance(raw_record, dict):
-            continue
+   for raw_record in _VERIFICATIONS.values():
 
-        email = _safe_lower(raw_record.get("email"))
-        role = _safe_lower(raw_record.get("role"))
-        if not email or role not in VALID_ROLES:
-            continue
+    if not isinstance(raw_record, dict):
+        continue
 
-        public = _public_record(raw_record)
-        key = f"{role}:{email}"
-        public = _apply_profile_truth(public, profile_by_key.get(key))
+    email = _safe_lower(raw_record.get("email"))
+    role = _safe_lower(raw_record.get("role"))
 
-        existing = by_identity.get(key)
-        if existing is None:
-            by_identity[key] = public
-            continue
+    if not email or role not in VALID_ROLES:
+        continue
+
+    public = _public_record(raw_record)
+
+    # ✅ FETCH PROFILE FIRST
+    profile = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    # 🚫 THEN FILTER
+    if (
+        profile
+        and (
+            profile.verified
+            or _safe_lower(profile.public_verification_status) == "verified"
+            or _safe_lower(profile.review_status) == "approved"
+        )
+    ):
+        continue
+
+    # ✅ THEN APPEND
+    records.append(public)
 
         # Prefer the strongest durable status, then newest submission metadata.
         existing_rank = _verification_status_rank(
