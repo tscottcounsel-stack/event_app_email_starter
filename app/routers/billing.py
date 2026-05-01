@@ -6,7 +6,10 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func
 
+from app.db import SessionLocal
+from app.models.profile import Profile
 from app.routers.auth import _USERS, _USERS_BY_EMAIL, _persist_users, get_current_user
 
 try:
@@ -92,9 +95,69 @@ def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optiona
     return None
 
 
+
+def _sync_profile_subscription_from_user(user: Dict[str, Any]) -> None:
+    """Mirror billing subscription state into the persistent Profile row.
+
+    The auth user JSON is still used for login/session data, but marketplace
+    status badges and admin tools read Profile from Postgres. This function keeps
+    those two layers aligned without touching verification fields.
+    """
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return
+
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+    is_active_paid = status in {"active", "trialing", "paid"}
+    is_premium_plan = (
+        (role == "vendor" and plan == "pro_vendor")
+        or (role == "organizer" and plan == "enterprise_organizer")
+        or any(token in plan for token in ["premium", "pro", "growth", "enterprise"])
+    )
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .one_or_none()
+        )
+
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+
+        existing_data = profile.data if isinstance(profile.data, dict) else {}
+        profile.data = {
+            **existing_data,
+            "email": email,
+            "plan": plan,
+            "subscription_plan": plan,
+            "subscription_status": status,
+            "subscriptionStatus": status,
+        }
+        profile.subscription_plan = plan
+        profile.subscription_status = status
+
+        if is_active_paid and is_premium_plan:
+            profile.visibility_tier = "premium"
+            profile.featured = True
+            profile.promoted = True
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Profile subscription sync skipped:", str(exc))
+    finally:
+        db.close()
+
 def _save_user_updates(user: Dict[str, Any]) -> None:
     user["updated_at"] = int(datetime.now(tz=timezone.utc).timestamp())
     _persist_users()
+    _sync_profile_subscription_from_user(user)
 
 
 def _set_customer_fields(

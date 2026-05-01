@@ -28,6 +28,16 @@ class AdminAccountCreateRequest(BaseModel):
     username: str | None = None
 
 
+class AdminProfilePremiumRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    email: str
+    role: str
+    featured: bool = True
+    promoted: bool | None = None
+
+
+
 def require_admin(user: dict = Depends(get_current_user)) -> dict:
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Inactive account")
@@ -198,6 +208,61 @@ def admin_get_profile(
         return {"ok": True, "exists": False, "email": email, "role": role}
 
     return _profile_payload(profile)
+
+
+@router.post("/profile/premium")
+def admin_set_profile_premium(
+    payload: AdminProfilePremiumRequest,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+):
+    email = _safe_lower(payload.email)
+    role = _safe_lower(payload.role)
+
+    if not email or role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Invalid email or role")
+
+    profile = (
+        db.query(Profile)
+        .filter(func.lower(Profile.email) == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    if profile is None:
+        profile = Profile(email=email, role=role)
+        db.add(profile)
+
+    promoted = payload.featured if payload.promoted is None else bool(payload.promoted)
+    data = profile.data if isinstance(profile.data, dict) else {}
+
+    profile.featured = bool(payload.featured)
+    profile.promoted = promoted
+    profile.visibility_tier = "premium" if payload.featured or promoted else (profile.visibility_tier or "standard")
+
+    if role == "organizer":
+        plan = profile.subscription_plan or data.get("subscription_plan") or data.get("plan") or "enterprise_organizer"
+    else:
+        plan = profile.subscription_plan or data.get("subscription_plan") or data.get("plan") or "pro_vendor"
+
+    profile.subscription_plan = str(plan).strip().lower()
+    profile.subscription_status = profile.subscription_status or data.get("subscription_status") or "active"
+    profile.data = {
+        **data,
+        "email": email,
+        "plan": profile.subscription_plan,
+        "subscription_plan": profile.subscription_plan,
+        "subscription_status": profile.subscription_status,
+        "subscriptionStatus": profile.subscription_status,
+        "visibility_tier": profile.visibility_tier,
+        "visibilityTier": profile.visibility_tier,
+        "featured": profile.featured,
+        "promoted": profile.promoted,
+    }
+
+    db.commit()
+    db.refresh(profile)
+
+    return {"ok": True, "profile": _profile_payload(profile)}
 
 
 @router.get("/payments")
