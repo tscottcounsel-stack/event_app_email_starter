@@ -543,10 +543,9 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 @router.get("/admin/verifications")
 def get_admin_verifications(db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
     rows = db.query(Profile).filter(Profile.role.in_(["vendor", "organizer"])).all()
-    records = [_profile_public(row) for row in rows if _is_pending_queue_row(row)]
+    records = [_profile_public(row) for row in rows]
     records.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
     return {"ok": True, "verifications": records, "count": len(records)}
-
 
 @router.post("/admin/verify/{verification_id}")
 def review_verification(verification_id: int, payload: Dict[str, Any], db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
