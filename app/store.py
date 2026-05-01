@@ -490,20 +490,3 @@ def get_or_create_application(
         save_store()
         return application
 
-@router.post("/admin/force-verify-vendor")
-def force_verify_vendor(payload: dict):
-    from app.store import _VENDORS, save_store
-
-    email = payload.get("email").lower()
-
-    v = _VENDORS.get(email)
-    if not v:
-        return {"error": "not found"}
-
-    v["verified"] = True
-    v["verification_status"] = "verified"
-    v["public_verification_status"] = "verified"
-
-    save_store()
-
-    return {"ok": True}
