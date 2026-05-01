@@ -849,68 +849,122 @@ def get_verification_status(email: str, role: str = ""):
     }
 
 
-@router.get("/admin/verifications")
-def get_admin_verifications(db: Session = Depends(get_db)):
-    """Return the admin verification queue with Postgres Profile as the durable truth.
 
-    _VERIFICATIONS is still used for submitted documents/payment metadata, but
-    approval/rejection status must be reconciled from Profile so redeploys or
-    stale JSON records cannot make verified accounts appear pending again.
-    """
-    records: List[Dict[str, Any]] = []
+def _get_verification_record_by_id(verification_id: Any) -> tuple[Any, Optional[Dict[str, Any]]]:
+    """Find verification records even when JSON reloads int keys as strings."""
+    candidates = [verification_id, _safe_str(verification_id)]
+    try:
+        candidates.append(int(verification_id))
+    except Exception:
+        pass
 
-    for record in _VERIFICATIONS.values():
+    for key in candidates:
+        if key in _VERIFICATIONS and isinstance(_VERIFICATIONS.get(key), dict):
+            return key, _VERIFICATIONS[key]
+
+    target = _safe_str(verification_id)
+    for key, record in _VERIFICATIONS.items():
         if not isinstance(record, dict):
             continue
+        if _safe_str(record.get("id")) == target or _safe_str(record.get("user_id")) == target:
+            return key, record
 
-        email = _safe_lower(record.get("email"))
-        role = _safe_lower(record.get("role"))
-        public = _public_record(record)
+    return None, None
 
-        profile = None
-        if email and role in VALID_ROLES:
-            profile = (
-                db.query(Profile)
-                .filter(Profile.email == email, Profile.role == role)
-                .one_or_none()
-            )
+
+@router.get("/admin/verifications")
+def get_admin_verifications(db: Session = Depends(get_db)):
+    """Return only actionable verification records.
+
+    Postgres Profile is the durable source of truth. JSON verification records are
+    kept only for submitted document/payment metadata. If Postgres already says an
+    account is verified/approved, that user must not reappear in the pending queue
+    after a Railway redeploy.
+    """
+    by_identity: Dict[str, Dict[str, Any]] = {}
+
+    for raw_record in _VERIFICATIONS.values():
+        if not isinstance(raw_record, dict):
+            continue
+
+        email = _safe_lower(raw_record.get("email"))
+        role = _safe_lower(raw_record.get("role"))
+        if not email or role not in VALID_ROLES:
+            continue
+
+        profile = (
+            db.query(Profile)
+            .filter(Profile.email == email, Profile.role == role)
+            .one_or_none()
+        )
 
         if profile is not None:
             profile_verification_status = _safe_lower(profile.verification_status)
             profile_public_status = _safe_lower(profile.public_verification_status)
             profile_review_status = _safe_lower(profile.review_status)
 
+            # Hard stop: verified/approved profiles are already complete, so they
+            # should never be returned as pending/actionable queue rows.
+            if (
+                bool(profile.verified)
+                or profile_public_status == "verified"
+                or profile_review_status == "approved"
+                or profile_verification_status == "verified"
+            ):
+                continue
+
+        public = _public_record(raw_record)
+
+        if profile is not None:
             public["verified"] = bool(profile.verified)
             public["is_verified"] = bool(profile.verified)
             public["verification_status"] = profile_verification_status or public.get("verification_status")
             public["public_verification_status"] = profile_public_status or public.get("public_verification_status")
             public["public_verification_label"] = profile.public_verification_label or public.get("public_verification_label")
             public["review_status"] = profile_review_status or public.get("review_status")
-
-            # The frontend filters and badges by `status`, so force stale JSON
-            # pending records to show the durable Postgres truth.
-            if profile.verified or profile_public_status == "verified" or profile_review_status == "approved":
-                public["status"] = "verified"
-            elif profile_review_status == "rejected" or profile_verification_status == "rejected":
-                public["status"] = "rejected"
-            elif profile_verification_status in {"expired", "expiring_soon", "needs_renewal"}:
-                public["status"] = profile_verification_status
-
             public["subscription_plan"] = profile.subscription_plan
             public["subscription_status"] = profile.subscription_status
             public["visibility_tier"] = profile.visibility_tier
             public["featured"] = bool(profile.featured)
             public["promoted"] = bool(profile.promoted)
 
-        records.append(public)
+            if profile_review_status == "rejected" or profile_verification_status == "rejected":
+                public["status"] = "rejected"
+            elif profile_verification_status in {"expired", "expiring_soon", "needs_renewal", "renewal_pending"}:
+                public["status"] = profile_verification_status
 
+        key = f"{role}:{email}"
+        existing = by_identity.get(key)
+        if existing is None:
+            by_identity[key] = public
+            continue
+
+        # Keep the newest actionable row and merge document lists so uploads do not vanish.
+        existing_time = _safe_str(existing.get("submitted_at") or existing.get("created_at") or "")
+        public_time = _safe_str(public.get("submitted_at") or public.get("created_at") or "")
+        keep = public if public_time >= existing_time else existing
+        other = existing if keep is public else public
+
+        keep_docs = keep.get("documents") if isinstance(keep.get("documents"), list) else []
+        other_docs = other.get("documents") if isinstance(other.get("documents"), list) else []
+        seen = set()
+        merged_docs = []
+        for doc in [*keep_docs, *other_docs]:
+            if not isinstance(doc, dict):
+                continue
+            marker = _safe_str(doc.get("url") or doc.get("name") or doc.get("label") or doc.get("type"))
+            if marker and marker in seen:
+                continue
+            if marker:
+                seen.add(marker)
+            merged_docs.append(doc)
+        keep["documents"] = merged_docs
+        by_identity[key] = keep
+
+    records = list(by_identity.values())
     records.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
 
-    return {
-        "ok": True,
-        "verifications": records,
-        "count": len(records),
-    }
+    return {"ok": True, "verifications": records, "count": len(records)}
 
 
 @router.post("/admin/verify/{verification_id}")
@@ -919,7 +973,7 @@ def review_verification(
     payload: Dict[str, Any],
     db: Session = Depends(get_db),
 ):
-    record = _VERIFICATIONS.get(verification_id)
+    record_key, record = _get_verification_record_by_id(verification_id)
 
     if not isinstance(record, dict):
         raise HTTPException(status_code=404, detail="Verification not found")
@@ -972,8 +1026,39 @@ def review_verification(
         record["public_verification_label"] = "Not verified"
         record["locked"] = True
 
-    save_store()
+    reviewed_email = _safe_lower(record.get("email"))
+    reviewed_role = _safe_lower(record.get("role"))
+
+    if status == "verified" and reviewed_email and reviewed_role:
+        # Once approved, Postgres Profile becomes the durable source of truth.
+        # Remove duplicate JSON rows so stale pending records cannot return after redeploy.
+        keys_to_delete = []
+        for key, other in list(_VERIFICATIONS.items()):
+            if not isinstance(other, dict):
+                continue
+            if _safe_lower(other.get("email")) == reviewed_email and _safe_lower(other.get("role")) == reviewed_role:
+                keys_to_delete.append(key)
+        for key in keys_to_delete:
+            _VERIFICATIONS.pop(key, None)
+    elif reviewed_email and reviewed_role:
+        # For rejection, mirror rejection to duplicate rows.
+        for other in _VERIFICATIONS.values():
+            if not isinstance(other, dict) or other is record:
+                continue
+            if _safe_lower(other.get("email")) == reviewed_email and _safe_lower(other.get("role")) == reviewed_role:
+                other["status"] = record.get("status")
+                other["verified"] = record.get("verified")
+                other["is_verified"] = record.get("is_verified")
+                other["verification_status"] = record.get("verification_status")
+                other["review_status"] = record.get("review_status")
+                other["public_verification_status"] = record.get("public_verification_status")
+                other["public_verification_label"] = record.get("public_verification_label")
+                other["reviewed_at"] = record.get("reviewed_at")
+                other["reviewed_by"] = record.get("reviewed_by")
+                other["locked"] = True
+
     _sync_profile_from_verification(db, record)
+    save_store()
 
     return {
         "ok": True,
