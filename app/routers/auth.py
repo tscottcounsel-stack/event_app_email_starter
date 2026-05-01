@@ -1331,6 +1331,138 @@ def get_me(user: Dict[str, Any] = Depends(get_current_user)):
     return {**payload, "user": payload}
 
 @router.get("/verification/me")
+
+def _verification_snapshot_from_profile(email: Optional[str], role: Optional[str]) -> Dict[str, Any]:
+    """Return durable verification fields from Postgres profiles.
+
+    The JSON verification store can be lost on Railway redeploy. The profiles
+    table is the durable source of truth for approved verification badges.
+    """
+    normalized_email = _norm(email)
+    normalized_role = _norm(role)
+    if not normalized_email or normalized_role not in {"vendor", "organizer"}:
+        return {}
+    if SessionLocal is None:
+        return {}
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == normalized_email, Profile.role == normalized_role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if profile is None:
+            return {}
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+        status_value = _norm(
+            profile.verification_status
+            or profile.public_verification_status
+            or data.get("verification_status")
+            or data.get("verificationStatus")
+            or data.get("status")
+        )
+        verified = bool(profile.verified or data.get("verified") is True or status_value in {"verified", "approved"})
+
+        if not verified and status_value not in {"verified", "approved"}:
+            return {}
+
+        return {
+            "status": "verified",
+            "verification_status": "verified",
+            "public_verification_status": "verified",
+            "public_verification_label": profile.public_verification_label or data.get("public_verification_label") or "Verified",
+            "is_verified": True,
+            "verified": True,
+            "last_verified_at": data.get("last_verified_at") or data.get("reviewed_at"),
+            "reviewed_at": data.get("reviewed_at"),
+            "reviewed_by": data.get("reviewed_by"),
+        }
+    except Exception as exc:
+        print("Verification profile restore skipped:", exc)
+        return {}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _persist_verification_to_profile(record: Dict[str, Any], status_value: str) -> None:
+    """Mirror admin verification review into Postgres profiles.
+
+    JSON remains for legacy admin/payment flows, but Postgres must carry the
+    approved/rejected/pending state so it survives Railway redeploys.
+    """
+    email = _norm(record.get("email"))
+    role = _norm(record.get("role"))
+    status_norm = _norm(status_value)
+    if not email or role not in {"vendor", "organizer"} or status_norm not in {"verified", "rejected", "pending"}:
+        return
+    if SessionLocal is None:
+        return
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+
+        existing_data = profile.data if isinstance(profile.data, dict) else {}
+        data = {
+            **existing_data,
+            "verified": status_norm == "verified",
+            "verification_status": status_norm,
+            "verificationStatus": status_norm,
+            "public_verification_status": status_norm,
+            "public_verification_label": "Verified" if status_norm == "verified" else status_norm.title(),
+            "review_status": status_norm,
+            "reviewed_at": record.get("reviewed_at"),
+            "reviewed_by": record.get("reviewed_by"),
+            "verification_record_id": record.get("id"),
+        }
+        if record.get("business_name") not in (None, ""):
+            data["business_name"] = record.get("business_name")
+            data["businessName"] = record.get("business_name")
+        if status_norm == "verified":
+            data["last_verified_at"] = record.get("reviewed_at") or int(time.time())
+
+        profile.data = data
+        profile.verified = status_norm == "verified"
+        profile.verification_status = status_norm
+        profile.public_verification_status = status_norm
+        profile.public_verification_label = "Verified" if status_norm == "verified" else status_norm.title()
+        profile.review_status = status_norm
+
+        if record.get("business_name") not in (None, ""):
+            profile.business_name = str(record.get("business_name") or "")
+            if not profile.display_name:
+                profile.display_name = str(record.get("business_name") or "")
+
+        db.commit()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print("Persist verification to Postgres failed:", exc)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@router.get("/verification/me")
 def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
     role = str(user.get("role") or "vendor")
     if role not in {"vendor", "organizer"}:
@@ -1338,11 +1470,19 @@ def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
             status_code=403,
             detail="Verification is only available for vendor or organizer accounts",
         )
-    record = dict(_get_verification(str(user.get("email") or ""), role, user.get("id")))
+
+    email = str(user.get("email") or "")
+    record = dict(_get_verification(email, role, user.get("id")))
+
+    # Postgres profile verification wins when JSON is missing after redeploy.
+    durable = _verification_snapshot_from_profile(email, role)
+    if durable:
+        record.update({k: v for k, v in durable.items() if v not in (None, "")})
+        record["email"] = _norm(record.get("email") or email)
+        record["role"] = _norm(record.get("role") or role)
+        record["user_id"] = record.get("user_id") or user.get("id")
+
     return {"verification": record}
-
-
-@router.get("/verification/public")
 def verification_public_list():
     items: List[Dict[str, Any]] = []
 
@@ -1851,44 +1991,15 @@ def review_verification(
         raise HTTPException(status_code=400, detail="Invalid verification status")
 
     record["status"] = status_value
+    record["verification_status"] = status_value
     record["is_verified"] = status_value == "verified"
+    record["verified"] = status_value == "verified"
     record["notes"] = str(payload.get("notes") or "").strip() or None
     record["reviewed_at"] = int(time.time())
     record["reviewed_by"] = str(user.get("email") or "").strip().lower() or None
 
     _save_verification_record(record)
-
-# Persist verification to Postgres so it survives redeploy
-if status_value == "verified":
-    try:
-        db = SessionLocal()
-        profile = (
-            db.query(Profile)
-            .filter(
-                func.lower(Profile.email) == str(record.get("email") or "").strip().lower(),
-                Profile.role == str(record.get("role") or "").strip().lower(),
-            )
-            .first()
-        )
-
-        if profile:
-            data = profile.data or {}
-            data["verified"] = True
-            data["verification_status"] = "verified"
-            profile.data = data
-            profile.verified = True
-            profile.verification_status = "verified"
-            profile.public_verification_status = "verified"
-            profile.public_verification_label = "Verified"
-
-            db.commit()
-    except Exception as e:
-        print("Persist verified failed:", e)
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+    _persist_verification_to_profile(record, status_value)
 
     if status_value == "verified":
         try:
