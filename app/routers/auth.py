@@ -411,7 +411,7 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 
 
 def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    serialized = {
         "id": int(user.get("id") or 0),
         "email": _norm(user.get("email")),
         "username": _norm(user.get("username")),
@@ -421,6 +421,15 @@ def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }
+    for key in (
+        "plan", "subscription_status", "subscription_plan", "subscriptionStatus",
+        "visibility_tier", "visibilityTier", "featured", "promoted",
+        "stripe_customer_id", "stripe_subscription_id", "current_period_end",
+        "cancel_at_period_end",
+    ):
+        if key in user:
+            serialized[key] = user.get(key)
+    return serialized
 
 
 def _persist_users() -> None:
@@ -962,6 +971,81 @@ def admin_delete_user(user_id: int) -> Dict[str, Any]:
     return _serialize_user(user)
 
 
+
+def _profile_subscription_snapshot(email: str, role: str) -> Dict[str, Any]:
+    normalized_email = _norm(email)
+    normalized_role = _norm(role)
+    if not normalized_email or normalized_role not in {"vendor", "organizer"}:
+        return {}
+    try:
+        from sqlalchemy import func
+        from app.db import SessionLocal
+        from app.models.profile import Profile
+    except Exception:
+        return {}
+    if SessionLocal is None:
+        return {}
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == normalized_email, Profile.role == normalized_role)
+            .one_or_none()
+        )
+        if profile is None:
+            return {}
+        data = profile.data if isinstance(profile.data, dict) else {}
+        plan = str(profile.subscription_plan or data.get("subscription_plan") or data.get("plan") or "starter").strip().lower()
+        status_value = str(profile.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus") or "inactive").strip().lower()
+        tier = profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier")
+        out: Dict[str, Any] = {
+            "plan": plan,
+            "subscription_plan": plan,
+            "subscription_status": status_value,
+            "subscriptionStatus": status_value,
+            "visibility_tier": tier,
+            "visibilityTier": tier,
+            "featured": bool(profile.featured or data.get("featured")),
+            "promoted": bool(profile.promoted or data.get("promoted")),
+        }
+        for key in ("stripe_customer_id", "stripe_subscription_id", "current_period_end", "cancel_at_period_end"):
+            if data.get(key) not in (None, ""):
+                out[key] = data.get(key)
+        return out
+    except Exception as exc:
+        print("⚠️ Profile subscription restore skipped:", str(exc))
+        return {}
+    finally:
+        db.close()
+
+
+def _merge_durable_subscription_state(user: Dict[str, Any]) -> Dict[str, Any]:
+    email = _norm(user.get("email"))
+    role = _norm(user.get("role"))
+    snapshot = _profile_subscription_snapshot(email, role)
+    if not snapshot:
+        user.setdefault("plan", "starter")
+        user.setdefault("subscription_status", "inactive")
+        return user
+    for key, value in snapshot.items():
+        if value not in (None, ""):
+            user[key] = value
+    user_id = _USERS_BY_EMAIL.get(email)
+    if user_id is not None and int(user_id) in _USERS:
+        changed = False
+        target = _USERS[int(user_id)]
+        for key, value in snapshot.items():
+            if value not in (None, "") and target.get(key) != value:
+                target[key] = value
+                changed = True
+        if changed:
+            try:
+                _persist_users()
+            except Exception:
+                pass
+    return user
+
+
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(bearer),
 ) -> Dict[str, Any]:
@@ -981,17 +1065,22 @@ def get_current_user(
         )
 
     user_id = _USERS_BY_EMAIL.get(email)
+    stored_user: Dict[str, Any] = {}
     full_name = None
     if user_id is not None:
-        full_name = _USERS.get(int(user_id), {}).get("full_name")
+        stored_user = dict(_USERS.get(int(user_id), {}) or {})
+        full_name = stored_user.get("full_name")
 
-    return {
-        "id": int(user_id) if user_id is not None else None,
+    current = {
+        **stored_user,
+        "id": int(user_id) if user_id is not None else stored_user.get("id"),
         "email": email,
         "role": role,
         "is_active": is_active,
         "full_name": full_name,
     }
+
+    return _merge_durable_subscription_state(current)
 
 
 class LoginRequest(BaseModel):
@@ -1113,6 +1202,14 @@ def get_me(user: Dict[str, Any] = Depends(get_current_user)):
         "email": user.get("email"),
         "role": user.get("role"),
         "full_name": user.get("full_name"),
+        "plan": user.get("plan") or "starter",
+        "subscription_plan": user.get("subscription_plan") or user.get("plan") or "starter",
+        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscriptionStatus": user.get("subscriptionStatus") or user.get("subscription_status") or "inactive",
+        "visibility_tier": user.get("visibility_tier"),
+        "visibilityTier": user.get("visibilityTier") or user.get("visibility_tier"),
+        "featured": bool(user.get("featured", False)),
+        "promoted": bool(user.get("promoted", False)),
     }
 
 @router.get("/verification/me")
