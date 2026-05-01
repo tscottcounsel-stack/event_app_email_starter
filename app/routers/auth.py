@@ -1462,7 +1462,7 @@ def _persist_verification_to_profile(record: Dict[str, Any], status_value: str) 
             pass
 
 
-@router.get("/verification/me")
+@router.get("/verification/current")
 def verification_me(user: Dict[str, Any] = Depends(get_current_user)):
     role = str(user.get("role") or "vendor")
     email = str(user.get("email") or "").strip().lower()
