@@ -26,11 +26,18 @@ def _profile_data(profile: Profile) -> Dict[str, Any]:
     return dict(data or {})
 
 
+def _is_truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    return _safe_lower(value) in {"true", "1", "yes", "y", "verified", "approved", "complete"}
+
+
 def _is_truthy_verified(value: Any) -> bool:
     if value is True:
         return True
-    text = _safe_lower(value)
-    return text in {"true", "1", "yes", "verified", "approved"}
+    return _safe_lower(value) in {"true", "1", "yes", "verified", "approved"}
 
 
 def _is_verified_profile(profile: Profile) -> bool:
@@ -67,10 +74,18 @@ def _is_premium_profile(profile: Profile) -> bool:
     tier = _safe_lower(profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier"))
     has_paid_plan = any(token in plan for token in ["enterprise", "premium", "pro", "growth"])
     active = status in {"active", "trialing", "paid"}
-    return bool(profile.featured or profile.promoted or data.get("featured") or data.get("promoted") or tier == "premium" or (has_paid_plan and active) or plan == "enterprise_organizer")
+    return bool(
+        profile.featured
+        or profile.promoted
+        or _is_truthy(data.get("featured"))
+        or _is_truthy(data.get("promoted"))
+        or tier == "premium"
+        or (has_paid_plan and active)
+        or plan == "enterprise_organizer"
+    )
 
 
-def _display_name(profile: Profile) -> str:
+def _explicit_name(profile: Profile) -> str:
     data = _profile_data(profile)
     return (
         _safe_str(data.get("organizationName"))
@@ -79,11 +94,38 @@ def _display_name(profile: Profile) -> str:
         or _safe_str(data.get("business_name"))
         or _safe_str(profile.business_name)
         or _safe_str(data.get("company_name"))
+    )
+
+
+def _display_name(profile: Profile) -> str:
+    data = _profile_data(profile)
+    return (
+        _explicit_name(profile)
         or _safe_str(data.get("contactName"))
         or _safe_str(profile.display_name)
         or _safe_str(profile.email)
         or "Organizer"
     )
+
+
+def _has_completed_public_profile(profile: Profile) -> bool:
+    """Only allow standard public listings when profile setup is truly complete.
+
+    Verified and premium organizers can still show even if some public profile fields
+    are thin, but standard listings should not include admin-created shells or
+    partially-started accounts.
+    """
+    data = _profile_data(profile)
+    if _is_truthy(data.get("profileComplete")) or _is_truthy(data.get("profile_complete")):
+        return True
+
+    name = _explicit_name(profile)
+    contact = _safe_str(data.get("contactName") or data.get("contact_name") or profile.display_name)
+    city = _safe_str(profile.city or data.get("city"))
+    state = _safe_str(profile.state or data.get("state"))
+    location = _safe_str(data.get("location")) or ", ".join([part for part in [city, state] if part])
+
+    return bool(name and contact and location)
 
 
 def _event_count_for_email(db: Session, email: str) -> int:
@@ -119,6 +161,7 @@ def _organizer_public(profile: Profile, db: Session) -> Dict[str, Any]:
     email = _safe_lower(profile.email or data.get("email"))
     verified = _is_verified_profile(profile)
     premium = _is_premium_profile(profile)
+    complete = _has_completed_public_profile(profile)
     name = _display_name(profile)
     city = _safe_str(profile.city or data.get("city"))
     state = _safe_str(profile.state or data.get("state"))
@@ -135,11 +178,11 @@ def _organizer_public(profile: Profile, db: Session) -> Dict[str, Any]:
         "role": "organizer",
         "name": name,
         "display_name": name,
-        "organizationName": data.get("organizationName") or name,
-        "organization_name": data.get("organization_name") or data.get("organizationName") or name,
-        "businessName": data.get("businessName") or data.get("business_name") or name,
-        "business_name": data.get("business_name") or data.get("businessName") or name,
-        "company_name": data.get("company_name") or name,
+        "organizationName": data.get("organizationName") or data.get("organization_name") or _explicit_name(profile) or name,
+        "organization_name": data.get("organization_name") or data.get("organizationName") or _explicit_name(profile) or name,
+        "businessName": data.get("businessName") or data.get("business_name") or _explicit_name(profile) or name,
+        "business_name": data.get("business_name") or data.get("businessName") or _explicit_name(profile) or name,
+        "company_name": data.get("company_name") or _explicit_name(profile) or name,
         "contactName": data.get("contactName") or data.get("contact_name") or profile.display_name,
         "contact_name": data.get("contact_name") or data.get("contactName") or profile.display_name,
         "city": city,
@@ -156,8 +199,8 @@ def _organizer_public(profile: Profile, db: Session) -> Dict[str, Any]:
         "public_verification_label": "Verified" if verified else _safe_str(profile.public_verification_label or data.get("public_verification_label") or "Not verified"),
         "premium": premium,
         "is_premium": premium,
-        "featured": bool(profile.featured or data.get("featured") or premium),
-        "promoted": bool(profile.promoted or data.get("promoted") or premium),
+        "featured": bool(profile.featured or _is_truthy(data.get("featured")) or premium),
+        "promoted": bool(profile.promoted or _is_truthy(data.get("promoted")) or premium),
         "visibility_tier": profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier") or ("premium" if premium else "standard"),
         "subscription_plan": plan,
         "subscription_status": status,
@@ -166,8 +209,8 @@ def _organizer_public(profile: Profile, db: Session) -> Dict[str, Any]:
         "event_count": event_count,
         "published_events_count": published_event_count,
         "published_event_count": published_event_count,
-        "profileComplete": bool(data.get("profileComplete") or data.get("profile_complete") or name),
-        "profile_complete": bool(data.get("profile_complete") or data.get("profileComplete") or name),
+        "profileComplete": complete,
+        "profile_complete": complete,
     }
 
 
@@ -180,29 +223,44 @@ def _query_organizer_profiles(db: Session) -> List[Profile]:
     )
 
 
+def _rank_key(item: Dict[str, Any]) -> tuple[int, int, int, str]:
+    premium_rank = 0 if item.get("premium") else 1
+    verified_rank = 0 if item.get("verified") else 1
+    complete_rank = 0 if item.get("profileComplete") else 1
+    return (premium_rank, verified_rank, complete_rank, _safe_lower(item.get("name")))
+
+
+def _dedupe_by_email(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep one public card per organizer email, preferring premium/verified/complete."""
+    chosen: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        email = _safe_lower(item.get("email"))
+        if not email:
+            continue
+        current = chosen.get(email)
+        if current is None or _rank_key(item) < _rank_key(current):
+            chosen[email] = item
+    return list(chosen.values())
+
+
 @router.get("/organizers")
 def list_public_organizers(db: Session = Depends(get_db)):
     profiles = _query_organizer_profiles(db)
     organizers = [_organizer_public(profile, db) for profile in profiles]
 
-    # Public directory should show credible organizer listings. Verified and
-    # premium organizers are always included. Complete profiles may also appear
-    # so early organizers are not hidden before their first published event.
     visible = []
     for organizer in organizers:
         is_verified = organizer.get("verified") is True
         is_premium = organizer.get("premium") is True or organizer.get("featured") is True or organizer.get("promoted") is True
-        has_name = bool(_safe_str(organizer.get("organizationName") or organizer.get("business_name") or organizer.get("name")))
-        if is_verified or is_premium or has_name:
+        is_complete = organizer.get("profileComplete") is True or organizer.get("profile_complete") is True
+
+        # Verified and premium organizers are always credible enough to show.
+        # Standard organizers only show after completing the public profile.
+        if is_verified or is_premium or is_complete:
             visible.append(organizer)
 
-    visible.sort(
-        key=lambda item: (
-            0 if item.get("premium") else 1,
-            0 if item.get("verified") else 1,
-            _safe_lower(item.get("name")),
-        )
-    )
+    visible = _dedupe_by_email(visible)
+    visible.sort(key=_rank_key)
 
     return {
         "ok": True,
@@ -217,6 +275,11 @@ def list_public_organizers_alias(db: Session = Depends(get_db)):
     return list_public_organizers(db)
 
 
+@router.get("/organizers/public-directory")
+def list_public_organizers_legacy_alias(db: Session = Depends(get_db)):
+    return list_public_organizers(db)
+
+
 @router.get("/organizers/public/{email}")
 def get_public_organizer(email: str, db: Session = Depends(get_db)):
     normalized_email = _safe_lower(email)
@@ -226,14 +289,13 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
     profile = (
         db.query(Profile)
         .filter(func.lower(Profile.email) == normalized_email, Profile.role == "organizer")
-        .one_or_none()
+        .order_by(Profile.updated_at.desc())
+        .first()
     )
 
     if profile is not None:
         return {"ok": True, "organizer": _organizer_public(profile, db)}
 
-    # Fallback for older event-only organizers. This keeps legacy public links
-    # working even if a Profile row has not been created yet.
     events = (
         db.query(Event)
         .filter(func.lower(Event.organizer_email) == normalized_email)
@@ -263,6 +325,8 @@ def get_public_organizer(email: str, db: Session = Depends(get_db)):
             "is_premium": False,
             "featured": False,
             "promoted": False,
+            "profileComplete": False,
+            "profile_complete": False,
             "events_count": len(events),
             "event_count": len(events),
             "published_events_count": len(published_events),
