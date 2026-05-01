@@ -82,7 +82,7 @@ nodeenv==1.9.1
 
 packaging==25.0
 
-parso==0.8.5
+parso==0.8.6
 
 passlib==1.7.4
 
