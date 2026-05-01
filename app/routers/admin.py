@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db import get_db
-from app.models import Profile
+from app.models.profile import Profile
 
 from app.routers.auth import (
     admin_create_user,
