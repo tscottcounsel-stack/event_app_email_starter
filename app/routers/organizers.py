@@ -230,17 +230,55 @@ def _rank_key(item: Dict[str, Any]) -> tuple[int, int, int, str]:
     return (premium_rank, verified_rank, complete_rank, _safe_lower(item.get("name")))
 
 
-def _dedupe_by_email(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Keep one public card per organizer email, preferring premium/verified/complete."""
-    chosen: Dict[str, Dict[str, Any]] = {}
-    for item in items:
-        email = _safe_lower(item.get("email"))
-        if not email:
+def _canonical_org_keys(item: Dict[str, Any]) -> List[str]:
+    """Keys used to prevent duplicate public cards for the same organizer.
+
+    Email is the strongest key. Name is a secondary key because older profile
+    shells and newer profile rows can sometimes exist with different emails/IDs
+    but the same public organizer name.
+    """
+    keys: List[str] = []
+    email = _safe_lower(item.get("email"))
+    if email:
+        keys.append(f"email:{email}")
+
+    for field in ("organizationName", "organization_name", "business_name", "businessName", "name"):
+        name = _safe_lower(item.get(field))
+        if name and name not in {"organizer", "location not listed"}:
+            keys.append(f"name:{name}")
+            break
+
+    return keys
+
+
+def _dedupe_public_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep one public card per organizer, preferring premium/verified/complete."""
+    chosen: List[Dict[str, Any]] = []
+    key_to_index: Dict[str, int] = {}
+
+    for item in sorted(items, key=_rank_key):
+        keys = _canonical_org_keys(item)
+        if not keys:
             continue
-        current = chosen.get(email)
-        if current is None or _rank_key(item) < _rank_key(current):
-            chosen[email] = item
-    return list(chosen.values())
+
+        matching_indexes = {key_to_index[key] for key in keys if key in key_to_index}
+        if not matching_indexes:
+            index = len(chosen)
+            chosen.append(item)
+            for key in keys:
+                key_to_index[key] = index
+            continue
+
+        existing_index = min(matching_indexes)
+        existing = chosen[existing_index]
+        if _rank_key(item) < _rank_key(existing):
+            for key in _canonical_org_keys(existing):
+                key_to_index.pop(key, None)
+            chosen[existing_index] = item
+            for key in keys:
+                key_to_index[key] = existing_index
+
+    return chosen
 
 
 @router.get("/organizers")
@@ -259,7 +297,7 @@ def list_public_organizers(db: Session = Depends(get_db)):
         if is_verified or is_premium or is_complete:
             visible.append(organizer)
 
-    visible = _dedupe_by_email(visible)
+    visible = _dedupe_public_items(visible)
     visible.sort(key=_rank_key)
 
     return {
