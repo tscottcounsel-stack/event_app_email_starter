@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
 
 from pathlib import Path
+
+from app.db import get_db
+from app.models.profile import Profile
 
 from app.routers.auth import (
     admin_create_user,
@@ -107,6 +111,39 @@ def _event_exists_for_application(app: Dict[str, Any], events: Any) -> bool:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _profile_to_admin_payload(row: Profile | None) -> Dict[str, Any]:
+    if row is None:
+        return {
+            "exists": False,
+            "profile": {},
+        }
+
+    return {
+        "exists": True,
+        "id": row.id,
+        "email": row.email,
+        "role": row.role,
+        "display_name": row.display_name,
+        "business_name": row.business_name,
+        "city": row.city,
+        "state": row.state,
+        "categories": row.categories or [],
+        "verified": bool(row.verified),
+        "verification_status": row.verification_status,
+        "public_verification_status": row.public_verification_status,
+        "public_verification_label": row.public_verification_label,
+        "review_status": row.review_status,
+        "visibility_tier": row.visibility_tier,
+        "subscription_plan": row.subscription_plan,
+        "subscription_status": row.subscription_status,
+        "featured": bool(row.featured),
+        "promoted": bool(row.promoted),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "profile": row.data or {},
+    }
 
 
 def _delete_vendor_profile_for_account(account: Dict[str, Any]) -> list[str]:
@@ -230,6 +267,48 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
 async def admin_accounts(user: dict = Depends(require_admin)):
     accounts = list_all_users()
     return {"accounts": accounts}
+
+
+@router.get("/profile")
+async def admin_profile_lookup(
+    email: str = Query(...),
+    role: str = Query(...),
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    normalized_email = str(email or "").strip().lower()
+    normalized_role = str(role or "").strip().lower()
+
+    if normalized_role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == normalized_email, Profile.role == normalized_role)
+        .one_or_none()
+    )
+
+    verification_records = []
+    try:
+        store.load_store()
+        for value in store._VERIFICATIONS.values():
+            if not isinstance(value, dict):
+                continue
+            if str(value.get("email") or "").strip().lower() != normalized_email:
+                continue
+            if str(value.get("role") or "").strip().lower() != normalized_role:
+                continue
+            verification_records.append(dict(value))
+    except Exception:
+        verification_records = []
+
+    payload = _profile_to_admin_payload(row)
+    payload["ok"] = True
+    payload["verification_records"] = verification_records
+    payload["verification_count"] = len(verification_records)
+    return payload
 
 
 @router.post("/accounts")

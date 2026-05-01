@@ -5,9 +5,12 @@ import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
 from app.routers.auth import get_current_user
 from app.store import _VERIFICATIONS, save_store
+from app.db import get_db
+from app.models.profile import Profile
 
 try:
     import stripe
@@ -124,7 +127,7 @@ def _get_or_create_payment_record(email: str, role: str, *, fee_amount: int) -> 
         "email": normalized_email,
         "role": normalized_role,
         "status": "not_started",
-        "submitted_at": None,
+        "submitted_at": _now_iso(),
         "reviewed_at": None,
         "reviewed_by": None,
         "notes": "",
@@ -487,6 +490,101 @@ def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _profile_name_from_record(record: Dict[str, Any]) -> str:
+    return _safe_str(
+        record.get("business_name")
+        or record.get("organizationName")
+        or record.get("businessName")
+        or record.get("company_name")
+        or record.get("name")
+        or record.get("email")
+    )
+
+
+def _sync_profile_from_verification(db: Session, record: Dict[str, Any]) -> None:
+    """Persist approved/rejected verification truth into the shared Profile table.
+
+    This keeps admin approval from living only in the verification queue. Public
+    vendor/organizer pages now read from Profile first, so approval must update
+    the Profile row as well.
+    """
+    email = _safe_lower(record.get("email"))
+    role = _safe_lower(record.get("role"))
+    if not email or role not in VALID_ROLES:
+        return
+
+    public = _public_record(record)
+    verified = public.get("public_verification_status") == "verified"
+    row = (
+        db.query(Profile)
+        .filter(Profile.email == email, Profile.role == role)
+        .one_or_none()
+    )
+    if row is None:
+        row = Profile(email=email, role=role)
+        db.add(row)
+
+    existing_data = dict(row.data or {})
+    merged_data = {
+        **existing_data,
+        "email": email,
+        "role": role,
+        "verified": verified,
+        "is_verified": verified,
+        "verification_status": public.get("verification_status"),
+        "verificationStatus": public.get("verification_status"),
+        "review_status": public.get("review_status"),
+        "reviewStatus": public.get("review_status"),
+        "public_verification_status": public.get("public_verification_status"),
+        "public_verification_label": public.get("public_verification_label"),
+        "expiration_date": public.get("expiration_date"),
+        "expires_at": public.get("expires_at"),
+        "last_verified_at": public.get("last_verified_at"),
+        "documents": public.get("documents") or [],
+        "updated_at": _now_iso(),
+    }
+
+    if role == "vendor":
+        name = _safe_str(existing_data.get("business_name") or existing_data.get("businessName") or _profile_name_from_record(record))
+        merged_data.setdefault("business_name", name)
+        merged_data.setdefault("businessName", name)
+        merged_data.setdefault("vendor_id", email)
+    else:
+        name = _safe_str(existing_data.get("organizationName") or existing_data.get("businessName") or _profile_name_from_record(record))
+        merged_data.setdefault("organizationName", name)
+        merged_data.setdefault("businessName", name)
+
+    categories = merged_data.get("categories") or merged_data.get("vendor_categories") or []
+    if not isinstance(categories, list):
+        categories = [str(categories)] if categories else []
+
+    row.business_name = _safe_str(
+        merged_data.get("business_name")
+        or merged_data.get("businessName")
+        or merged_data.get("organizationName")
+        or name
+    )
+    row.display_name = _safe_str(merged_data.get("contactName") or merged_data.get("contact_name") or row.business_name)
+    row.city = _safe_str(merged_data.get("city"))
+    row.state = _safe_str(merged_data.get("state"))
+    row.categories = categories
+    row.data = merged_data
+    row.verified = bool(verified)
+    row.verification_status = _safe_str(public.get("verification_status")) or None
+    row.public_verification_status = _safe_str(public.get("public_verification_status")) or None
+    row.public_verification_label = _safe_str(public.get("public_verification_label")) or None
+    row.review_status = _safe_str(public.get("review_status")) or None
+
+    # Keep subscription and premium fields already present in the row/data.
+    row.visibility_tier = row.visibility_tier or _safe_str(merged_data.get("visibility_tier") or merged_data.get("visibilityTier")) or None
+    row.subscription_plan = row.subscription_plan or _safe_str(merged_data.get("subscription_plan") or merged_data.get("subscriptionPlan") or merged_data.get("plan")) or None
+    row.subscription_status = row.subscription_status or _safe_str(merged_data.get("subscription_status") or merged_data.get("subscriptionStatus")) or None
+    row.featured = bool(row.featured or merged_data.get("featured"))
+    row.promoted = bool(row.promoted or merged_data.get("promoted"))
+
+    db.commit()
+
+
 @router.post("/verification/submit")
 def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_current_user)):
     email = _safe_lower(payload.get("email") or user.get("email"))
@@ -768,7 +866,11 @@ def get_admin_verifications():
 
 
 @router.post("/admin/verify/{verification_id}")
-def review_verification(verification_id: int, payload: Dict[str, Any]):
+def review_verification(
+    verification_id: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+):
     record = _VERIFICATIONS.get(verification_id)
 
     if not isinstance(record, dict):
@@ -779,10 +881,14 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
     if status not in VALID_REVIEW_STATUSES:
         raise HTTPException(status_code=400, detail="Status must be verified or rejected")
 
+    reviewed_at = _now_iso()
     record["status"] = status
-    record["reviewed_at"] = _now_iso()
+    record["reviewed_at"] = reviewed_at
     record["reviewed_by"] = _safe_str(payload.get("reviewed_by") or payload.get("reviewedBy"))
     record["notes"] = _safe_str(payload.get("notes"))
+
+    if not record.get("submitted_at"):
+        record["submitted_at"] = record.get("created_at") or reviewed_at
 
     if status == "verified":
         now = _now()
@@ -797,13 +903,29 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
             or _earliest_expiration_from_documents(record)
             or (now + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS))
         )
+        record["verified"] = True
+        record["is_verified"] = True
+        record["verification_status"] = "verified"
+        record["review_status"] = "approved"
+        record["public_verification_status"] = "verified"
+        record["public_verification_label"] = "Verified"
         record["last_verified_at"] = now.isoformat()
         record["expires_at"] = expiration.isoformat()
         record["expiration_date"] = expiration.isoformat()
+        record["locked"] = True
         record["renewal_payment_status"] = None
         record["renewal_paid_at"] = None
+    else:
+        record["verified"] = False
+        record["is_verified"] = False
+        record["verification_status"] = "rejected"
+        record["review_status"] = "rejected"
+        record["public_verification_status"] = "not_verified"
+        record["public_verification_label"] = "Not verified"
+        record["locked"] = True
 
     save_store()
+    _sync_profile_from_verification(db, record)
 
     return {
         "ok": True,
