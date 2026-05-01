@@ -1,17 +1,19 @@
-
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
+from app.db import get_db
+from app.models.profile import Profile
 from app.routers.auth import (
     admin_create_user,
     admin_delete_user,
     get_current_user,
     list_all_users,
 )
-from app.store import get_store_snapshot, load_store, save_store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -34,88 +36,112 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
-def _as_list(value: Any) -> list:
-    if isinstance(value, dict):
-        return list(value.values())
-    if isinstance(value, list):
-        return value
-    return []
-
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_lower(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _profile_display_name(profile: Profile) -> str:
+    data = profile.data if isinstance(profile.data, dict) else {}
+    return (
+        profile.business_name
+        or profile.display_name
+        or data.get("business_name")
+        or data.get("businessName")
+        or data.get("organizationName")
+        or data.get("contactName")
+        or profile.email
+        or "Unknown"
+    )
+
+
+def _profile_to_pending_item(profile: Profile) -> Dict[str, Any]:
+    data = profile.data if isinstance(profile.data, dict) else {}
+    return {
+        "id": profile.id,
+        "profile_id": profile.id,
+        "email": profile.email,
+        "name": _profile_display_name(profile),
+        "company_name": profile.business_name or data.get("businessName") or data.get("organizationName"),
+        "role": profile.role,
+        "status": profile.verification_status or profile.review_status or "pending",
+        "verification_status": profile.verification_status,
+        "public_verification_status": profile.public_verification_status,
+        "review_status": profile.review_status,
+        "submitted_at": data.get("submitted_at") or data.get("created_at") or profile.created_at.isoformat() if profile.created_at else None,
+    }
+
+
+def _profile_payload(profile: Profile) -> Dict[str, Any]:
+    data = profile.data if isinstance(profile.data, dict) else {}
+    return {
+        "ok": True,
+        "exists": True,
+        "id": profile.id,
+        "email": profile.email,
+        "role": profile.role,
+        "display_name": profile.display_name,
+        "business_name": profile.business_name,
+        "city": profile.city,
+        "state": profile.state,
+        "categories": profile.categories or [],
+        "verified": bool(profile.verified),
+        "verification_status": profile.verification_status,
+        "public_verification_status": profile.public_verification_status,
+        "public_verification_label": profile.public_verification_label,
+        "review_status": profile.review_status,
+        "visibility_tier": profile.visibility_tier,
+        "subscription_plan": profile.subscription_plan,
+        "subscription_status": profile.subscription_status,
+        "featured": bool(profile.featured),
+        "promoted": bool(profile.promoted),
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+        "profile": data,
+    }
+
+
 @router.get("/dashboard")
-async def admin_dashboard(user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
-
+async def admin_dashboard(
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     accounts = list_all_users()
-    vendor_items = [u for u in accounts if str(u.get("role") or "").lower() == "vendor"]
-    organizer_items = [u for u in accounts if str(u.get("role") or "").lower() == "organizer"]
+    vendor_items = [u for u in accounts if _safe_lower(u.get("role")) == "vendor"]
+    organizer_items = [u for u in accounts if _safe_lower(u.get("role")) == "organizer"]
 
-    applications = store.get("applications", {})
-    events = store.get("events", {})
-    payments = store.get("payments", [])
-    verifications = store.get("verifications", {})
+    pending_profiles = (
+        db.query(Profile)
+        .filter(
+            Profile.role.in_(["vendor", "organizer"]),
+            Profile.verified.is_(False),
+            func.lower(func.coalesce(Profile.review_status, "")).in_(["pending", "renewal_pending", "submitted", "under_review"]),
+        )
+        .order_by(Profile.updated_at.desc())
+        .all()
+    )
 
-    application_items = [a for a in _as_list(applications) if isinstance(a, dict)]
-    event_items = [e for e in _as_list(events) if isinstance(e, dict)]
-    payment_items = [p for p in _as_list(payments) if isinstance(p, dict)]
-    verification_items = [v for v in _as_list(verifications) if isinstance(v, dict)]
-
-    paid_apps = [a for a in application_items if str(a.get("payment_status") or "").lower() == "paid"]
-
-    approved_unpaid = [
-        a
-        for a in application_items
-        if str(a.get("status") or "").lower() == "approved"
-        and str(a.get("payment_status") or "").lower() != "paid"
-    ]
-
-    pending_items = [
-        a for a in verification_items if str(a.get("status") or "").lower() == "pending"
-    ]
-
-    gross_sales = 0.0
-    platform_revenue = 0.0
-    organizer_payouts = 0.0
-
-    for p in payment_items:
-        if str(p.get("status", "")).lower() != "paid":
-            continue
-
-        amount = float(p.get("amount", 0) or 0)
-        fee = float(p.get("platform_fee", 0) or 0)
-        payout = float(p.get("organizer_payout", 0) or 0)
-
-        gross_sales += amount
-        platform_revenue += fee
-        organizer_payouts += payout
-
-    recent_payments = sorted(
-        payment_items,
-        key=lambda row: str(row.get("paid_at") or row.get("created_at") or ""),
-        reverse=True,
-    )[:5]
+    total_vendors = db.query(Profile).filter(Profile.role == "vendor").count() or len(vendor_items)
+    total_organizers = db.query(Profile).filter(Profile.role == "organizer").count() or len(organizer_items)
 
     return {
         "stats": {
-            "total_vendors": len(vendor_items),
-            "total_organizers": len(organizer_items),
-            "live_events": len(event_items),
-            "applications_submitted": len(application_items),
-            "approved_awaiting_payment": len(approved_unpaid),
-            "paid_applications": len(paid_apps),
-            "pending_verifications": len(pending_items),
-            "gross_sales": round(gross_sales, 2),
-            "platform_revenue": round(platform_revenue, 2),
-            "organizer_payouts_owed": round(organizer_payouts, 2),
+            "total_vendors": total_vendors,
+            "total_organizers": total_organizers,
+            "live_events": 0,
+            "applications_submitted": 0,
+            "approved_awaiting_payment": 0,
+            "paid_applications": 0,
+            "pending_verifications": len(pending_profiles),
+            "gross_sales": 0,
+            "platform_revenue": 0,
+            "organizer_payouts_owed": 0,
         },
         "recent_activity": [],
-        "pending_verifications": pending_items[:5],
-        "recent_payments": recent_payments,
+        "pending_verifications": [_profile_to_pending_item(p) for p in pending_profiles[:5]],
+        "recent_payments": [],
     }
 
 
@@ -149,71 +175,47 @@ async def admin_accounts_delete(user_id: int, user: dict = Depends(require_admin
     return {"ok": True, "account": deleted}
 
 
+@router.get("/profile")
+def admin_get_profile(
+    email: str,
+    role: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+):
+    email = _safe_lower(email)
+    role = _safe_lower(role)
+
+    if not email or role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Invalid email or role")
+
+    profile = (
+        db.query(Profile)
+        .filter(func.lower(Profile.email) == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    if not profile:
+        return {"ok": True, "exists": False, "email": email, "role": role}
+
+    return _profile_payload(profile)
+
+
 @router.get("/payments")
 async def admin_payments(user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
-
-    payments = store.get("payments", {})
-    items = [p for p in _as_list(payments) if isinstance(p, dict)]
-
-    paid = []
-    pending = []
-    failed = []
-
-    for p in items:
-        status = str(p.get("status", "")).lower()
-
-        if status in {"paid", "completed", "succeeded"}:
-            paid.append(p)
-        elif status in {"pending", "processing", "awaiting_payment"}:
-            pending.append(p)
-        elif status in {"failed", "canceled", "cancelled", "refunded"}:
-            failed.append(p)
-
-    revenue = sum(float(p.get("amount", 0) or 0) for p in paid)
-
+    # Payments are being migrated separately. Do not read JSON store here because
+    # that store was reintroducing stale verification/subscription state after deploys.
     return {
         "summary": {
-            "total": len(items),
-            "paid": len(paid),
-            "pending": len(pending),
-            "failed": len(failed),
-            "revenue": round(revenue, 2),
+            "total": 0,
+            "paid": 0,
+            "pending": 0,
+            "failed": 0,
+            "revenue": 0,
         },
-        "payments": items,
+        "payments": [],
     }
 
 
 @router.put("/payments/{payment_id}/mark-payout-paid")
 async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin)):
-    load_store()
-    store = get_store_snapshot()
-
-    payments = store.get("payments", {})
-    payment = None
-
-    if isinstance(payments, dict):
-        payment = payments.get(str(payment_id)) or payments.get(payment_id)
-    elif isinstance(payments, list):
-        for p in payments:
-            if not isinstance(p, dict):
-                continue
-            if str(p.get("id")) == str(payment_id) or str(p.get("payment_id")) == str(payment_id):
-                payment = p
-                break
-
-    if not isinstance(payment, dict):
-        raise HTTPException(status_code=404, detail="Payment not found.")
-
-    payment["payout_status"] = "paid"
-    payment["payout_sent_at"] = utc_now_iso()
-
-    save_store()
-
-    return {
-        "ok": True,
-        "payment_id": payment_id,
-        "payout_status": payment["payout_status"],
-        "payout_sent_at": payment["payout_sent_at"],
-    }
+    raise HTTPException(status_code=501, detail="Payment payout updates need the Postgres payments model before use.")
