@@ -242,9 +242,20 @@ def _set_profile_state(row: Profile, data: Dict[str, Any]) -> None:
     row.categories = categories
     row.data = merged
 
-    row.verified = bool(merged.get("verified") is True or merged.get("is_verified") is True or row.verified)
-    row.verification_status = _safe_lower(merged.get("verification_status") or merged.get("verificationStatus") or row.verification_status) or None
-    row.public_verification_status = _safe_lower(merged.get("public_verification_status") or row.public_verification_status) or None
+    merged_public_status = _safe_lower(merged.get("public_verification_status") or merged.get("publicVerificationStatus") or row.public_verification_status)
+    merged_verification_status = _safe_lower(merged.get("verification_status") or merged.get("verificationStatus") or row.verification_status)
+    merged_review_status = _safe_lower(merged.get("review_status") or merged.get("reviewStatus") or row.review_status)
+
+    row.verified = bool(
+        merged.get("verified") is True
+        or merged.get("is_verified") is True
+        or merged_public_status == "verified"
+        or merged_verification_status == "verified"
+        or merged_review_status == "approved"
+        or row.verified
+    )
+    row.verification_status = merged_verification_status or ("verified" if row.verified else None)
+    row.public_verification_status = merged_public_status or ("verified" if row.verified else None)
     row.public_verification_label = _safe_str(merged.get("public_verification_label") or row.public_verification_label) or None
     row.review_status = _safe_lower(merged.get("review_status") or merged.get("reviewStatus") or row.review_status) or None
     row.visibility_tier = _safe_lower(merged.get("visibility_tier") or merged.get("visibilityTier") or row.visibility_tier) or None
@@ -261,50 +272,80 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
     expires_at = data.get("expires_at") or data.get("expiration_date")
     expiration = _parse_datetime(expires_at) or _earliest_expiration(documents)
 
-    status = _safe_lower(row.verification_status or data.get("verification_status") or data.get("status"))
-    review = _safe_lower(row.review_status or data.get("review_status"))
-    public_status = _safe_lower(row.public_verification_status or data.get("public_verification_status"))
-    data_verified = data.get("verified") is True or data.get("is_verified") is True
-    verified = bool(data_verified or row.verified or public_status == "verified" or status == "verified" or review == "approved")
+    # Single source of truth for UI/admin display:
+    # public_verification_status wins, then explicit verified booleans, then DB status fields.
+    public_status_raw = _safe_lower(
+        row.public_verification_status
+        or data.get("public_verification_status")
+        or data.get("publicVerificationStatus")
+    )
+    status_raw = _safe_lower(
+        row.verification_status
+        or data.get("verification_status")
+        or data.get("verificationStatus")
+        or data.get("status")
+    )
+    review_raw = _safe_lower(row.review_status or data.get("review_status") or data.get("reviewStatus"))
+
+    verified = bool(
+        row.verified is True
+        or data.get("verified") is True
+        or data.get("is_verified") is True
+        or public_status_raw == "verified"
+        or status_raw == "verified"
+        or review_raw == "approved"
+    )
 
     if verified:
         status = "verified"
-        review = review or "approved"
+        review = "approved"
         public_status = "verified"
-        public_label = row.public_verification_label or "Verified"
-    elif review == "rejected" or status == "rejected":
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
+    elif review_raw == "rejected" or status_raw == "rejected" or public_status_raw == "not_verified":
         status = "rejected"
+        review = "rejected"
         public_status = "not_verified"
-        public_label = row.public_verification_label or "Not verified"
-    elif status in {"expired", "expiring_soon", "needs_renewal", "renewal_pending"}:
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Not verified"
+    elif status_raw in {"expired", "expiring_soon", "needs_renewal", "renewal_pending"}:
+        status = status_raw
+        review = review_raw or status_raw
         public_status = "renewal_pending"
-        public_label = row.public_verification_label or "Renewal pending"
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Renewal pending"
+    elif status_raw in {"pending", "submitted", "under_review"} or review_raw in {"pending", "submitted", "under_review"}:
+        status = "pending"
+        review = "pending"
+        public_status = public_status_raw or "renewal_pending"
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Renewal pending"
     else:
-        status = status or "pending"
-        public_status = public_status or "renewal_pending"
-        public_label = row.public_verification_label or "Renewal pending"
+        status = "not_started"
+        review = review_raw or "not_started"
+        public_status = public_status_raw or "not_verified"
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Not verified"
 
     return {
         **data,
         "id": row.id,
+        "profile_id": row.id,
+        "user_id": row.id,
         "email": _safe_lower(row.email),
         "role": _safe_lower(row.role),
-        "name": row.business_name or row.display_name or data.get("business_name") or data.get("organizationName") or data.get("email"),
+        "name": row.business_name or row.display_name or data.get("business_name") or data.get("businessName") or data.get("organizationName") or data.get("email"),
         "business_name": row.business_name or data.get("business_name") or data.get("businessName") or data.get("organizationName"),
         "company_name": row.business_name or data.get("business_name") or data.get("businessName") or data.get("organizationName"),
         "verified": verified,
         "is_verified": verified,
         "status": status,
         "verification_status": status,
-        "review_status": review or ("approved" if verified else "renewal_pending"),
+        "review_status": review,
         "public_verification_status": public_status,
         "public_verification_label": public_label,
-        "payment_status": data.get("payment_status") or data.get("verification_payment_status") or "unpaid",
+        "payment_status": data.get("payment_status") or data.get("verification_payment_status") or ("paid" if data.get("fee_paid") else "unpaid"),
         "fee_paid": bool(data.get("fee_paid") or data.get("payment_status") == "paid"),
         "fee_amount": data.get("fee_amount") or _verification_fee_amount(_safe_lower(row.role)),
         "documents": documents,
         "document_status": doc_status,
         "submitted_at": data.get("submitted_at") or data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
+        "created_at": data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
         "reviewed_at": data.get("reviewed_at") or data.get("last_verified_at"),
         "reviewed_by": data.get("reviewed_by"),
         "notes": data.get("notes") or "",
@@ -317,7 +358,6 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         "featured": bool(row.featured),
         "promoted": bool(row.promoted),
     }
-
 
 def _is_pending_queue_row(row: Profile) -> bool:
     public = _profile_public(row)
@@ -437,7 +477,6 @@ def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_curren
     return {"ok": True, "verification": _profile_public(row)}
 
 
-@router.get("/verification/current")
 @router.get("/verification/me")
 def get_my_verification(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     email = _safe_lower(user.get("email"))
@@ -457,6 +496,12 @@ def get_my_verification(user: dict = Depends(get_current_user), db: Session = De
         "verification": public,
     }
 
+
+
+
+@router.get("/verification/current")
+def get_current_verification(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    return get_my_verification(user=user, db=db)
 
 @router.post("/verification/create-checkout")
 def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -543,10 +588,37 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 
 
 @router.get("/admin/verifications")
-def get_admin_verifications(db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
-    rows = db.query(Profile).filter(Profile.role.in_(["vendor", "organizer"])).all()
+def get_admin_verifications(
+    role: str = "all",
+    status: str = "all",
+    db: Session = Depends(get_db),
+    user: dict = Depends(_require_admin),
+):
+    # Admin page should be a truth view over Profile rows, not only pending queue rows.
+    # Frontend can still filter client-side, and callers can optionally pass role/status.
+    normalized_role = _safe_lower(role)
+    normalized_status = _safe_lower(status)
+
+    query = db.query(Profile).filter(Profile.role.in_(["vendor", "organizer"]))
+    if normalized_role in VALID_ROLES:
+        query = query.filter(Profile.role == normalized_role)
+
+    rows = query.all()
     records = [_profile_public(row) for row in rows]
-    records.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
+
+    if normalized_status and normalized_status != "all":
+        records = [
+            record
+            for record in records
+            if _safe_lower(record.get("verification_status") or record.get("status")) == normalized_status
+            or _safe_lower(record.get("review_status")) == normalized_status
+            or _safe_lower(record.get("public_verification_status")) == normalized_status
+        ]
+
+    records.sort(
+        key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
     return {"ok": True, "verifications": records, "count": len(records)}
 
 @router.post("/admin/verify/{verification_id}")
