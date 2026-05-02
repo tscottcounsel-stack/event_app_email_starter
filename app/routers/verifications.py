@@ -283,6 +283,8 @@ def _set_profile_state(row: Profile, data: Dict[str, Any]) -> None:
 def _profile_public(row: Profile) -> Dict[str, Any]:
     data = _profile_data(row)
     documents = data.get("documents") if isinstance(data.get("documents"), list) else []
+    has_documents = len(documents) > 0
+    has_submitted = has_documents or bool(data.get("submitted_at"))
     doc_status = _document_status_summary(_safe_lower(row.role), documents)
     expires_at = data.get("expires_at") or data.get("expiration_date")
     expiration = _parse_datetime(expires_at) or _earliest_expiration(documents)
@@ -324,7 +326,7 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         review = "approved"
         public_status = "verified"
         public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
-    elif review_raw == "rejected" or status_raw == "rejected" or public_status_raw == "not_verified":
+    elif has_submitted and (review_raw == "rejected" or status_raw == "rejected"):
         status = "rejected"
         review = "rejected"
         public_status = "not_verified"
@@ -367,7 +369,7 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         "fee_amount": data.get("fee_amount") or _verification_fee_amount(_safe_lower(row.role)),
         "documents": documents,
         "document_status": doc_status,
-        "submitted_at": data.get("submitted_at") or data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
+        "submitted_at": data.get("submitted_at"),
         "created_at": data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
         "reviewed_at": data.get("reviewed_at") or data.get("last_verified_at"),
         "reviewed_by": data.get("reviewed_by"),
@@ -394,7 +396,6 @@ def _is_pending_queue_row(row: Profile) -> bool:
         docs
         or status in {"pending", "submitted", "renewal_pending", "needs_renewal", "expired", "expiring_soon"}
         or review in {"pending", "renewal_pending"}
-        or payment_status == "paid"
     )
 
 
@@ -417,7 +418,7 @@ def mark_verification_paid(*, email: str, role: str, stripe_session_id: str = ""
             or row.verification_status
             or row.public_verification_status
         )
-        already_reviewed = current_status in {"verified", "approved", "rejected"}
+        already_reviewed = current_status in {"verified", "approved"}
 
         data.update({
             "payment_status": "paid",
@@ -436,7 +437,7 @@ def mark_verification_paid(*, email: str, role: str, stripe_session_id: str = ""
                 "review_status": "pending",
                 "public_verification_status": "renewal_pending",
                 "public_verification_label": "Renewal pending",
-                "submitted_at": data.get("submitted_at") or _now_iso(),
+                # Payment alone is not a submitted application. submitted_at is set only after documents are uploaded.
                 "reviewed_at": None,
                 "reviewed_by": None,
             })
