@@ -1009,8 +1009,8 @@ def _profile_subscription_snapshot(email: str, role: str) -> Dict[str, Any]:
             "subscriptionStatus": status_value,
             "visibility_tier": tier,
             "visibilityTier": tier,
-            "featured": bool(profile.featured or data.get("featured")),
-            "promoted": bool(profile.promoted or data.get("promoted")),
+            "featured": bool((profile.featured or data.get("featured")) and active_subscription),
+            "promoted": bool((profile.promoted or data.get("promoted")) and active_subscription),
         }
         for key in ("stripe_customer_id", "stripe_subscription_id", "current_period_end", "cancel_at_period_end"):
             if data.get(key) not in (None, ""):
@@ -1252,12 +1252,13 @@ def _subscription_user_from_profile(email: Optional[str], role: Optional[str]) -
             or data.get("subscriptionStatus")
             or "inactive"
         )
-        visibility_tier = (
-            profile.visibility_tier
-            or data.get("visibility_tier")
-            or data.get("visibilityTier")
-            or ("premium" if status_value in {"active", "trialing", "paid"} and plan != "starter" else None)
-        )
+        has_premium_plan = any(token in plan for token in ["enterprise", "premium", "pro", "growth"])
+        active_subscription = status_value in {"active", "trialing", "paid"}
+        raw_visibility_tier = _norm(profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier"))
+        # Verification payment must not leak into subscription/premium. Only expose
+        # premium visibility when the profile has an active paid subscription/plan
+        # or an explicit admin premium flag that also carries active subscription state.
+        visibility_tier = "premium" if (raw_visibility_tier == "premium" and active_subscription) or (has_premium_plan and active_subscription) else None
 
         return {
             "plan": plan or "starter",
@@ -1267,8 +1268,8 @@ def _subscription_user_from_profile(email: Optional[str], role: Optional[str]) -
             "subscriptionStatus": status_value or "inactive",
             "visibility_tier": visibility_tier,
             "visibilityTier": visibility_tier,
-            "featured": bool(profile.featured or data.get("featured")),
-            "promoted": bool(profile.promoted or data.get("promoted")),
+            "featured": bool((profile.featured or data.get("featured")) and active_subscription),
+            "promoted": bool((profile.promoted or data.get("promoted")) and active_subscription),
             "stripe_customer_id": data.get("stripe_customer_id"),
             "stripe_subscription_id": data.get("stripe_subscription_id"),
             "current_period_end": data.get("current_period_end"),
@@ -1317,8 +1318,10 @@ def _public_current_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
         merged["subscriptionStatus"] = current_status
         merged["visibility_tier"] = merged.get("visibility_tier") or "premium"
         merged["visibilityTier"] = merged.get("visibilityTier") or merged.get("visibility_tier") or "premium"
-        merged["featured"] = True if merged.get("featured") is None else bool(merged.get("featured"))
-        merged["promoted"] = True if merged.get("promoted") is None else bool(merged.get("promoted"))
+        # Do not automatically flip featured/promoted from subscription data.
+        # Those are admin placement flags, while subscription is billing truth.
+        merged["featured"] = bool(merged.get("featured", False))
+        merged["promoted"] = bool(merged.get("promoted", False))
 
     return merged
 

@@ -124,6 +124,9 @@ def _safe_str(value: Any) -> str:
         return ""
     return str(value).strip()
 
+def _safe_lower(value: Any) -> str:
+    return _safe_str(value).lower()
+
 
 def _safe_list_of_str(value: Any) -> List[str]:
     if isinstance(value, list):
@@ -408,9 +411,8 @@ def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
     has_premium_plan = any(token in plan for token in ["enterprise", "premium", "pro", "growth"])
     is_active_subscription = subscription_status in {"active", "trialing", "paid"}
     is_premium = (
-        visibility_tier == "premium"
-        or bool(row.get("featured"))
-        or bool(row.get("promoted"))
+        (visibility_tier == "premium" and is_active_subscription)
+        or ((bool(row.get("featured")) or bool(row.get("promoted"))) and is_active_subscription)
         or (has_premium_plan and is_active_subscription)
     )
 
@@ -434,27 +436,43 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def compute_verification_status(profile: Dict[str, Any], verification: Dict[str, Any] | None = None) -> str:
-    """Return the public verification lifecycle status for a vendor profile."""
+    """Return vendor verification status without treating payment as approval.
+
+    Mirrors the organizer side's profile-truth approach: explicit pending/rejected
+    statuses beat old verified booleans, and fee_paid/payment_status only affects
+    payment display, never verification approval.
+    """
     source = verification if isinstance(verification, dict) and verification else profile
     now = datetime.utcnow()
-    explicit_status = _safe_str(
+
+    public_status = _safe_lower(source.get("public_verification_status") or source.get("publicVerificationStatus"))
+    review_status = _safe_lower(source.get("review_status") or source.get("reviewStatus"))
+    explicit_status = _safe_lower(
         source.get("verification_status")
         or source.get("verificationStatus")
-        or source.get("public_verification_status")
         or source.get("status")
-    ).lower()
+    )
 
-    if explicit_status in {"pending", "rejected"}:
-        return explicit_status
+    if explicit_status in {"pending", "submitted", "under_review"} or review_status in {"pending", "submitted", "under_review"} or public_status == "renewal_pending":
+        return "pending"
+    if explicit_status == "rejected" or review_status == "rejected" or public_status in {"not_verified", "unverified"}:
+        return "rejected" if explicit_status == "rejected" or review_status == "rejected" else "unverified"
 
-    if explicit_status == "verified" or bool(source.get("verified")):
+    verified = (
+        source.get("verified") is True
+        or source.get("is_verified") is True
+        or public_status == "verified"
+        or explicit_status in {"verified", "approved", "complete", "expiring_soon"}
+        or review_status in {"approved", "verified"}
+    )
+
+    if verified:
         exp_date = _parse_datetime(source.get("expiration_date") or source.get("expirationDate") or source.get("expires_at") or source.get("expiresAt"))
         if exp_date:
             if exp_date < now:
                 return "expired"
             if exp_date - now <= timedelta(days=30):
                 return "expiring_soon"
-
         documents = source.get("documents") or source.get("verification_documents") or source.get("verificationDocuments") or []
         if isinstance(documents, dict):
             documents = list(documents.values())
@@ -474,7 +492,6 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
     if explicit_status in {"expired", "expiring_soon"}:
         return explicit_status
     return "unverified"
-
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     vendor_key = _normalize_vendor_key(vendor_id)
@@ -530,7 +547,11 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
     ).lower()
     premium_plan = any(token in plan for token in ["premium", "pro", "growth", "enterprise"])
     active_subscription = subscription_status in {"active", "trialing", "paid"}
-    is_premium = bool(vendor.get("featured")) or bool(vendor.get("promoted")) or (premium_plan and active_subscription)
+    is_premium = (
+        ((bool(vendor.get("featured")) or bool(vendor.get("promoted"))) and active_subscription)
+        or (_safe_str(vendor.get("visibility_tier") or vendor.get("visibilityTier")).lower() == "premium" and active_subscription)
+        or (premium_plan and active_subscription)
+    )
 
     if is_premium:
         visibility_tier = "premium"

@@ -272,8 +272,12 @@ def _set_profile_state(row: Profile, data: Dict[str, Any]) -> None:
     row.visibility_tier = _safe_lower(merged.get("visibility_tier") or merged.get("visibilityTier") or row.visibility_tier) or None
     row.subscription_plan = _safe_lower(merged.get("subscription_plan") or merged.get("subscriptionPlan") or merged.get("plan") or row.subscription_plan) or None
     row.subscription_status = _safe_lower(merged.get("subscription_status") or merged.get("subscriptionStatus") or row.subscription_status) or None
-    row.featured = bool(merged.get("featured") or row.featured)
-    row.promoted = bool(merged.get("promoted") or row.promoted)
+    # Preserve premium/admin placement only when explicitly supplied.
+    # Verification payment/submission must never create premium placement.
+    if "featured" in data:
+        row.featured = bool(data.get("featured"))
+    if "promoted" in data:
+        row.promoted = bool(data.get("promoted"))
 
 
 def _profile_public(row: Profile) -> Dict[str, Any]:
@@ -405,6 +409,16 @@ def mark_verification_paid(*, email: str, role: str, stripe_session_id: str = ""
         normalized_role = _role(role)
         row = _get_or_create_profile(db, normalized_email, normalized_role)
         data = _profile_data(row)
+        # Verification fee payment is NOT approval.
+        # A paid submission must remain pending until an admin explicitly approves it.
+        current_status = _safe_lower(
+            data.get("verification_status")
+            or data.get("status")
+            or row.verification_status
+            or row.public_verification_status
+        )
+        already_reviewed = current_status in {"verified", "approved", "rejected"}
+
         data.update({
             "payment_status": "paid",
             "verification_payment_status": "paid",
@@ -412,6 +426,25 @@ def mark_verification_paid(*, email: str, role: str, stripe_session_id: str = ""
             "paid_at": _now_iso(),
             "fee_amount": data.get("fee_amount") or _verification_fee_amount(normalized_role),
         })
+
+        if not already_reviewed:
+            data.update({
+                "verified": False,
+                "is_verified": False,
+                "status": "pending",
+                "verification_status": "pending",
+                "review_status": "pending",
+                "public_verification_status": "renewal_pending",
+                "public_verification_label": "Renewal pending",
+                "submitted_at": data.get("submitted_at") or _now_iso(),
+                "reviewed_at": None,
+                "reviewed_by": None,
+            })
+            row.verified = False
+            row.verification_status = "pending"
+            row.review_status = "pending"
+            row.public_verification_status = "renewal_pending"
+            row.public_verification_label = "Renewal pending"
         if stripe_session_id:
             data["stripe_checkout_session_id"] = stripe_session_id
         if stripe_payment_intent_id:
