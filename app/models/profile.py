@@ -46,3 +46,26 @@ class Profile(Base):
 
     created_at = sa.Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = sa.Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventAlert(Base):
+    __tablename__ = "event_alerts"
+    __table_args__ = (
+        UniqueConstraint("vendor_email", "event_id", "category", name="uq_event_alert_vendor_event_category"),
+        {"extend_existing": True},
+    )
+
+    id = sa.Column(Integer, primary_key=True, index=True)
+    vendor_email = sa.Column(String, nullable=False, index=True)
+    vendor_profile_id = sa.Column(Integer, nullable=True, index=True)
+    event_id = sa.Column(Integer, nullable=False, index=True)
+    event_title = sa.Column(String, nullable=True)
+    event_city = sa.Column(String, nullable=True)
+    event_state = sa.Column(String, nullable=True)
+    category = sa.Column(String, nullable=False, index=True)
+    alert_type = sa.Column(String, nullable=False, default="new_matching_event", index=True)
+    message = sa.Column(String, nullable=False)
+    read = sa.Column(Boolean, nullable=False, default=False, index=True)
+    data = sa.Column(_json_type(), nullable=False, default=dict)
+    created_at = sa.Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = sa.Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

@@ -11,10 +11,12 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.core.permissions import require_event_limit
 from app.db import get_db
 from app.models.event import Event
+from app.models.profile import Profile, EventAlert
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
 from app.store import _EVENTS, _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
@@ -380,6 +382,194 @@ def _event_marketplace_stats(event: dict, applications: dict) -> dict:
     }
 
 
+# ---------------- Vendor matching alerts ----------------
+
+_ALERTABLE_PLAN_TOKENS = ("premium", "pro", "growth", "enterprise")
+_ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing", "paid")
+
+
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _split_category_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_split_category_values(item))
+        return out
+    if isinstance(value, dict):
+        out: list[str] = []
+        for key, raw in value.items():
+            if isinstance(raw, dict):
+                # Requirement category buckets often use the category name as the key.
+                out.append(str(key))
+            else:
+                out.extend(_split_category_values(raw))
+        return out
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"[,;/|]+", raw)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _category_slug(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    aliases = {
+        "food": "food_beverage",
+        "food_and_beverage": "food_beverage",
+        "food_beverage": "food_beverage",
+        "food_beverages": "food_beverage",
+        "technology": "tech",
+        "technology_electronics": "tech",
+        "technology_and_electronics": "tech",
+        "arts": "art",
+        "arts_crafts": "art",
+        "arts_and_crafts": "art",
+        "professional_services": "services",
+        "service": "services",
+    }
+    return aliases.get(text, text)
+
+
+def _unique_categories(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        for item in _split_category_values(value):
+            slug = _category_slug(item)
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            out.append(str(item).strip())
+    return out
+
+
+def _event_alert_categories(event_data: Dict[str, Any]) -> list[str]:
+    values: list[Any] = [
+        event_data.get("category"),
+        event_data.get("categories"),
+        event_data.get("vendor_categories"),
+        event_data.get("vendor_category"),
+    ]
+
+    # Requirements are where organizers define vendor categories for the event.
+    try:
+        req = _REQUIREMENTS.get(int(event_data.get("id") or 0)) or {}
+        req_root = req.get("requirements") if isinstance(req, dict) else {}
+        req_root = req_root if isinstance(req_root, dict) else req
+        if isinstance(req_root, dict):
+            values.append(req_root.get("categories"))
+            values.append(req_root.get("categoryRequirements"))
+            values.append(req_root.get("category_requirements"))
+    except Exception:
+        pass
+
+    return _unique_categories(values)
+
+
+def _profile_is_alert_eligible_vendor(profile: Profile) -> bool:
+    data = dict(profile.data or {})
+    visibility = _safe_text(profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier")).lower()
+    plan = _safe_text(profile.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan")).lower()
+    status = _safe_text(profile.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus")).lower()
+    return bool(
+        visibility == "premium"
+        or profile.featured
+        or profile.promoted
+        or (any(token in plan for token in _ALERTABLE_PLAN_TOKENS) and status in _ACTIVE_SUBSCRIPTION_STATUSES)
+    )
+
+
+def _profile_categories(profile: Profile) -> list[str]:
+    data = dict(profile.data or {})
+    return _unique_categories([
+        profile.categories,
+        data.get("categories"),
+        data.get("vendor_categories"),
+        data.get("category"),
+        data.get("vendor_category"),
+        data.get("business_category"),
+        data.get("business_type"),
+    ])
+
+
+def _create_vendor_event_alerts(db: Session, event_data: Dict[str, Any]) -> int:
+    """Create in-app alerts for Premium vendors whose categories match a newly published event."""
+    event_id = int(event_data.get("id") or 0)
+    if not event_id:
+        return 0
+
+    event_categories = _event_alert_categories(event_data)
+    event_slugs = {_category_slug(category) for category in event_categories if _category_slug(category)}
+    if not event_slugs:
+        return 0
+
+    rows = db.query(Profile).filter(Profile.role == "vendor").all()
+    created = 0
+    title = _clean_event_title(event_data.get("title"), event_data.get("name"), event_id=event_id)
+    city = _safe_text(event_data.get("city"))
+    state = _safe_text(event_data.get("state"))
+    location = ", ".join([part for part in [city, state] if part])
+
+    for vendor in rows:
+        email = _norm_email(vendor.email)
+        if not email or not _profile_is_alert_eligible_vendor(vendor):
+            continue
+
+        vendor_categories = _profile_categories(vendor)
+        matching = [category for category in vendor_categories if _category_slug(category) in event_slugs]
+        if not matching:
+            continue
+
+        for category in matching:
+            category_label = _safe_text(category) or "your category"
+            existing = (
+                db.query(EventAlert)
+                .filter(
+                    func.lower(EventAlert.vendor_email) == email,
+                    EventAlert.event_id == event_id,
+                    func.lower(EventAlert.category) == category_label.lower(),
+                )
+                .one_or_none()
+            )
+            if existing:
+                continue
+
+            where = f" in {location}" if location else ""
+            alert = EventAlert(
+                vendor_email=email,
+                vendor_profile_id=vendor.id,
+                event_id=event_id,
+                event_title=title,
+                event_city=city or None,
+                event_state=state or None,
+                category=category_label,
+                alert_type="new_matching_event",
+                message=f"New {category_label} opportunity: {title}{where}.",
+                read=False,
+                data={
+                    "event_id": event_id,
+                    "event_title": title,
+                    "category": category_label,
+                    "city": city,
+                    "state": state,
+                    "source": "event_publish",
+                },
+            )
+            db.add(alert)
+            created += 1
+
+    if created:
+        db.commit()
+    return created
+
+
 @router.get("/invites/{invite_id}")
 def get_invite(invite_id: str, db: Session = Depends(get_db)):
     """Resolve a public vendor invite link into event data.
@@ -506,12 +696,15 @@ def organizer_patch_event(
     db: Session = Depends(get_db),
 ):
     ev = _get_owned_event_or_404(db, event_id, user)
+    was_published = bool(ev.published)
     _apply_event_patch_model(ev, dict(payload or {}))
     db.add(ev)
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
     _sync_event_to_store(serialized, user)
+    if bool(ev.published) and not was_published:
+        _create_vendor_event_alerts(db, serialized)
     return serialized
 
 
@@ -539,6 +732,7 @@ def organizer_publish_event(
     db: Session = Depends(get_db),
 ):
     ev = _get_owned_event_or_404(db, event_id, user)
+    was_published = bool(ev.published)
     ev.published = True
     ev.archived = False
     db.add(ev)
@@ -546,6 +740,8 @@ def organizer_publish_event(
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
     _sync_event_to_store(serialized, user)
+    if not was_published:
+        _create_vendor_event_alerts(db, serialized)
     return serialized
 
 

@@ -18,13 +18,44 @@ from app.store import (
     upsert_vendor,
 )
 from app.routers.verifications import _find_latest_record
-from app.models.profile import Profile
+from app.models.profile import Profile, EventAlert
 from app.db import get_db
+from app.models.event import Event
 from sqlalchemy.orm import Session
 
 from app.store import find_latest_verification_by_email
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
+
+
+def _serialize_event_alert(alert: EventAlert) -> Dict[str, Any]:
+    return {
+        "id": alert.id,
+        "type": alert.alert_type,
+        "alert_type": alert.alert_type,
+        "event_id": alert.event_id,
+        "event_title": alert.event_title,
+        "event_city": alert.event_city,
+        "event_state": alert.event_state,
+        "category": alert.category,
+        "message": alert.message,
+        "read": bool(alert.read),
+        "data": dict(alert.data or {}),
+        "created_at": alert.created_at.isoformat() if alert.created_at else None,
+        "updated_at": alert.updated_at.isoformat() if alert.updated_at else None,
+    }
+
+
+def _vendor_is_premium_for_alerts(vendor: Dict[str, Any]) -> bool:
+    visibility = _safe_str(vendor.get("visibility_tier") or vendor.get("visibilityTier")).lower()
+    plan = _safe_str(vendor.get("subscription_plan") or vendor.get("subscriptionPlan") or vendor.get("plan")).lower()
+    status = _safe_str(vendor.get("subscription_status") or vendor.get("subscriptionStatus")).lower()
+    return bool(
+        visibility == "premium"
+        or bool(vendor.get("featured"))
+        or bool(vendor.get("promoted"))
+        or (any(token in plan for token in ["premium", "pro", "growth", "enterprise"]) and status in {"active", "trialing", "paid"})
+    )
 
 @router.post("/admin/set-premium")
 def set_vendor_premium(
@@ -716,6 +747,73 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: 
         _upsert_profile_row(db, email=key, role="vendor", data=vendor)
     return _vendor_public_payload(key, vendor)
 
+
+
+
+@router.get("/me/event-alerts")
+def get_my_event_alerts(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = _user_vendor_key(user)
+    vendor = _load_vendor_from_db(db, key) or _VENDORS.get(key) or {"email": key, "vendor_id": key}
+    is_premium = _vendor_is_premium_for_alerts(vendor)
+
+    rows = (
+        db.query(EventAlert)
+        .filter(EventAlert.vendor_email == key)
+        .order_by(EventAlert.created_at.desc(), EventAlert.id.desc())
+        .limit(50)
+        .all()
+    )
+
+    alerts = [_serialize_event_alert(row) for row in rows]
+    unread_count = sum(1 for item in alerts if not item.get("read"))
+
+    return {
+        "ok": True,
+        "premium_required": not is_premium,
+        "is_premium": is_premium,
+        "alerts": alerts if is_premium else [],
+        "unread_count": unread_count if is_premium else 0,
+        "message": None if is_premium else "Upgrade to Premium to receive category-matched event alerts.",
+    }
+
+
+@router.post("/me/event-alerts/{alert_id}/read")
+def mark_my_event_alert_read(
+    alert_id: int,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = _user_vendor_key(user)
+    row = (
+        db.query(EventAlert)
+        .filter(EventAlert.id == int(alert_id), EventAlert.vendor_email == key)
+        .one_or_none()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    row.read = True
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "alert": _serialize_event_alert(row)}
+
+
+@router.post("/me/event-alerts/read-all")
+def mark_all_my_event_alerts_read(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = _user_vendor_key(user)
+    rows = db.query(EventAlert).filter(EventAlert.vendor_email == key, EventAlert.read == False).all()  # noqa: E712
+    for row in rows:
+        row.read = True
+        db.add(row)
+    db.commit()
+    return {"ok": True, "updated": len(rows)}
 
 @router.post("/me")
 def save_my_vendor_profile(
