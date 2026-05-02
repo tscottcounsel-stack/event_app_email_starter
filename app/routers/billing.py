@@ -300,6 +300,65 @@ def _extract_metadata(obj: Any) -> Dict[str, Any]:
         return {}
 
 
+def _is_verification_checkout(metadata: Dict[str, Any]) -> bool:
+    payment_type = str(metadata.get("payment_type") or "").strip().lower()
+    verification_flag = str(metadata.get("verification") or "").strip().lower()
+    return payment_type == "verification_fee" or verification_flag == "true"
+
+
+def _mark_verification_checkout_paid(session: Any) -> bool:
+    """Route verification-fee Stripe events to verifications.py, not subscription billing.
+
+    This prevents a one-time verification payment from being treated as a paid
+    subscription and accidentally granting premium vendor/organizer placement.
+    """
+    metadata = _extract_metadata(session)
+    if not _is_verification_checkout(metadata):
+        return False
+
+    email = str(metadata.get("email") or "").strip().lower()
+    role = str(metadata.get("role") or "vendor").strip().lower()
+    if role not in {"vendor", "organizer"}:
+        role = "vendor"
+
+    if not email:
+        customer_details = _stripe_get(session, "customer_details", {}) or {}
+        if isinstance(customer_details, dict):
+            email = str(customer_details.get("email") or "").strip().lower()
+        else:
+            email = str(getattr(customer_details, "email", "") or "").strip().lower()
+
+    if not email:
+        print("⚠️ Verification checkout ignored: missing email metadata")
+        return True
+
+    payment_status = str(_stripe_get(session, "payment_status", "") or "").strip().lower()
+    session_status = str(_stripe_get(session, "status", "") or "").strip().lower()
+    if payment_status != "paid" and session_status != "complete":
+        print("⚠️ Verification checkout not complete yet", {"payment_status": payment_status, "status": session_status})
+        return True
+
+    session_id = str(_stripe_get(session, "id", "") or "").strip()
+    payment_intent_id = str(_stripe_get(session, "payment_intent", "") or "").strip()
+    amount_paid = _stripe_get(session, "amount_total", None)
+
+    try:
+        from app.routers.verifications import mark_verification_paid
+
+        mark_verification_paid(
+            email=email,
+            role=role,
+            stripe_session_id=session_id,
+            stripe_payment_intent_id=payment_intent_id,
+            amount_paid=amount_paid,
+        )
+        print("✅ Verification payment synced without granting premium", {"email": email, "role": role, "session_id": session_id})
+    except Exception as exc:
+        print("🔥 Verification checkout sync failed:", str(exc))
+
+    return True
+
+
 def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
     try:
         metadata = _extract_metadata(session)
@@ -416,6 +475,10 @@ def _normalize_subscription_status(value: Any) -> str:
 def _apply_checkout_session_to_user(session: Any, *, user_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     stripe_sdk = _require_stripe()
     metadata = _extract_metadata(session)
+    if _is_verification_checkout(metadata):
+        _mark_verification_checkout_paid(session)
+        raise HTTPException(status_code=400, detail="This checkout session is for verification, not a subscription upgrade")
+
     payment_status = str(_stripe_get(session, "payment_status", "") or "").strip().lower()
     session_status = str(_stripe_get(session, "status", "") or "").strip().lower()
     if payment_status not in {"paid", "no_payment_required"} and session_status != "complete":
@@ -504,6 +567,7 @@ def create_checkout_session(
         "line_items": [{"price": price_id, "quantity": 1}],
         "client_reference_id": str(lookup.get("id")),
         "metadata": {
+            "payment_type": "subscription",
             "user_id": str(lookup.get("id")),
             "email": str(lookup.get("email") or ""),
             "plan": plan,
@@ -619,19 +683,19 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
-            user = _find_user_from_checkout_session(data_object)
-
-            customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
-            subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
-
-            if isinstance(data_object, dict):
-                customer_id = str(data_object.get("customer") or "").strip() or customer_id
-                subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
-
-            if user:
-                _apply_checkout_session_to_user(data_object, user_hint=user)
+            metadata = _extract_metadata(data_object)
+            if _is_verification_checkout(metadata):
+                _mark_verification_checkout_paid(data_object)
             else:
-                print("⚠️ No user found for checkout session")
+                subscription_id = str(_stripe_get(data_object, "subscription", "") or "").strip()
+                if not subscription_id:
+                    print("⚠️ Non-subscription checkout ignored by billing webhook")
+                else:
+                    user = _find_user_from_checkout_session(data_object)
+                    if user:
+                        _apply_checkout_session_to_user(data_object, user_hint=user)
+                    else:
+                        print("⚠️ No user found for checkout session")
         except Exception as exc:
             print("🔥 WEBHOOK ERROR (checkout.session.completed):", str(exc))
 
