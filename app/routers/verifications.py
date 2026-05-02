@@ -607,27 +607,66 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
 
 
 @router.post("/verification/confirm-payment")
-def confirm_verification_payment(payload: Dict[str, Any], user: dict = Depends(get_current_user)):
+def confirm_verification_payment(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Confirm a Stripe verification checkout without mixing it with subscriptions.
+
+    New verification sessions are tagged with metadata. This fallback also accepts
+    a paid session when the session id matches the checkout session stored on the
+    current user's Profile row. That keeps older in-flight verification checkouts
+    from failing with "Stripe session is not a verification payment" while still
+    preventing unrelated Stripe sessions from approving verification payments.
+    """
     stripe_sdk = _require_stripe()
     session_id = _safe_str(payload.get("session_id"))
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
+
     try:
         session = stripe_sdk.checkout.Session.retrieve(session_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Unable to retrieve Stripe session: {exc}")
+
+    current_email = _safe_lower(user.get("email"))
+    current_role = _role(user.get("role"))
     metadata = _checkout_metadata(session)
     payment_type = _safe_lower(metadata.get("payment_type"))
+    verification_flag = _safe_lower(metadata.get("verification")) == "true"
     payment_status = _safe_lower(_checkout_session_value(session, "payment_status", ""))
-    if payment_type != "verification_fee" and _safe_lower(metadata.get("verification")) != "true":
+    session_status = _safe_lower(_checkout_session_value(session, "status", ""))
+
+    row = _get_or_create_profile(db, current_email, current_role)
+    data = _profile_data(row)
+    stored_session_id = _safe_str(data.get("stripe_checkout_session_id") or data.get("last_session_id"))
+    session_matches_profile = bool(stored_session_id and stored_session_id == session_id)
+
+    session_customer_email = _safe_lower(
+        _checkout_session_value(session, "customer_email", "")
+        or ((_checkout_session_value(session, "customer_details", {}) or {}).get("email") if isinstance(_checkout_session_value(session, "customer_details", {}), dict) else "")
+    )
+    email_matches_user = bool(session_customer_email and session_customer_email == current_email)
+
+    is_verification_session = payment_type == "verification_fee" or verification_flag or session_matches_profile
+    if not is_verification_session:
         raise HTTPException(status_code=400, detail="Stripe session is not a verification payment")
-    email = _safe_lower(metadata.get("email") or user.get("email"))
-    role = _role(metadata.get("role") or user.get("role"))
-    if email != _safe_lower(user.get("email")) or role != _safe_lower(user.get("role")):
+
+    email = _safe_lower(metadata.get("email") or session_customer_email or current_email)
+    role = _role(metadata.get("role") or current_role)
+    if email != current_email or role != current_role:
         raise HTTPException(status_code=403, detail="Stripe session does not belong to this account")
-    if payment_status != "paid":
+
+    if not (session_matches_profile or email_matches_user or verification_flag or payment_type == "verification_fee"):
+        raise HTTPException(status_code=403, detail="Stripe session does not belong to this account")
+
+    if payment_status != "paid" and session_status != "complete":
         raise HTTPException(status_code=400, detail="Payment is not marked paid yet")
-    record = mark_verification_paid(email=email, role=role, stripe_session_id=session_id, stripe_payment_intent_id=str(_checkout_session_value(session, "payment_intent", "") or ""), amount_paid=_checkout_session_value(session, "amount_total", None))
+
+    record = mark_verification_paid(
+        email=email,
+        role=role,
+        stripe_session_id=session_id,
+        stripe_payment_intent_id=str(_checkout_session_value(session, "payment_intent", "") or ""),
+        amount_paid=_checkout_session_value(session, "amount_total", None),
+    )
     return {"ok": True, "verification": record}
 
 
