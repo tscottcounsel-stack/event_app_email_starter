@@ -184,6 +184,7 @@ from app.models.application import Application  # noqa: F401
 from app.models.booth import Booth  # noqa: F401
 from app.models.diagram import Diagram  # noqa: F401
 from app.models.profile import Profile  # noqa: F401
+from app.models.event_checkin import EventCheckIn  # NEW
 
 _init_db_if_available()
 _sync_events_store_from_db_if_available()
@@ -231,6 +232,7 @@ for module_name in [
     "app.routers.vendors_v2",
     "app.routers.verifications",
     "app.routers.upload",
+    "app.routers.checkins",
 ]:
     _try_include(app, module_name, "router")
 
