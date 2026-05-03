@@ -562,16 +562,31 @@ _AUD = "event-app-clients"
 _ISS = "event-app"
 
 
-def _create_access_token(*, email: str, role: str, is_active: bool) -> str:
+def _create_access_token(
+    *, email: str, role: str, is_active: bool, user_id: Optional[int] = None
+) -> str:
+    normalized_email = _norm(email)
+
+    if user_id is None and normalized_email:
+        existing_user_id = _USERS_BY_EMAIL.get(normalized_email)
+        if existing_user_id is not None:
+            try:
+                user_id = int(existing_user_id)
+            except Exception:
+                user_id = None
+
     if jwt is None:
-        return f"devtoken:{email}:{role}:{int(time.time())}"
+        uid_part = str(user_id or "")
+        return f"devtoken:{normalized_email}:{role}:{uid_part}:{int(time.time())}"
 
     now = int(time.time())
     payload = {
-        "sub": email,
-        "email": email,
+        "sub": normalized_email,
+        "email": normalized_email,
         "role": role,
         "is_active": bool(is_active),
+        "user_id": int(user_id) if user_id is not None else None,
+        "id": int(user_id) if user_id is not None else None,
         "iat": now,
         "exp": now + _JWT_TTL_SECONDS,
         "iss": _ISS,
@@ -586,7 +601,19 @@ def _decode_token(token: str) -> Dict[str, Any]:
             parts = token.split(":")
             email = parts[1] if len(parts) > 1 else ""
             role = parts[2] if len(parts) > 2 else "vendor"
-            return {"email": email, "role": role, "is_active": True}
+            raw_user_id = parts[3] if len(parts) > 3 else ""
+            try:
+                user_id = int(raw_user_id) if raw_user_id else _USERS_BY_EMAIL.get(_norm(email))
+            except Exception:
+                user_id = _USERS_BY_EMAIL.get(_norm(email))
+            return {
+                "email": _norm(email),
+                "sub": _norm(email),
+                "role": role,
+                "is_active": True,
+                "user_id": int(user_id) if user_id is not None else None,
+                "id": int(user_id) if user_id is not None else None,
+            }
         raise HTTPException(status_code=401, detail="Invalid token")
 
     try:
@@ -688,6 +715,7 @@ def _profile_subscription_snapshot(email: str, role: str) -> Dict[str, Any]:
         plan = str(profile.subscription_plan or data.get("subscription_plan") or data.get("plan") or "starter").strip().lower()
         status_value = str(profile.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus") or "inactive").strip().lower()
         tier = profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier")
+        active_subscription = status_value in {"active", "trialing", "paid"}
         out: Dict[str, Any] = {
             "plan": plan,
             "subscription_plan": plan,
@@ -761,9 +789,18 @@ def get_current_user(
         stored_user = dict(_USERS.get(int(user_id), {}) or {})
         full_name = stored_user.get("full_name")
 
+    token_user_id = payload.get("user_id") or payload.get("id")
+    current_id = int(user_id) if user_id is not None else stored_user.get("id")
+    if current_id is None and token_user_id is not None:
+        try:
+            current_id = int(token_user_id)
+        except Exception:
+            current_id = None
+
     current = {
         **stored_user,
-        "id": int(user_id) if user_id is not None else stored_user.get("id"),
+        "id": current_id,
+        "user_id": current_id,
         "email": email,
         "role": role,
         "is_active": is_active,
@@ -795,6 +832,7 @@ class AuthResponse(BaseModel):
     accessToken: str
     role: str
     email: str
+    user_id: Optional[int] = None
 
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
@@ -817,10 +855,16 @@ def register(payload: RegisterRequest) -> AuthResponse:
         print(f"Welcome email failed: {exc}")
 
     token = _create_access_token(
-        email=str(user["email"]), role=str(user["role"]), is_active=True
+        email=str(user["email"]),
+        role=str(user["role"]),
+        is_active=True,
+        user_id=int(user["id"]),
     )
     return AuthResponse(
-        accessToken=token, role=str(user["role"]), email=str(user["email"])
+        accessToken=token,
+        role=str(user["role"]),
+        email=str(user["email"]),
+        user_id=int(user["id"]),
     )
 
 
@@ -857,10 +901,16 @@ def login(payload: LoginRequest) -> AuthResponse:
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Inactive account")
     token = _create_access_token(
-        email=str(user["email"]), role=str(user["role"]), is_active=True
+        email=str(user["email"]),
+        role=str(user["role"]),
+        is_active=True,
+        user_id=int(user["id"]),
     )
     return AuthResponse(
-        accessToken=token, role=str(user["role"]), email=str(user["email"])
+        accessToken=token,
+        role=str(user["role"]),
+        email=str(user["email"]),
+        user_id=int(user["id"]),
     )
 
 
@@ -868,8 +918,18 @@ def login(payload: LoginRequest) -> AuthResponse:
 def refresh(user: Dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
     email = str(user.get("email") or "")
     role = str(user.get("role") or "vendor")
-    token = _create_access_token(email=email, role=role, is_active=True)
-    return AuthResponse(accessToken=token, role=role, email=email)
+    token = _create_access_token(
+        email=email,
+        role=role,
+        is_active=True,
+        user_id=int(user["id"]) if user.get("id") is not None else None,
+    )
+    return AuthResponse(
+        accessToken=token,
+        role=role,
+        email=email,
+        user_id=int(user["id"]) if user.get("id") is not None else None,
+    )
 
 def _subscription_user_from_profile(email: Optional[str], role: Optional[str]) -> Dict[str, Any]:
     """Return the durable subscription fields from Postgres profiles.
@@ -959,6 +1019,7 @@ def _public_current_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
 
     merged = {
         "id": user.get("id"),
+        "user_id": user.get("id"),
         "email": user.get("email"),
         "role": user.get("role"),
         "full_name": user.get("full_name"),
