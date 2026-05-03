@@ -89,17 +89,27 @@ def scan_qr(data: dict, event_id: int, db: Session = Depends(get_db)):
 # ✅ 3. Stats
 @router.get("/{event_id}/checkins")
 def checkin_stats(event_id: int, db: Session = Depends(get_db)):
+    total = (
+        db.query(Application)
+        .filter(
+            Application.event_id == event_id,
+            Application.status == "approved",
+        )
+        .count()
+    )
+
     rows = db.query(EventCheckIn).filter_by(event_id=event_id).all()
 
-    total = len(rows)
     checked_in = len([r for r in rows if r.status == "checked_in"])
     late = len([r for r in rows if r.status == "late"])
     no_show = len([r for r in rows if r.status == "no_show"])
+
+    pending = max(total - checked_in - late - no_show, 0)
 
     return {
         "total": total,
         "checked_in": checked_in,
         "late": late,
         "no_show": no_show,
-        "pending": total - checked_in - late - no_show,
+        "pending": pending,
     }
