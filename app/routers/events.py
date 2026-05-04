@@ -1109,6 +1109,9 @@ def get_vendor_event_qr_pass(
             raw_app.get("profileId"),
             raw_app.get("vendor_profile_id"),
             raw_app.get("vendorProfileId"),
+            raw_app.get("id"),
+            raw_app.get("application_id"),
+            raw_app.get("applicationId"),
         ]
         app_vendor_keys = {str(value).strip().lower() for value in app_vendor_values if str(value or "").strip()}
         if requested_vendor not in app_vendor_keys:
