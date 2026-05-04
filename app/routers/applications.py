@@ -2192,3 +2192,10 @@ def mark_messages_read(
 
     _save_store()
     return {"success": True}
+
+@router.get("/debug/applications")
+def debug_applications():
+    return {
+        "count": len(_APPLICATIONS),
+        "applications": _APPLICATIONS,
+    }
