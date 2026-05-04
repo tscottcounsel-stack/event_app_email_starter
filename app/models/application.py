@@ -16,6 +16,7 @@ class Application(Base):
         ForeignKey("events.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+        user_id = Column(Integer, nullable=False)
     )
 
     vendor_email = sa.Column(String, nullable=True, index=True)
