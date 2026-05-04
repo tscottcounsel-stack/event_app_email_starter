@@ -21,7 +21,6 @@ from app.models.profile import Profile, EventAlert
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
 from app.store import _EVENTS, _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
-from app.routers.applications import _APPLICATIONS
 
 logger = logging.getLogger(__name__)
 logger.warning("🔥 app.routers.events loaded (postgres)")
@@ -1062,72 +1061,108 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     return _serialize_event_model(ev)
 
 
-
-
 @router.get("/events/{event_id}/vendors/{vendor_id}/qr")
-def get_vendor_event_qr_pass(event_id: int, vendor_id: str):
-    event_id_str = str(event_id)
-    vendor_id_str = str(vendor_id)
-
-    approved = False
-
-    for app in _APPLICATIONS.values():
-        try:
-            app_event_id = str(app.get("event_id") or app.get("eventId"))
-            app_vendor_id = str(app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or "")
-            app_vendor_email = str(app.get("vendor_email") or "").lower()
-
-            if app_event_id != event_id_str:
-                continue
-
-            # Match by vendor_id OR email fallback
-            if vendor_id_str != app_vendor_id and vendor_id_str != app_vendor_email:
-                continue
-
-            status = str(app.get("status") or "").lower()
-            payment_status = str(app.get("payment_status") or "").lower()
-
-            if status == "approved" and payment_status == "paid":
-                approved = True
-                break
-
-        except Exception:
-            continue
-
-    if not approved:
-        raise HTTPException(status_code=403, detail="Vendor not approved for event")
-
-    return {
-        "event_id": event_id,
-        "vendor_id": vendor_id,
-        "qr_code": f"vendcore:{event_id}:{vendor_id}"
-    }
-
-@router.get("/events/{event_id}")
-def public_get_event_alias(event_id: int, db: Session = Depends(get_db)):
-    return public_get_event(event_id, db)
-
-
-@router.get("/vendor/events")
-def vendor_list_events_alias(db: Session = Depends(get_db)):
-    return public_list_events(db)
-
-
-@router.patch("/events/{event_id}")
-def public_patch_event_alias(
+def get_vendor_event_qr_pass(
     event_id: int,
-    payload: Dict[str, Any] = Body(default={}),
+    vendor_id: str,
     db: Session = Depends(get_db),
 ):
-    ev = _get_event_row_or_404(db, event_id)
-    _apply_event_patch_model(ev, dict(payload or {}))
-    db.add(ev)
-    db.commit()
-    db.refresh(ev)
-    serialized = _serialize_event_model(ev)
-    _sync_event_to_store(serialized)
-    return serialized
+    """Return the event-specific vendor QR/check-in pass.
 
+    This version directly matches the live application store shape used by
+    app.routers.applications. It accepts the vendor id from the URL as either
+    vendor_id, vendor_email, user_id, profile_id, or vendor_profile_id and treats
+    paid applications as pass-eligible even if status naming changes.
+    """
+    event = _get_event_row_or_404(db, int(event_id))
+    expire_reservations_if_needed()
+
+    requested_event_id = str(event_id).strip()
+    requested_vendor = str(vendor_id or "").strip().lower()
+    if not requested_vendor:
+        raise HTTPException(status_code=400, detail="Vendor id is required")
+
+    approved_app = None
+
+    for raw_app in _APPLICATIONS.values():
+        if not isinstance(raw_app, dict):
+            continue
+
+        app_event_id = str(
+            raw_app.get("event_id")
+            or raw_app.get("eventId")
+            or raw_app.get("event")
+            or raw_app.get("eventID")
+            or ""
+        ).strip()
+        if app_event_id != requested_event_id:
+            continue
+
+        app_vendor_values = [
+            raw_app.get("vendor_id"),
+            raw_app.get("vendorId"),
+            raw_app.get("vendor_email"),
+            raw_app.get("vendorEmail"),
+            raw_app.get("email"),
+            raw_app.get("user_id"),
+            raw_app.get("userId"),
+            raw_app.get("profile_id"),
+            raw_app.get("profileId"),
+            raw_app.get("vendor_profile_id"),
+            raw_app.get("vendorProfileId"),
+        ]
+        app_vendor_keys = {str(value).strip().lower() for value in app_vendor_values if str(value or "").strip()}
+        if requested_vendor not in app_vendor_keys:
+            continue
+
+        status = str(raw_app.get("status") or raw_app.get("application_status") or raw_app.get("applicationStatus") or "").strip().lower()
+        review_status = str(raw_app.get("review_status") or raw_app.get("reviewStatus") or "").strip().lower()
+        payment_status = _coerce_payment_status(raw_app.get("payment_status") or raw_app.get("paymentStatus"))
+
+        if payment_status == "paid" or status in {"approved", "accepted", "confirmed", "complete", "completed", "paid"} or review_status in {"approved", "accepted", "confirmed", "complete", "completed"}:
+            approved_app = dict(raw_app)
+            break
+
+    if approved_app is None:
+        raise HTTPException(status_code=403, detail="Vendor not approved for event")
+
+    resolved_vendor_id = (
+        approved_app.get("vendor_id")
+        or approved_app.get("vendorId")
+        or approved_app.get("vendor_email")
+        or approved_app.get("vendorEmail")
+        or vendor_id
+    )
+    application_id = approved_app.get("id") or approved_app.get("application_id") or approved_app.get("applicationId") or ""
+    token = _build_vendor_event_pass_token(int(event_id), resolved_vendor_id, application_id)
+    qr_value = f"vendcore://check-in?event_id={int(event_id)}&vendor_id={resolved_vendor_id}&application_id={application_id}&token={token}"
+
+    return {
+        "ok": True,
+        "event_id": int(event.id),
+        "eventId": int(event.id),
+        "event_title": event.title,
+        "eventTitle": event.title,
+        "vendor_id": str(resolved_vendor_id),
+        "vendorId": str(resolved_vendor_id),
+        "application_id": str(application_id),
+        "applicationId": str(application_id),
+        "vendor_email": approved_app.get("vendor_email") or approved_app.get("vendorEmail") or "",
+        "vendor_name": approved_app.get("vendor_name") or approved_app.get("business_name") or approved_app.get("vendor_email") or "Vendor",
+        "business_name": approved_app.get("business_name") or approved_app.get("vendor_name") or "",
+        "booth_id": approved_app.get("booth_id") or approved_app.get("requested_booth_id") or "",
+        "booth_category": approved_app.get("booth_category") or approved_app.get("requested_booth_category") or "",
+        "status": approved_app.get("status") or "approved",
+        "payment_status": approved_app.get("payment_status") or "paid",
+        "qr_code": qr_value,
+        "qrCode": qr_value,
+        "pass_url": qr_value,
+        "passUrl": qr_value,
+        "checked_in": bool(approved_app.get("checked_in")),
+        "checkedIn": bool(approved_app.get("checked_in")),
+        "checked_in_at": approved_app.get("checked_in_at"),
+        "checkedInAt": approved_app.get("checked_in_at"),
+    }
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
