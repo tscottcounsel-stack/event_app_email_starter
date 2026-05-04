@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import logging
@@ -1088,14 +1088,15 @@ def get_vendor_event_qr_pass(
         if not isinstance(raw_app, dict):
             continue
 
-        app_event_id = str(
+        app_event_id = int(
             raw_app.get("event_id")
             or raw_app.get("eventId")
             or raw_app.get("event")
             or raw_app.get("eventID")
-            or ""
-        ).strip()
-        if app_event_id != requested_event_id:
+            or 0
+        )
+
+        if app_event_id != int(event_id):
             continue
 
         app_vendor_values = [
