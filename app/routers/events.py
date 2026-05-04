@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -1060,6 +1061,80 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     return _serialize_event_model(ev)
 
 
+@router.get("/events/{event_id}/vendors/{vendor_id}/qr")
+def get_vendor_event_qr_pass(
+    event_id: int,
+    vendor_id: str,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the event-specific vendor check-in pass used by the vendor QR page.
+
+    The frontend currently calls /events/{event_id}/vendors/{vendor_id}/qr.
+    This route keeps that exact path live and only returns a pass when the vendor
+    has an approved/paid application for the event.
+    """
+    event = _get_event_row_or_404(db, int(event_id))
+    vendor_payload, vendor_keys = _resolve_vendor_pass_identity(db, vendor_id)
+
+    if not _user_can_access_vendor_pass(user, vendor_payload, vendor_keys):
+        raise HTTPException(status_code=403, detail="Not allowed to access this vendor pass")
+
+    expire_reservations_if_needed()
+
+    matching_apps = [
+        dict(app)
+        for app in _APPLICATIONS.values()
+        if _application_matches_event_and_vendor(app, int(event_id), vendor_keys)
+    ]
+
+    approved_app = next((app for app in matching_apps if _application_is_approved_for_pass(app)), None)
+    if approved_app is None:
+        raise HTTPException(status_code=403, detail="Vendor not approved for event")
+
+    resolved_vendor_id = (
+        vendor_payload.get("vendor_profile_id")
+        or approved_app.get("vendor_profile_id")
+        or approved_app.get("vendor_id")
+        or vendor_payload.get("vendor_id")
+        or vendor_id
+    )
+    application_id = approved_app.get("id") or approved_app.get("application_id") or approved_app.get("applicationId") or ""
+    token = _build_vendor_event_pass_token(int(event_id), resolved_vendor_id, application_id)
+    qr_value = f"vendcore://check-in?event_id={int(event_id)}&vendor_id={resolved_vendor_id}&token={token}"
+
+    return {
+        "ok": True,
+        "event_id": int(event.id),
+        "eventId": int(event.id),
+        "event_title": event.title,
+        "eventTitle": event.title,
+        "vendor_id": resolved_vendor_id,
+        "vendorId": resolved_vendor_id,
+        "vendor_email": vendor_payload.get("email") or approved_app.get("vendor_email") or "",
+        "vendorEmail": vendor_payload.get("email") or approved_app.get("vendor_email") or "",
+        "vendor_name": vendor_payload.get("business_name") or approved_app.get("vendor_name") or approved_app.get("business_name") or "Vendor",
+        "vendorName": vendor_payload.get("business_name") or approved_app.get("vendor_name") or approved_app.get("business_name") or "Vendor",
+        "application_id": application_id,
+        "applicationId": application_id,
+        "application_status": approved_app.get("status") or approved_app.get("application_status") or "approved",
+        "applicationStatus": approved_app.get("status") or approved_app.get("application_status") or "approved",
+        "payment_status": _coerce_payment_status(approved_app.get("payment_status") or approved_app.get("paymentStatus")),
+        "paymentStatus": _coerce_payment_status(approved_app.get("payment_status") or approved_app.get("paymentStatus")),
+        "check_in_status": approved_app.get("check_in_status") or approved_app.get("checkInStatus") or "not_checked_in",
+        "checkInStatus": approved_app.get("check_in_status") or approved_app.get("checkInStatus") or "not_checked_in",
+        "token": token,
+        "pass_token": token,
+        "passToken": token,
+        "qr_value": qr_value,
+        "qrValue": qr_value,
+        "qr_code": qr_value,
+        "qrCode": qr_value,
+        "issued_at": utc_now_iso(),
+        "issuedAt": utc_now_iso(),
+    }
+
+
 @router.get("/events/{event_id}")
 def public_get_event_alias(event_id: int, db: Session = Depends(get_db)):
     return public_get_event(event_id, db)
@@ -1084,6 +1159,109 @@ def public_patch_event_alias(
     serialized = _serialize_event_model(ev)
     _sync_event_to_store(serialized)
     return serialized
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _application_matches_event_and_vendor(app: Dict[str, Any], event_id: int, vendor_keys: set[str]) -> bool:
+    if not isinstance(app, dict):
+        return False
+
+    if _safe_int(app.get("event_id")) != int(event_id):
+        return False
+
+    candidate_values = [
+        app.get("vendor_id"),
+        app.get("vendor_email"),
+        app.get("email"),
+        app.get("profile_id"),
+        app.get("vendor_profile_id"),
+        app.get("user_id"),
+    ]
+    candidates = {_norm_email(value) for value in candidate_values if _norm_email(value)}
+    return bool(candidates.intersection(vendor_keys))
+
+
+def _application_is_approved_for_pass(app: Dict[str, Any]) -> bool:
+    status = str(app.get("status") or app.get("application_status") or "").strip().lower()
+    review_status = str(app.get("review_status") or app.get("reviewStatus") or "").strip().lower()
+    payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
+    checked_in_status = str(app.get("check_in_status") or app.get("checkInStatus") or "").strip().lower()
+
+    approved_statuses = {"approved", "accepted", "confirmed", "checked_in", "complete", "completed"}
+    return bool(
+        status in approved_statuses
+        or review_status in approved_statuses
+        or payment_status == "paid"
+        or checked_in_status == "checked_in"
+    )
+
+
+def _resolve_vendor_pass_identity(db: Session, vendor_id: Any) -> tuple[Dict[str, Any], set[str]]:
+    raw = str(vendor_id or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Vendor id is required")
+
+    keys = {_norm_email(raw)} if _norm_email(raw) else set()
+    vendor_payload: Dict[str, Any] = {"vendor_id": raw}
+
+    profile = None
+    numeric_id = _safe_int(raw, 0)
+    if numeric_id:
+        profile = db.query(Profile).filter(Profile.id == numeric_id, Profile.role == "vendor").one_or_none()
+
+    if profile is None and "@" in raw:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == raw.lower(), Profile.role == "vendor")
+            .one_or_none()
+        )
+
+    if profile is not None:
+        data = dict(profile.data or {})
+        vendor_payload.update(data)
+        vendor_payload.update({
+            "vendor_profile_id": profile.id,
+            "vendor_id": data.get("vendor_id") or profile.email or str(profile.id),
+            "email": profile.email,
+            "business_name": data.get("business_name") or data.get("businessName") or profile.business_name or "",
+            "contact_name": data.get("contact_name") or data.get("contactName") or profile.display_name or "",
+        })
+        keys.update({_norm_email(profile.email), str(profile.id).strip().lower()})
+        data_vendor_id = data.get("vendor_id")
+        if data_vendor_id:
+            keys.add(str(data_vendor_id).strip().lower())
+    else:
+        keys.add(raw.lower())
+
+    keys = {key for key in keys if key}
+    return vendor_payload, keys
+
+
+def _user_can_access_vendor_pass(user: Dict[str, Any], vendor_payload: Dict[str, Any], vendor_keys: set[str]) -> bool:
+    role = str((user or {}).get("role") or "").strip().lower()
+    if role in {"admin", "organizer"}:
+        return True
+
+    user_keys = {
+        _norm_email((user or {}).get("email")),
+        str((user or {}).get("id") or "").strip().lower(),
+        str((user or {}).get("sub") or "").strip().lower(),
+        str((user or {}).get("vendor_id") or "").strip().lower(),
+    }
+    user_keys = {key for key in user_keys if key}
+    return bool(user_keys.intersection(vendor_keys))
+
+
+def _build_vendor_event_pass_token(event_id: int, vendor_id: Any, application_id: Any = "") -> str:
+    raw = f"vendcore-pass:{event_id}:{vendor_id}:{application_id}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return f"vcp_{digest}"
 
 
 @router.get("/events/{event_id}/stats")
