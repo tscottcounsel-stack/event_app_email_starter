@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import logging
@@ -1482,11 +1482,14 @@ async def check_in_vendor(
 ):
     """Public QR check-in endpoint for scanned vendor passes.
 
-    Accepts either direct JSON fields:
+    Accepts direct JSON fields:
     {event_id, vendor_id, application_id, token}
 
-    Or a scanned QR/pass value:
+    Also accepts a scanned QR/pass value:
     {qr_code: "vendcore://check-in?event_id=...&vendor_id=...&application_id=...&token=..."}
+
+    For easier field testing, query-string values are merged in too, so this also works:
+    POST /check-in?event_id=...&vendor_id=...&application_id=...&token=...
     """
     try:
         data = await request.json()
@@ -1495,6 +1498,11 @@ async def check_in_vendor(
 
     if not isinstance(data, dict):
         data = {}
+
+    # Merge query params without overwriting JSON body values. This makes scanner
+    # integrations and manual field testing less brittle.
+    for key, value in request.query_params.items():
+        data.setdefault(key, value)
 
     normalized = _extract_checkin_payload(data)
     event_id = _safe_int(normalized.get("event_id"), 0)
@@ -1517,22 +1525,50 @@ async def check_in_vendor(
 
     now = utc_now_iso()
     already_checked_in = bool(app.get("checked_in"))
-    if not already_checked_in:
-        app["checked_in"] = True
-        app["checked_in_at"] = now
+
+    if already_checked_in:
+        # Duplicate scans should be safe and clear for the organizer. Do not
+        # overwrite the original check-in timestamp.
+        checked_in_at = app.get("checked_in_at") or now
         app["check_in_status"] = "checked_in"
-        app["updated_at"] = now
+        save_store()
+        return {
+            "ok": True,
+            "message": "Vendor already checked in",
+            "already_checked_in": True,
+            "alreadyCheckedIn": True,
+            "checked_in": True,
+            "checkedIn": True,
+            "checked_in_at": checked_in_at,
+            "checkedInAt": checked_in_at,
+            "application": _serialize_checkin_application(app, event_id, stored_key),
+        }
+
+    app["checked_in"] = True
+    app["checked_in_at"] = now
+    app["check_in_status"] = "checked_in"
+    app["updated_at"] = now
+
+    checked_in_by = _norm_email(
+        data.get("checked_in_by")
+        or data.get("checkedInBy")
+        or data.get("scanner_email")
+        or data.get("scannerEmail")
+    )
+    if checked_in_by:
+        app["checked_in_by"] = checked_in_by
 
     save_store()
 
     return {
         "ok": True,
-        "already_checked_in": already_checked_in,
-        "alreadyCheckedIn": already_checked_in,
+        "message": "Vendor checked in successfully",
+        "already_checked_in": False,
+        "alreadyCheckedIn": False,
         "checked_in": True,
         "checkedIn": True,
-        "checked_in_at": app.get("checked_in_at") or now,
-        "checkedInAt": app.get("checked_in_at") or now,
+        "checked_in_at": now,
+        "checkedInAt": now,
         "application": _serialize_checkin_application(app, event_id, stored_key),
     }
 
