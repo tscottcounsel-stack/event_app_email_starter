@@ -21,6 +21,7 @@ from app.models.profile import Profile, EventAlert
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
 from app.store import _EVENTS, _PAYMENTS, _REQUIREMENTS, get_store_snapshot, save_store
+from app.routers.applications import _APPLICATIONS
 
 logger = logging.getLogger(__name__)
 logger.warning("🔥 app.routers.events loaded (postgres)")
@@ -1061,99 +1062,46 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     return _serialize_event_model(ev)
 
 
+
+
 @router.get("/events/{event_id}/vendors/{vendor_id}/qr")
-def get_vendor_event_qr_pass(
-    event_id: int,
-    vendor_id: str,
-    db: Session = Depends(get_db),
-):
-    """Return the event-specific vendor check-in pass used by the vendor QR page.
+def get_vendor_event_qr_pass(event_id: int, vendor_id: str):
+    event_id_str = str(event_id)
+    vendor_id_str = str(vendor_id)
 
-    The frontend currently calls /events/{event_id}/vendors/{vendor_id}/qr.
-    This endpoint intentionally does not require browser auth because vendors
-    need the QR pass page to load reliably from the event-pass URL. Access is
-    still limited by the approved/paid application check below.
-    """
-    event = _get_event_row_or_404(db, int(event_id))
-    vendor_payload, vendor_keys = _resolve_vendor_pass_identity(db, vendor_id)
+    approved = False
 
-    expire_reservations_if_needed()
+    for app in _APPLICATIONS.values():
+        try:
+            app_event_id = str(app.get("event_id") or app.get("eventId"))
+            app_vendor_id = str(app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or "")
+            app_vendor_email = str(app.get("vendor_email") or "").lower()
 
-    matching_apps = [
-        dict(app)
-        for app in _APPLICATIONS.values()
-        if _application_matches_event_and_vendor(app, int(event_id), vendor_keys)
-    ]
+            if app_event_id != event_id_str:
+                continue
 
-    approved_app = next((app for app in matching_apps if _application_is_approved_for_pass(app)), None)
+            # Match by vendor_id OR email fallback
+            if vendor_id_str != app_vendor_id and vendor_id_str != app_vendor_email:
+                continue
 
-    # Rollout-safe fallback:
-    # Older application records sometimes store vendor identity as email, profile id,
-    # or a legacy vendor_id. If no matching approved row is found but the vendor
-    # profile itself is verified, still return the pass so the QR page works.
-    # This fixes the false "Vendor not approved for event" state while keeping
-    # the event/vendor token specific to this pass.
-    if approved_app is None and _vendor_is_verified_for_pass(vendor_payload):
-        approved_app = {
-            "id": "profile_verified",
-            "application_id": "profile_verified",
-            "event_id": int(event_id),
-            "vendor_id": vendor_payload.get("vendor_id") or vendor_id,
-            "vendor_profile_id": vendor_payload.get("vendor_profile_id"),
-            "vendor_email": vendor_payload.get("email") or "",
-            "vendor_name": vendor_payload.get("business_name") or vendor_payload.get("contact_name") or "Vendor",
-            "business_name": vendor_payload.get("business_name") or "",
-            "status": "verified_vendor",
-            "application_status": "verified_vendor",
-            "payment_status": "not_required",
-            "check_in_status": "not_checked_in",
-        }
+            status = str(app.get("status") or "").lower()
+            payment_status = str(app.get("payment_status") or "").lower()
 
-    if approved_app is None:
+            if status == "approved" and payment_status == "paid":
+                approved = True
+                break
+
+        except Exception:
+            continue
+
+    if not approved:
         raise HTTPException(status_code=403, detail="Vendor not approved for event")
 
-    resolved_vendor_id = (
-        vendor_payload.get("vendor_profile_id")
-        or approved_app.get("vendor_profile_id")
-        or approved_app.get("vendor_id")
-        or vendor_payload.get("vendor_id")
-        or vendor_id
-    )
-    application_id = approved_app.get("id") or approved_app.get("application_id") or approved_app.get("applicationId") or ""
-    token = _build_vendor_event_pass_token(int(event_id), resolved_vendor_id, application_id)
-    qr_value = f"vendcore://check-in?event_id={int(event_id)}&vendor_id={resolved_vendor_id}&token={token}"
-
     return {
-        "ok": True,
-        "event_id": int(event.id),
-        "eventId": int(event.id),
-        "event_title": event.title,
-        "eventTitle": event.title,
-        "vendor_id": resolved_vendor_id,
-        "vendorId": resolved_vendor_id,
-        "vendor_email": vendor_payload.get("email") or approved_app.get("vendor_email") or "",
-        "vendorEmail": vendor_payload.get("email") or approved_app.get("vendor_email") or "",
-        "vendor_name": vendor_payload.get("business_name") or approved_app.get("vendor_name") or approved_app.get("business_name") or "Vendor",
-        "vendorName": vendor_payload.get("business_name") or approved_app.get("vendor_name") or approved_app.get("business_name") or "Vendor",
-        "application_id": application_id,
-        "applicationId": application_id,
-        "application_status": approved_app.get("status") or approved_app.get("application_status") or "approved",
-        "applicationStatus": approved_app.get("status") or approved_app.get("application_status") or "approved",
-        "payment_status": _coerce_payment_status(approved_app.get("payment_status") or approved_app.get("paymentStatus")),
-        "paymentStatus": _coerce_payment_status(approved_app.get("payment_status") or approved_app.get("paymentStatus")),
-        "check_in_status": approved_app.get("check_in_status") or approved_app.get("checkInStatus") or "not_checked_in",
-        "checkInStatus": approved_app.get("check_in_status") or approved_app.get("checkInStatus") or "not_checked_in",
-        "token": token,
-        "pass_token": token,
-        "passToken": token,
-        "qr_value": qr_value,
-        "qrValue": qr_value,
-        "qr_code": qr_value,
-        "qrCode": qr_value,
-        "issued_at": utc_now_iso(),
-        "issuedAt": utc_now_iso(),
+        "event_id": event_id,
+        "vendor_id": vendor_id,
+        "qr_code": f"vendcore:{event_id}:{vendor_id}"
     }
-
 
 @router.get("/events/{event_id}")
 def public_get_event_alias(event_id: int, db: Session = Depends(get_db)):
