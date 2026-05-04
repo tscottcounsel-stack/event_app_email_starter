@@ -1362,37 +1362,36 @@ def _application_id_value(app: Dict[str, Any], fallback: Any = "") -> str:
     return str(app.get("id") or app.get("application_id") or app.get("applicationId") or fallback or "").strip()
 
 
-def _find_checkin_application(event_id: int, application_id: str = "", vendor_id: str = "") -> tuple[Any, Dict[str, Any]]:
+def _find_checkin_application(event_id: int, application_id: str = "", vendor_id: str = ""):
     requested_app_id = str(application_id or "").strip()
     requested_vendor = str(vendor_id or "").strip().lower()
-
-    # Prefer the application id because the QR pass is application-specific.
-    if requested_app_id:
-        direct = _APPLICATIONS.get(requested_app_id)
-        if direct is None and requested_app_id.isdigit():
-            direct = _APPLICATIONS.get(int(requested_app_id))
-        if isinstance(direct, dict) and _application_event_id(direct) == int(event_id):
-            if not requested_vendor or requested_vendor in _application_vendor_keys(direct):
-                return requested_app_id, direct
 
     for stored_key, app in _APPLICATIONS.items():
         if not isinstance(app, dict):
             continue
+
         if _application_event_id(app) != int(event_id):
             continue
 
-        app_id = _application_id_value(app, stored_key)
-        if requested_app_id and app_id != requested_app_id and str(stored_key) != requested_app_id:
-            continue
+        app_id = str(
+            app.get("id")
+            or app.get("application_id")
+            or app.get("applicationId")
+            or stored_key
+        ).strip()
 
         vendor_keys = _application_vendor_keys(app)
+
+        # 🔥 MATCH LOGIC (fix)
+        if requested_app_id and requested_app_id != app_id:
+            continue
+
         if requested_vendor and requested_vendor not in vendor_keys:
             continue
 
         return stored_key, app
 
     raise HTTPException(status_code=404, detail="Check-in application not found")
-
 
 def _validate_checkin_token(app: Dict[str, Any], event_id: int, provided_token: str) -> None:
     provided = str(provided_token or "").strip()
