@@ -12,7 +12,7 @@ from app.utils.qr_tokens import generate_qr_token, verify_qr_token
 
 router = APIRouter(prefix="/events", tags=["checkins"])
 
-APPROVED_APPLICATION_STATUSES = ("approved", "complete")
+APPROVED_APPLICATION_STATUSES = ("approved",)
 
 
 # ✅ 1. Generate QR by application user_id
