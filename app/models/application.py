@@ -11,13 +11,19 @@ class Application(Base):
     __tablename__ = "applications"
 
     id = sa.Column(Integer, primary_key=True, index=True)
-    event_id = sa.Column(
-        Integer,
-        ForeignKey("events.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-        user_id = Column(Integer, nullable=False)
-    )
+
+event_id = sa.Column(
+    Integer,
+    ForeignKey("events.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+)
+
+user_id = sa.Column(
+    Integer,
+    nullable=False,
+    index=True,
+)
 
     vendor_email = sa.Column(String, nullable=True, index=True)
     vendor_name = sa.Column(String, nullable=True)
