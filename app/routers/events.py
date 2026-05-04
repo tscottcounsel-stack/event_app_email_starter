@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -1069,11 +1070,10 @@ def get_vendor_event_qr_pass(
 ):
     """Return the event-specific vendor QR/check-in pass.
 
-    Fix: match against the live applications store using defensive normalization.
-    The QR pass now accepts the requested vendor as vendor_id, user_id, profile id,
-    or vendor email. It also includes a safe single-approved-application fallback
-    for the current rollout so one valid paid/approved app for an event cannot be
-    blocked by a stale frontend/profile id mismatch.
+    This version directly matches the live application store shape used by
+    app.routers.applications. It accepts the vendor id from the URL as either
+    vendor_id, vendor_email, user_id, profile_id, or vendor_profile_id and treats
+    paid applications as pass-eligible even if status naming changes.
     """
     event = _get_event_row_or_404(db, int(event_id))
     expire_reservations_if_needed()
@@ -1083,68 +1083,49 @@ def get_vendor_event_qr_pass(
     if not requested_vendor:
         raise HTTPException(status_code=400, detail="Vendor id is required")
 
-    def _qr_app_event_id(app: Dict[str, Any]) -> str:
-        return str(
-            app.get("event_id")
-            or app.get("eventId")
-            or app.get("event")
-            or app.get("eventID")
-            or ""
-        ).strip()
-
-    def _qr_vendor_keys(app: Dict[str, Any]) -> set[str]:
-        values = [
-            app.get("vendor_id"),
-            app.get("vendorId"),
-            app.get("vendor_email"),
-            app.get("vendorEmail"),
-            app.get("email"),
-            app.get("user_id"),
-            app.get("userId"),
-            app.get("profile_id"),
-            app.get("profileId"),
-            app.get("vendor_profile_id"),
-            app.get("vendorProfileId"),
-        ]
-        return {str(value).strip().lower() for value in values if str(value or "").strip()}
-
-    def _qr_app_is_pass_eligible(app: Dict[str, Any]) -> bool:
-        status = str(app.get("status") or app.get("application_status") or app.get("applicationStatus") or "").strip().lower()
-        review_status = str(app.get("review_status") or app.get("reviewStatus") or "").strip().lower()
-        payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
-        eligible_statuses = {"approved", "accepted", "confirmed", "complete", "completed", "paid"}
-        return bool(payment_status == "paid" or status in eligible_statuses or review_status in eligible_statuses)
-
-    event_apps: list[Dict[str, Any]] = []
-    directly_matched_app: Optional[Dict[str, Any]] = None
+    approved_app = None
 
     for raw_app in _APPLICATIONS.values():
         if not isinstance(raw_app, dict):
             continue
-        if _qr_app_event_id(raw_app) != requested_event_id:
-            continue
-        if not _qr_app_is_pass_eligible(raw_app):
+
+        app_event_id = str(
+            raw_app.get("event_id")
+            or raw_app.get("eventId")
+            or raw_app.get("event")
+            or raw_app.get("eventID")
+            or ""
+        ).strip()
+        if app_event_id != requested_event_id:
             continue
 
-        event_apps.append(raw_app)
-        if requested_vendor in _qr_vendor_keys(raw_app):
-            directly_matched_app = raw_app
+        app_vendor_values = [
+            raw_app.get("vendor_id"),
+            raw_app.get("vendorId"),
+            raw_app.get("vendor_email"),
+            raw_app.get("vendorEmail"),
+            raw_app.get("email"),
+            raw_app.get("user_id"),
+            raw_app.get("userId"),
+            raw_app.get("profile_id"),
+            raw_app.get("profileId"),
+            raw_app.get("vendor_profile_id"),
+            raw_app.get("vendorProfileId"),
+        ]
+        app_vendor_keys = {str(value).strip().lower() for value in app_vendor_values if str(value or "").strip()}
+        if requested_vendor not in app_vendor_keys:
+            continue
+
+        status = str(raw_app.get("status") or raw_app.get("application_status") or raw_app.get("applicationStatus") or "").strip().lower()
+        review_status = str(raw_app.get("review_status") or raw_app.get("reviewStatus") or "").strip().lower()
+        payment_status = _coerce_payment_status(raw_app.get("payment_status") or raw_app.get("paymentStatus"))
+
+        if payment_status == "paid" or status in {"approved", "accepted", "confirmed", "complete", "completed", "paid"} or review_status in {"approved", "accepted", "confirmed", "complete", "completed"}:
+            approved_app = dict(raw_app)
             break
 
-    approved_app = directly_matched_app
-
-    # Rollout fallback: if there is exactly one approved/paid application for the
-    # event, use it even when the URL vendor id is stale. This prevents the QR
-    # page from falsely blocking a valid paid vendor while the frontend vendor id
-    # source is being cleaned up.
-    if approved_app is None and len(event_apps) == 1:
-        approved_app = event_apps[0]
-
     if approved_app is None:
-        raise HTTPException(
-            status_code=403,
-            detail="Vendor not approved for event",
-        )
+        raise HTTPException(status_code=403, detail="Vendor not approved for event")
 
     resolved_vendor_id = (
         approved_app.get("vendor_id")
@@ -1165,8 +1146,6 @@ def get_vendor_event_qr_pass(
         "eventTitle": event.title,
         "vendor_id": str(resolved_vendor_id),
         "vendorId": str(resolved_vendor_id),
-        "requested_vendor_id": str(vendor_id),
-        "requestedVendorId": str(vendor_id),
         "application_id": str(application_id),
         "applicationId": str(application_id),
         "vendor_email": approved_app.get("vendor_email") or approved_app.get("vendorEmail") or "",
@@ -1310,6 +1289,244 @@ def _build_vendor_event_pass_token(event_id: int, vendor_id: Any, application_id
     raw = f"vendcore-pass:{event_id}:{vendor_id}:{application_id}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
     return f"vcp_{digest}"
+
+
+# ---------------- Vendor QR check-in ----------------
+
+def _extract_checkin_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Normalize check-in data from either a scanned QR URL or direct JSON fields."""
+    payload = dict(payload or {})
+    raw_url = str(
+        payload.get("qr_code")
+        or payload.get("qrCode")
+        or payload.get("pass_url")
+        or payload.get("passUrl")
+        or payload.get("url")
+        or payload.get("scan")
+        or ""
+    ).strip()
+
+    parsed_values: Dict[str, str] = {}
+    if raw_url:
+        try:
+            parsed = urlparse(raw_url)
+            query = parse_qs(parsed.query or "")
+            for key, values in query.items():
+                if values:
+                    parsed_values[key] = str(values[0]).strip()
+        except Exception:
+            parsed_values = {}
+
+    def pick(*keys: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+            value = parsed_values.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    return {
+        "event_id": pick("event_id", "eventId"),
+        "vendor_id": pick("vendor_id", "vendorId", "vendor_email", "vendorEmail"),
+        "application_id": pick("application_id", "applicationId", "app_id", "appId"),
+        "token": pick("token"),
+        "source": raw_url,
+    }
+
+
+def _application_event_id(app: Dict[str, Any]) -> int:
+    return _safe_int(app.get("event_id") or app.get("eventId") or app.get("event") or app.get("eventID"), 0)
+
+
+def _application_vendor_keys(app: Dict[str, Any]) -> set[str]:
+    values = [
+        app.get("vendor_id"),
+        app.get("vendorId"),
+        app.get("vendor_email"),
+        app.get("vendorEmail"),
+        app.get("email"),
+        app.get("user_id"),
+        app.get("userId"),
+        app.get("profile_id"),
+        app.get("profileId"),
+        app.get("vendor_profile_id"),
+        app.get("vendorProfileId"),
+    ]
+    return {str(value).strip().lower() for value in values if str(value or "").strip()}
+
+
+def _application_id_value(app: Dict[str, Any], fallback: Any = "") -> str:
+    return str(app.get("id") or app.get("application_id") or app.get("applicationId") or fallback or "").strip()
+
+
+def _find_checkin_application(event_id: int, application_id: str = "", vendor_id: str = "") -> tuple[Any, Dict[str, Any]]:
+    requested_app_id = str(application_id or "").strip()
+    requested_vendor = str(vendor_id or "").strip().lower()
+
+    # Prefer the application id because the QR pass is application-specific.
+    if requested_app_id:
+        direct = _APPLICATIONS.get(requested_app_id)
+        if direct is None and requested_app_id.isdigit():
+            direct = _APPLICATIONS.get(int(requested_app_id))
+        if isinstance(direct, dict) and _application_event_id(direct) == int(event_id):
+            if not requested_vendor or requested_vendor in _application_vendor_keys(direct):
+                return requested_app_id, direct
+
+    for stored_key, app in _APPLICATIONS.items():
+        if not isinstance(app, dict):
+            continue
+        if _application_event_id(app) != int(event_id):
+            continue
+
+        app_id = _application_id_value(app, stored_key)
+        if requested_app_id and app_id != requested_app_id and str(stored_key) != requested_app_id:
+            continue
+
+        vendor_keys = _application_vendor_keys(app)
+        if requested_vendor and requested_vendor not in vendor_keys:
+            continue
+
+        return stored_key, app
+
+    raise HTTPException(status_code=404, detail="Check-in application not found")
+
+
+def _validate_checkin_token(app: Dict[str, Any], event_id: int, provided_token: str) -> None:
+    provided = str(provided_token or "").strip()
+    if not provided:
+        raise HTTPException(status_code=400, detail="Check-in token is required")
+
+    app_id = _application_id_value(app)
+    vendor_candidates = _application_vendor_keys(app)
+    for candidate in vendor_candidates:
+        expected = _build_vendor_event_pass_token(int(event_id), candidate, app_id)
+        if provided == expected:
+            return
+
+    # Older rollout passes may have been generated with the raw vendor_id field before normalization.
+    raw_vendor = app.get("vendor_id") or app.get("vendorId") or app.get("vendor_email") or app.get("vendorEmail") or ""
+    if raw_vendor and provided == _build_vendor_event_pass_token(int(event_id), raw_vendor, app_id):
+        return
+
+    raise HTTPException(status_code=403, detail="Invalid check-in token")
+
+
+def _serialize_checkin_application(app: Dict[str, Any], event_id: int, stored_key: Any = "") -> Dict[str, Any]:
+    app_id = _application_id_value(app, stored_key)
+    vendor_id = app.get("vendor_id") or app.get("vendorId") or app.get("vendor_email") or app.get("vendorEmail") or ""
+    return {
+        "application_id": str(app_id),
+        "applicationId": str(app_id),
+        "event_id": int(event_id),
+        "eventId": int(event_id),
+        "vendor_id": str(vendor_id),
+        "vendorId": str(vendor_id),
+        "vendor_email": app.get("vendor_email") or app.get("vendorEmail") or "",
+        "vendor_name": app.get("vendor_name") or app.get("business_name") or app.get("vendor_email") or "Vendor",
+        "business_name": app.get("business_name") or app.get("vendor_name") or "",
+        "booth_id": app.get("booth_id") or app.get("requested_booth_id") or "",
+        "booth_category": app.get("booth_category") or app.get("requested_booth_category") or "",
+        "status": app.get("status") or "",
+        "payment_status": app.get("payment_status") or app.get("paymentStatus") or "",
+        "checked_in": bool(app.get("checked_in")),
+        "checkedIn": bool(app.get("checked_in")),
+        "checked_in_at": app.get("checked_in_at"),
+        "checkedInAt": app.get("checked_in_at"),
+        "checked_in_by": app.get("checked_in_by") or app.get("checkedInBy") or "",
+        "check_in_status": app.get("check_in_status") or app.get("checkInStatus") or "",
+    }
+
+
+@router.post("/check-in")
+def check_in_vendor_from_qr(
+    payload: Dict[str, Any] = Body(default={}),
+    user: Optional[Dict[str, Any]] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Organizer-facing check-in endpoint for scanned vendor QR passes.
+
+    Accepts either the full vendcore://check-in?... QR value or direct JSON fields:
+    event_id, vendor_id, application_id, token.
+    """
+    normalized = _extract_checkin_payload(payload)
+    event_id = _safe_int(normalized.get("event_id"), 0)
+    if not event_id:
+        raise HTTPException(status_code=400, detail="event_id is required")
+
+    _get_event_row_or_404(db, event_id)
+    expire_reservations_if_needed()
+
+    stored_key, app = _find_checkin_application(
+        event_id=event_id,
+        application_id=normalized.get("application_id") or "",
+        vendor_id=normalized.get("vendor_id") or "",
+    )
+
+    if not _application_is_approved_for_pass(app):
+        raise HTTPException(status_code=403, detail="Vendor is not approved or paid for this event")
+
+    _validate_checkin_token(app, event_id, normalized.get("token") or "")
+
+    now = utc_now_iso()
+    already_checked_in = bool(app.get("checked_in"))
+    if not already_checked_in:
+        app["checked_in"] = True
+        app["checked_in_at"] = now
+        app["check_in_status"] = "checked_in"
+        app["updated_at"] = now
+
+    checker_email = _norm_email((user or {}).get("email"))
+    if checker_email:
+        app["checked_in_by"] = checker_email
+
+    save_store()
+
+    return {
+        "ok": True,
+        "already_checked_in": already_checked_in,
+        "alreadyCheckedIn": already_checked_in,
+        "checked_in_at": app.get("checked_in_at") or now,
+        "checkedInAt": app.get("checked_in_at") or now,
+        "application": _serialize_checkin_application(app, event_id, stored_key),
+    }
+
+
+@router.get("/events/{event_id}/check-ins")
+def list_event_checkins(
+    event_id: int,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Organizer/admin summary of check-in status for an event."""
+    _get_owned_event_or_404(db, int(event_id), user)
+    expire_reservations_if_needed()
+
+    rows = []
+    for stored_key, app in _APPLICATIONS.items():
+        if not isinstance(app, dict):
+            continue
+        if _application_event_id(app) != int(event_id):
+            continue
+        if not _application_is_approved_for_pass(app):
+            continue
+        rows.append(_serialize_checkin_application(app, int(event_id), stored_key))
+
+    rows.sort(key=lambda row: (not bool(row.get("checked_in")), str(row.get("vendor_name") or "").lower()))
+    checked_in_count = sum(1 for row in rows if row.get("checked_in"))
+
+    return {
+        "ok": True,
+        "event_id": int(event_id),
+        "eventId": int(event_id),
+        "total": len(rows),
+        "checked_in": checked_in_count,
+        "checkedIn": checked_in_count,
+        "not_checked_in": max(len(rows) - checked_in_count, 0),
+        "notCheckedIn": max(len(rows) - checked_in_count, 0),
+        "checkins": rows,
+    }
 
 
 @router.get("/events/{event_id}/stats")
