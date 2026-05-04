@@ -38,6 +38,135 @@ class ConfirmCheckoutSessionRequest(BaseModel):
     session_id: str
 
 
+class ConnectOnboardingLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    account_id: Optional[str] = None
+    refresh_url: str
+    return_url: str
+
+
+def _get_profile_for_user(user: Dict[str, Any]) -> Optional[Profile]:
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+            db.commit()
+            db.refresh(profile)
+        db.expunge(profile)
+        return profile
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Stripe Connect profile lookup skipped:", str(exc))
+        return None
+    finally:
+        db.close()
+
+
+def _get_connect_account_id(user: Dict[str, Any]) -> str:
+    direct = str(
+        user.get("stripe_connect_account_id")
+        or user.get("stripe_account_id")
+        or user.get("stripeAccountId")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or SessionLocal is None:
+        return ""
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if not profile:
+            return ""
+        data = profile.data if isinstance(profile.data, dict) else {}
+        return str(
+            data.get("stripe_connect_account_id")
+            or data.get("stripe_account_id")
+            or data.get("stripeAccountId")
+            or ""
+        ).strip()
+    except Exception as exc:
+        print("⚠️ Stripe Connect account lookup skipped:", str(exc))
+        return ""
+    finally:
+        db.close()
+
+
+def _save_connect_account_id(user: Dict[str, Any], account_id: str) -> None:
+    clean = str(account_id or "").strip()
+    if not clean:
+        return
+
+    user["stripe_connect_account_id"] = clean
+    user["stripe_account_id"] = clean
+
+    try:
+        _save_user_updates(user)
+    except Exception as exc:
+        print("⚠️ Auth user Stripe Connect sync skipped:", str(exc))
+
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .one_or_none()
+        )
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+        profile.data = {
+            **data,
+            "stripe_connect_account_id": clean,
+            "stripe_account_id": clean,
+            "stripe_connect_status": data.get("stripe_connect_status") or "created",
+            "stripe_connect_updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Profile Stripe Connect sync skipped:", str(exc))
+    finally:
+        db.close()
+
+
+def _stripe_connect_account_status(account: Any) -> Dict[str, Any]:
+    return {
+        "charges_enabled": bool(_stripe_get(account, "charges_enabled", False)),
+        "payouts_enabled": bool(_stripe_get(account, "payouts_enabled", False)),
+        "details_submitted": bool(_stripe_get(account, "details_submitted", False)),
+        "requirements_due": list((_stripe_get(_stripe_get(account, "requirements", {}) or {}, "currently_due", []) or [])),
+    }
+
+
 def _require_stripe() -> Any:
     if stripe is None:
         raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
@@ -647,6 +776,114 @@ def create_portal_session(
         raise HTTPException(status_code=400, detail=f"Stripe billing portal failed: {exc}")
 
     return {"ok": True, "url": session.url}
+
+
+
+
+@router.get("/connect/status")
+def get_connect_status(user: dict = Depends(get_current_user)):
+    account_id = _get_connect_account_id(user)
+    if not account_id:
+        return {"ok": True, "connected": False, "account_id": None}
+
+    stripe_sdk = _require_stripe()
+    try:
+        account = stripe_sdk.Account.retrieve(account_id)
+        return {
+            "ok": True,
+            "connected": True,
+            "account_id": account_id,
+            **_stripe_connect_account_status(account),
+        }
+    except Exception as exc:
+        return {
+            "ok": True,
+            "connected": False,
+            "account_id": account_id,
+            "error": str(exc),
+        }
+
+
+@router.post("/connect/account")
+def create_connect_account(user: dict = Depends(get_current_user)):
+    stripe_sdk = _require_stripe()
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
+
+    existing = _get_connect_account_id(user)
+    if existing:
+        try:
+            account = stripe_sdk.Account.retrieve(existing)
+            return {
+                "ok": True,
+                "account_id": existing,
+                "accountId": existing,
+                "connected": True,
+                **_stripe_connect_account_status(account),
+            }
+        except Exception:
+            # Continue and create a fresh Express account if the stored ID no longer exists.
+            pass
+
+    try:
+        account = stripe_sdk.Account.create(
+            type="express",
+            email=str(user.get("email") or "").strip() or None,
+            business_type="company",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+            metadata={
+                "vendcore_user_id": str(user.get("id") or ""),
+                "vendcore_email": str(user.get("email") or ""),
+                "vendcore_role": role,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe Connect account creation failed: {exc}")
+
+    account_id = str(_stripe_get(account, "id", "") or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=500, detail="Stripe did not return an account ID")
+
+    _save_connect_account_id(user, account_id)
+
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "accountId": account_id,
+        "connected": True,
+        **_stripe_connect_account_status(account),
+    }
+
+
+@router.post("/connect/onboarding-link")
+def create_connect_onboarding_link(
+    payload: ConnectOnboardingLinkRequest,
+    user: dict = Depends(get_current_user),
+):
+    stripe_sdk = _require_stripe()
+
+    account_id = str(payload.account_id or "").strip() or _get_connect_account_id(user)
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Missing Stripe Connect account ID")
+
+    if payload.account_id:
+        _save_connect_account_id(user, account_id)
+
+    try:
+        link = stripe_sdk.AccountLink.create(
+            account=account_id,
+            refresh_url=payload.refresh_url,
+            return_url=payload.return_url,
+            type="account_onboarding",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe onboarding failed: {exc}")
+
+    return {"ok": True, "url": link.url, "onboarding_url": link.url, "account_id": account_id}
 
 
 @router.post("/webhook")
