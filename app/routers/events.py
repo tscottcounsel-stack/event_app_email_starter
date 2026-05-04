@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -1441,17 +1441,27 @@ def _serialize_checkin_application(app: Dict[str, Any], event_id: int, stored_ke
 
 
 @router.post("/check-in")
-def check_in_vendor_from_qr(
-    payload: Dict[str, Any] = Body(default={}),
-    user: Optional[Dict[str, Any]] = None,
+async def check_in_vendor(
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Organizer-facing check-in endpoint for scanned vendor QR passes.
+    """Public QR check-in endpoint for scanned vendor passes.
 
-    Accepts either the full vendcore://check-in?... QR value or direct JSON fields:
-    event_id, vendor_id, application_id, token.
+    Accepts either direct JSON fields:
+    {event_id, vendor_id, application_id, token}
+
+    Or a scanned QR/pass value:
+    {qr_code: "vendcore://check-in?event_id=...&vendor_id=...&application_id=...&token=..."}
     """
-    normalized = _extract_checkin_payload(payload)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    normalized = _extract_checkin_payload(data)
     event_id = _safe_int(normalized.get("event_id"), 0)
     if not event_id:
         raise HTTPException(status_code=400, detail="event_id is required")
@@ -1478,21 +1488,18 @@ def check_in_vendor_from_qr(
         app["check_in_status"] = "checked_in"
         app["updated_at"] = now
 
-    checker_email = _norm_email((user or {}).get("email"))
-    if checker_email:
-        app["checked_in_by"] = checker_email
-
     save_store()
 
     return {
         "ok": True,
         "already_checked_in": already_checked_in,
         "alreadyCheckedIn": already_checked_in,
+        "checked_in": True,
+        "checkedIn": True,
         "checked_in_at": app.get("checked_in_at") or now,
         "checkedInAt": app.get("checked_in_at") or now,
         "application": _serialize_checkin_application(app, event_id, stored_key),
     }
-
 
 @router.get("/events/{event_id}/check-ins")
 def list_event_checkins(
