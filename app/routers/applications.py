@@ -57,6 +57,12 @@ _APPLICATIONS = store._APPLICATIONS
 _EVENTS = store._EVENTS
 _PAYMENTS = store._PAYMENTS
 
+try:
+    from app.routers.verifications import get_vendor_doc_vault  # type: ignore
+except Exception:
+    def get_vendor_doc_vault(email: str, include_expired: bool = False):  # type: ignore
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -877,6 +883,85 @@ def _normalize_documents_payload(raw: Any) -> Dict[str, Any]:
 
     return out
 
+
+
+def _document_aliases_for_matching(key: Any, value: Any = None) -> set[str]:
+    aliases: set[str] = set()
+
+    def add(raw: Any) -> None:
+        text = _as_str(raw)
+        if not text:
+            return
+        aliases.add(text)
+        aliases.add(_slugify(text))
+
+    add(key)
+    if isinstance(value, dict):
+        add(value.get("type"))
+        add(value.get("document_type"))
+        add(value.get("category"))
+        add(value.get("id"))
+        add(value.get("key"))
+        add(value.get("name"))
+        add(value.get("label"))
+
+    return {item for item in aliases if item}
+
+
+def _documents_has_matching_key(documents: Dict[str, Any], target_key: str, target_doc: Dict[str, Any]) -> bool:
+    target_aliases = _document_aliases_for_matching(target_key, target_doc)
+    for existing_key, existing_doc in (documents or {}).items():
+        existing_aliases = _document_aliases_for_matching(existing_key, existing_doc)
+        if target_aliases.intersection(existing_aliases):
+            return True
+    return False
+
+
+def _merge_vendor_doc_vault(app: Dict[str, Any]) -> int:
+    """Attach approved reusable vendor verification docs to an application.
+
+    Existing application uploads always win. Vault docs only fill missing document
+    slots and are marked with source='vault' so the UI can explain reuse.
+    """
+    vendor_email = _as_str(app.get("vendor_email") or app.get("email")).lower()
+    if not vendor_email:
+        return 0
+
+    vault_docs = get_vendor_doc_vault(vendor_email)
+    if not isinstance(vault_docs, list) or not vault_docs:
+        app["vault_documents_reused_count"] = 0
+        app.setdefault("vault_documents_reused", [])
+        return 0
+
+    existing = app.get("documents") if isinstance(app.get("documents"), dict) else app.get("docs")
+    documents = _normalize_documents_payload(existing if isinstance(existing, dict) else {})
+
+    reused_keys: list[str] = []
+    for raw_doc in vault_docs:
+        if not isinstance(raw_doc, dict):
+            continue
+        key = _as_str(raw_doc.get("type") or raw_doc.get("document_type") or raw_doc.get("category") or raw_doc.get("key") or raw_doc.get("id"))
+        if not key:
+            continue
+        normalized_doc = _normalize_document_entry({
+            **raw_doc,
+            "source": "vault",
+            "vault_source": raw_doc.get("vault_source") or "verification",
+            "verified": True,
+            "reused_from_vault": True,
+        })
+        if _documents_has_matching_key(documents, key, normalized_doc):
+            continue
+        documents[key] = normalized_doc
+        reused_keys.append(key)
+
+    app["documents"] = documents
+    app["docs"] = documents
+    app["vault_documents_reused"] = reused_keys
+    app["vault_documents_reused_count"] = len(reused_keys)
+    return len(reused_keys)
+
+
 def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
     event = _get_event_for_app(app)
     req_root = _extract_requirement_root(event)
@@ -957,6 +1042,8 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
     elif isinstance(enriched.get("docs"), dict):
         enriched["docs"] = _normalize_documents_payload(enriched.get("docs"))
         enriched["documents"] = enriched["docs"]
+
+    _merge_vendor_doc_vault(enriched)
 
     requirement_status = _compute_requirement_status(enriched)
     enriched["booth_selected"] = requirement_status["booth_selected"]
@@ -1434,6 +1521,8 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     if app.get("booth_id"):
         _persist_booth_category(app)
 
+    _merge_vendor_doc_vault(app)
+
     requirement_status = _compute_requirement_status(app)
     app["booth_selected"] = requirement_status["booth_selected"]
     app["compliance_complete"] = requirement_status["compliance_complete"]
@@ -1629,6 +1718,7 @@ def create_vendor_application(
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
                 app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
+            _merge_vendor_doc_vault(app)
             _save_store()
             return {"ok": True, "application": _serialize_application(app)}
 
@@ -1666,6 +1756,8 @@ def create_vendor_application(
 
     if app.get("booth_id"):
         _persist_booth_category(app)
+
+    _merge_vendor_doc_vault(app)
 
     _applications_store()[new_id] = app
     _save_store()

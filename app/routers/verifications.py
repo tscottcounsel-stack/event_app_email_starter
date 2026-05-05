@@ -565,6 +565,19 @@ def get_my_verification(user: dict = Depends(get_current_user), db: Session = De
 def get_current_verification(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     return get_my_verification(user=user, db=db)
 
+
+
+@router.get("/verification/vendor-doc-vault")
+def get_my_vendor_doc_vault(user: dict = Depends(get_current_user)):
+    email = _safe_lower(user.get("email"))
+    role = _safe_lower(user.get("role"))
+    if role != "vendor":
+        raise HTTPException(status_code=403, detail="Vendor doc vault is only available for vendor accounts")
+    return {
+        "ok": True,
+        "documents": get_vendor_doc_vault(email),
+    }
+
 @router.post("/verification/create-checkout")
 def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     stripe_sdk = _require_stripe()
