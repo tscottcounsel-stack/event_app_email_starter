@@ -18,6 +18,7 @@ from sqlalchemy import func
 from app.core.permissions import require_event_limit
 from app.db import get_db
 from app.models.event import Event
+from app.models.diagram import Diagram
 from app.models.profile import Profile, EventAlert
 from app.routers.applications import _APPLICATIONS, expire_reservations_if_needed
 from app.routers.auth import get_current_user
@@ -366,21 +367,127 @@ def _coerce_payment_status(value: Any) -> str:
     return s
 
 
-def _event_marketplace_stats(event: dict, applications: dict) -> dict:
+def _iter_diagram_booths(diagram_payload: Any) -> list[Dict[str, Any]]:
+    """Return booth objects from either current multi-level diagrams or older flat diagrams."""
+    if not isinstance(diagram_payload, dict):
+        return []
+
+    booths: list[Dict[str, Any]] = []
+
+    raw_levels = diagram_payload.get("levels")
+    if isinstance(raw_levels, list):
+        for level in raw_levels:
+            if not isinstance(level, dict):
+                continue
+            for booth in level.get("booths") or []:
+                if isinstance(booth, dict):
+                    booths.append(booth)
+
+    for booth in diagram_payload.get("booths") or []:
+        if isinstance(booth, dict):
+            booths.append(booth)
+
+    # Some very old map saves stored booths inside elements. Keep this as a safe fallback.
+    for element in diagram_payload.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        if str(element.get("type") or "").strip().lower() == "booth":
+            booths.append(element)
+
+    return booths
+
+
+def _booth_price_value(booth: Dict[str, Any]) -> float:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    candidates = [
+        booth.get("price"),
+        booth.get("booth_price"),
+        booth.get("boothPrice"),
+        booth.get("amount"),
+        booth.get("cost"),
+        meta.get("price"),
+        meta.get("booth_price"),
+        meta.get("amount"),
+        meta.get("cost"),
+    ]
+    for value in candidates:
+        n = _safe_float(value)
+        if n > 0:
+            return n
+    return 0.0
+
+
+def _booth_is_sellable(booth: Dict[str, Any]) -> bool:
+    sale_mode = str(booth.get("saleMode") or booth.get("sale_mode") or "").strip().lower()
+    status = str(booth.get("status") or "").strip().lower()
+    if sale_mode in {"hidden", "internal"}:
+        return False
+    if status in {"blocked", "hidden", "inactive", "unavailable"}:
+        return False
+    return True
+
+
+def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Session] = None) -> dict:
     event_id = int(event.get("id") or 0)
-    total_booths = 0
-    paid_booths = sum(
-        1
-        for app in applications.values()
-        if app.get("event_id") == event_id and _coerce_payment_status(app.get("payment_status")) == "paid"
-    )
-    spots_left = max(total_booths - paid_booths, 0)
+
+    diagram_payload: Dict[str, Any] = {}
+    if db is not None and event_id:
+        try:
+            slot = (
+                db.query(Diagram)
+                .filter(Diagram.event_id == event_id)
+                .order_by(Diagram.id.desc())
+                .first()
+            )
+            if slot and isinstance(slot.diagram, dict):
+                diagram_payload = slot.diagram
+        except Exception:
+            logger.exception("Unable to load diagram marketplace stats for event %s", event_id)
+
+    booths = [booth for booth in _iter_diagram_booths(diagram_payload) if _booth_is_sellable(booth)]
+    total_booths = len(booths)
+    paid_prices = [_booth_price_value(booth) for booth in booths if _booth_price_value(booth) > 0]
+    booths_from_price = min(paid_prices) if paid_prices else None
+
+    paid_booth_ids: set[str] = set()
+    reserved_booth_ids: set[str] = set()
+
+    for app in applications.values():
+        if not isinstance(app, dict):
+            continue
+        if int(app.get("event_id") or app.get("eventId") or 0) != event_id:
+            continue
+
+        booth_id = str(app.get("booth_id") or app.get("requested_booth_id") or "").strip()
+        payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
+
+        if payment_status == "paid":
+            if booth_id:
+                paid_booth_ids.add(booth_id)
+            continue
+
+        if booth_id and payment_status in {"pending", "unpaid"}:
+            reserved_until = app.get("booth_reserved_until")
+            try:
+                if reserved_until and datetime.fromisoformat(str(reserved_until).replace("Z", "+00:00")) > datetime.now(timezone.utc):
+                    reserved_booth_ids.add(booth_id)
+            except Exception:
+                pass
+
+    paid_booths = len(paid_booth_ids)
+    held_booths = len(reserved_booth_ids - paid_booth_ids)
+    spots_left = max(total_booths - paid_booths - held_booths, 0)
 
     return {
-        "booths_from_price": None,
+        "booths_from_price": booths_from_price,
+        "starting_booth_price": booths_from_price,
+        "booth_price": booths_from_price,
         "total_booths": total_booths,
+        "booths_total": total_booths,
         "paid_booths": paid_booths,
+        "held_booths": held_booths,
         "spots_left": spots_left,
+        "booths_remaining": spots_left,
     }
 
 
@@ -616,7 +723,7 @@ async def get_events(db: Session = Depends(get_db)):
     result = []
     for row in rows:
         event_dict = _serialize_event_model(row)
-        event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS))
+        event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
         result.append(event_dict)
 
     return result
@@ -1049,7 +1156,7 @@ def public_list_events(db: Session = Depends(get_db)):
     for event in db.query(Event).order_by(Event.id.desc()).all():
         if event.published and not event.archived:
             event_dict = _serialize_event_model(event)
-            event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS))
+            event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
             out.append(event_dict)
     return {"events": out}
 
@@ -1059,7 +1166,9 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     ev = _get_event_row_or_404(db, event_id)
     if not ev.published or ev.archived:
         raise HTTPException(status_code=404, detail="Event not found")
-    return _serialize_event_model(ev)
+    event_dict = _serialize_event_model(ev)
+    event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
+    return event_dict
 
 
 @router.get("/events/{event_id}/vendors/{vendor_id}/qr")
@@ -1628,8 +1737,9 @@ def get_event_stats(event_id: int, db: Session = Depends(get_db)):
         if _coerce_payment_status(app.get("payment_status")) == "paid"
     )
 
-    booths_total = 0
-    booths_remaining = max(0, booths_total - sold)
+    marketplace_stats = _event_marketplace_stats(_serialize_event_model(event), _APPLICATIONS, db)
+    booths_total = int(marketplace_stats.get("booths_total") or marketplace_stats.get("total_booths") or 0)
+    booths_remaining = int(marketplace_stats.get("booths_remaining") or marketplace_stats.get("spots_left") or max(0, booths_total - sold))
     approval_rate = (approved / len(apps)) if apps else 0
 
     return {
