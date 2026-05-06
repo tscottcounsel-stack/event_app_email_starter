@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from app.store import _VENDORS, save_store
 
@@ -25,6 +25,42 @@ from sqlalchemy.orm import Session
 from app.store import find_latest_verification_by_email
 
 router = APIRouter(prefix="/vendors", tags=["Vendors"])
+
+DEFAULT_PAGE_LIMIT = 24
+MAX_PAGE_LIMIT = 100
+
+
+def _page_limit(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = DEFAULT_PAGE_LIMIT
+    return max(1, min(n, MAX_PAGE_LIMIT))
+
+
+def _page_offset(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = 0
+    return max(0, n)
+
+
+def _vendor_page_payload(items: List[Dict[str, Any]], limit: int, offset: int) -> Dict[str, Any]:
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    total = len(items)
+    page = items[safe_offset:safe_offset + safe_limit]
+    return {
+        "vendors": page,
+        "items": page,
+        "count": len(page),
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + safe_limit < total,
+    }
+
 
 @router.post("/admin/set-premium")
 def set_vendor_premium(
@@ -972,7 +1008,11 @@ def dedupe_public_vendors(user: Dict[str, Any] = Depends(get_current_user)):
     }
 
 @router.get("/public")
-def get_public_vendors(db: Session = Depends(get_db)):
+def get_public_vendors(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
     results = []
     vendors = _load_all_vendors_from_db(db)
     if not vendors:
@@ -1001,7 +1041,7 @@ def get_public_vendors(db: Session = Depends(get_db)):
             _safe_str(item.get("business_name") or item.get("email")).lower(),
         )
     )
-    return results
+    return _vendor_page_payload(results, limit, offset)
 
 
 

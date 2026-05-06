@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,41 @@ from app.models.event import Event
 from app.models.profile import Profile
 
 router = APIRouter(tags=["Organizers"])
+
+
+DEFAULT_PAGE_LIMIT = 24
+MAX_PAGE_LIMIT = 100
+
+
+def _page_limit(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = DEFAULT_PAGE_LIMIT
+    return max(1, min(n, MAX_PAGE_LIMIT))
+
+
+def _page_offset(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = 0
+    return max(0, n)
+
+
+def _paginate(items: List[Dict[str, Any]], limit: int, offset: int) -> Dict[str, Any]:
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    total = len(items)
+    page = items[safe_offset:safe_offset + safe_limit]
+    return {
+        "items": page,
+        "count": len(page),
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + safe_limit < total,
+    }
 
 
 def _safe_str(value: Any) -> str:
@@ -282,7 +317,11 @@ def _dedupe_public_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 @router.get("/organizers")
-def list_public_organizers(db: Session = Depends(get_db)):
+def list_public_organizers(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
     profiles = _query_organizer_profiles(db)
     organizers = [_organizer_public(profile, db) for profile in profiles]
 
@@ -299,23 +338,31 @@ def list_public_organizers(db: Session = Depends(get_db)):
 
     visible = _dedupe_public_items(visible)
     visible.sort(key=_rank_key)
+    page = _paginate(visible, limit, offset)
 
     return {
         "ok": True,
-        "organizers": visible,
-        "items": visible,
-        "count": len(visible),
+        "organizers": page["items"],
+        **page,
     }
 
 
 @router.get("/organizers/public")
-def list_public_organizers_alias(db: Session = Depends(get_db)):
-    return list_public_organizers(db)
+def list_public_organizers_alias(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_public_organizers(limit=limit, offset=offset, db=db)
 
 
 @router.get("/organizers/public-directory")
-def list_public_organizers_legacy_alias(db: Session = Depends(get_db)):
-    return list_public_organizers(db)
+def list_public_organizers_legacy_alias(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    return list_public_organizers(limit=limit, offset=offset, db=db)
 
 
 @router.get("/organizers/public/{email}")

@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -32,6 +32,43 @@ router = APIRouter(tags=["Events"])
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+DEFAULT_PAGE_LIMIT = 24
+MAX_PAGE_LIMIT = 100
+
+
+def _page_limit(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = DEFAULT_PAGE_LIMIT
+    return max(1, min(n, MAX_PAGE_LIMIT))
+
+
+def _page_offset(value: int) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = 0
+    return max(0, n)
+
+
+def _pagination_payload(items: list[Dict[str, Any]], limit: int, offset: int) -> Dict[str, Any]:
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    total = len(items)
+    page = items[safe_offset:safe_offset + safe_limit]
+    return {
+        "events": page,
+        "items": page,
+        "count": len(page),
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + safe_limit < total,
+    }
+
 
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 
@@ -717,8 +754,19 @@ def get_invite(invite_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/events")
-async def get_events(db: Session = Depends(get_db)):
-    rows = db.query(Event).order_by(Event.id.desc()).all()
+async def get_events(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    total = int(db.query(func.count(Event.id)).scalar() or 0)
+    rows = (
+        db.query(Event)
+        .order_by(Event.id.desc())
+        .offset(_page_offset(offset))
+        .limit(_page_limit(limit))
+        .all()
+    )
 
     result = []
     for row in rows:
@@ -726,7 +774,17 @@ async def get_events(db: Session = Depends(get_db)):
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
         result.append(event_dict)
 
-    return result
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    return {
+        "events": result,
+        "items": result,
+        "count": len(result),
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + safe_limit < total,
+    }
 
 
 @router.get("/organizer/events")
@@ -1151,14 +1209,37 @@ def admin_mark_payout_paid(payment_id: int):
 
 
 @router.get("/public/events")
-def public_list_events(db: Session = Depends(get_db)):
+def public_list_events(
+    limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(Event)
+        .filter(Event.published == True)  # noqa: E712
+        .filter(Event.archived == False)  # noqa: E712
+        .order_by(Event.id.desc())
+    )
+    total = int(query.with_entities(func.count(Event.id)).scalar() or 0)
+    rows = query.offset(_page_offset(offset)).limit(_page_limit(limit)).all()
+
     out = []
-    for event in db.query(Event).order_by(Event.id.desc()).all():
-        if event.published and not event.archived:
-            event_dict = _serialize_event_model(event)
-            event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
-            out.append(event_dict)
-    return {"events": out}
+    for event in rows:
+        event_dict = _serialize_event_model(event)
+        event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
+        out.append(event_dict)
+
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    return {
+        "events": out,
+        "items": out,
+        "count": len(out),
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": safe_offset + safe_limit < total,
+    }
 
 
 @router.get("/public/events/{event_id}")
