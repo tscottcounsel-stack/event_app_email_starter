@@ -704,11 +704,10 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 
 
 def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
-    """Only show real verification workflow records in the admin queue.
+    """Only show real verification workflow records in the admin queue."""
+    if record.get("deleted_at") or record.get("dismissed_at"):
+        return False
 
-    This keeps untouched shells and old test accounts out of the review screen while
-    preserving paid, submitted, reviewed, verified, rejected, and renewal records.
-    """
     status = _safe_lower(record.get("verification_status") or record.get("status"))
     review = _safe_lower(record.get("review_status"))
     public_status = _safe_lower(record.get("public_verification_status"))
