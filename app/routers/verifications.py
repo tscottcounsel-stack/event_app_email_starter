@@ -706,6 +706,10 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
     """Only show real verification workflow records in the admin queue.
 
+   
+    if status in {"dismissed", "deleted"} or review in {"dismissed", "deleted"} or public_status in {"dismissed", "deleted"}:
+        return False
+
     This keeps untouched shells and old test accounts out of the review screen while
     preserving paid, submitted, reviewed, verified, rejected, and renewal records.
     """
@@ -887,15 +891,22 @@ def delete_verification(verification_id: int, db: Session = Depends(get_db), use
     if row is None:
         raise HTTPException(status_code=404, detail="Verification not found")
     data = _profile_data(row)
-    data.update({
-        "status": "dismissed",
-        "verification_status": "dismissed",
-        "review_status": "dismissed",
+       data.update({
+        "verified": False,
+        "is_verified": False,
+        "status": "deleted",
+        "verification_status": "deleted",
+        "review_status": "deleted",
+        "public_verification_status": "deleted",
+        "public_verification_label": "Deleted",
         "dismissed_at": _now_iso(),
+        "deleted_at": _now_iso(),
         "dismissed_by": user.get("email"),
+        "deleted_by": user.get("email"),
     })
-    row.verification_status = "dismissed"
-    row.review_status = "dismissed"
-    row.data = data
-    db.commit()
-    return {"ok": True, "deleted": _profile_public(row)}
+
+    row.verified = False
+    row.verification_status = "deleted"
+    row.review_status = "deleted"
+    row.public_verification_status = "deleted"
+    row.public_verification_label = "Deleted"
