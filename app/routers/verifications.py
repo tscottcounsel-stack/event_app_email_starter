@@ -830,6 +830,57 @@ def review_verification(verification_id: int, payload: Dict[str, Any], db: Sessi
     return {"ok": True, "verification": _profile_public(row)}
 
 
+@router.post("/admin/unverify/{verification_id}")
+def unverify_account(verification_id: int, payload: Dict[str, Any] = None, db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
+    """Remove public verification while preserving uploaded documents and payment/history.
+
+    This is intentionally different from reject/delete:
+    - docs stay in the Vendor/Organizer Doc Vault for review/history
+    - public verified badge is removed immediately
+    - record returns to pending so an admin can approve again later
+    """
+    payload = payload or {}
+    row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    data = _profile_data(row)
+    now_iso = _now_iso()
+
+    if data.get("last_verified_at"):
+        data["previous_last_verified_at"] = data.get("last_verified_at")
+    if data.get("expires_at") or data.get("expiration_date"):
+        data["previous_expires_at"] = data.get("expires_at") or data.get("expiration_date")
+
+    data.update({
+        "verified": False,
+        "is_verified": False,
+        "status": "pending",
+        "verification_status": "pending",
+        "review_status": "pending",
+        "public_verification_status": "not_verified",
+        "public_verification_label": "Not verified",
+        "last_verified_at": None,
+        "expires_at": None,
+        "expiration_date": None,
+        "locked": False,
+        "unverified_at": now_iso,
+        "unverified_by": _safe_str(user.get("email")),
+        "notes": _safe_str(payload.get("notes") or data.get("notes") or ""),
+    })
+
+    row.verified = False
+    row.verification_status = "pending"
+    row.review_status = "pending"
+    row.public_verification_status = "not_verified"
+    row.public_verification_label = "Not verified"
+
+    _set_profile_state(row, data)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "verification": _profile_public(row)}
+
+
 @router.delete("/admin/verifications/{verification_id}")
 def delete_verification(verification_id: int, db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
     row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
