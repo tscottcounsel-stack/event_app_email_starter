@@ -185,6 +185,71 @@ async def admin_accounts_delete(user_id: int, user: dict = Depends(require_admin
     return {"ok": True, "account": deleted}
 
 
+
+def _find_user_id_by_email(email: str) -> int | None:
+    target = _safe_lower(email)
+    if not target:
+        return None
+
+    for account in list_all_users():
+        if _safe_lower(account.get("email")) == target:
+            try:
+                return int(account.get("id"))
+            except Exception:
+                return None
+
+    return None
+
+
+@router.delete("/profile")
+def admin_delete_profile_and_account(
+    email: str,
+    role: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+):
+    email = _safe_lower(email)
+    role = _safe_lower(role)
+
+    if not email or role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Invalid email or role")
+
+    if _safe_lower(user.get("email")) == email:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+
+    deleted_profile = False
+    profile = (
+        db.query(Profile)
+        .filter(func.lower(Profile.email) == email, Profile.role == role)
+        .one_or_none()
+    )
+
+    if profile is not None:
+        db.delete(profile)
+        db.commit()
+        deleted_profile = True
+
+    deleted_account = None
+    account_id = _find_user_id_by_email(email)
+    if account_id is not None:
+        try:
+            deleted_account = admin_delete_user(account_id)
+        except Exception as exc:
+            # If the profile was deleted but the auth account is already gone,
+            # the admin queue should still clear successfully.
+            deleted_account = {"error": str(exc), "id": account_id}
+
+    if not deleted_profile and deleted_account is None:
+        raise HTTPException(status_code=404, detail="No matching profile or account found.")
+
+    return {
+        "ok": True,
+        "email": email,
+        "role": role,
+        "deleted_profile": deleted_profile,
+        "deleted_account": deleted_account,
+    }
+
 @router.get("/profile")
 def admin_get_profile(
     email: str,
