@@ -706,21 +706,25 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
     """Only show real verification workflow records in the admin queue.
 
-   
-    if status in {"dismissed", "deleted"} or review in {"dismissed", "deleted"} or public_status in {"dismissed", "deleted"}:
-        return False
-
     This keeps untouched shells and old test accounts out of the review screen while
     preserving paid, submitted, reviewed, verified, rejected, and renewal records.
     """
+    status = _safe_lower(record.get("verification_status") or record.get("status"))
+    review = _safe_lower(record.get("review_status"))
+    public_status = _safe_lower(record.get("public_verification_status"))
+
+    if (
+        status in {"dismissed", "deleted"}
+        or review in {"dismissed", "deleted"}
+        or public_status in {"dismissed", "deleted"}
+    ):
+        return False
+
     email = _safe_lower(record.get("email"))
     if email == "admin@example.com" or email.endswith("@example.com"):
         return False
 
     docs = record.get("documents") if isinstance(record.get("documents"), list) else []
-    status = _safe_lower(record.get("verification_status") or record.get("status"))
-    review = _safe_lower(record.get("review_status"))
-    public_status = _safe_lower(record.get("public_verification_status"))
     payment_status = _safe_lower(record.get("payment_status"))
 
     return bool(
@@ -734,7 +738,6 @@ def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
         or bool(record.get("reviewed_at"))
         or bool(docs)
     )
-
 @router.get("/admin/verifications")
 def get_admin_verifications(
     role: str = "all",
