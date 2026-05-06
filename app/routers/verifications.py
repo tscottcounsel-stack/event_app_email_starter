@@ -331,6 +331,17 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         review = "approved"
         public_status = "verified"
         public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
+    elif (
+        status_raw in {"deleted", "dismissed"}
+        or review_raw in {"deleted", "dismissed"}
+        or public_status_raw in {"deleted", "dismissed"}
+        or data.get("deleted_at")
+        or data.get("dismissed_at")
+    ):
+        status = "deleted"
+        review = "deleted"
+        public_status = "deleted"
+        public_label = "Deleted"
     elif has_submitted and (review_raw == "rejected" or status_raw == "rejected"):
         status = "rejected"
         review = "rejected"
@@ -737,6 +748,8 @@ def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
         or bool(record.get("reviewed_at"))
         or bool(docs)
     )
+
+
 @router.get("/admin/verifications")
 def get_admin_verifications(
     role: str = "all",
