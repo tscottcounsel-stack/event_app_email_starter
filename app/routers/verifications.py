@@ -893,8 +893,12 @@ def delete_verification(verification_id: int, db: Session = Depends(get_db), use
     row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Verification not found")
+
     data = _profile_data(row)
-       data.update({
+    now_iso = _now_iso()
+    admin_email = _safe_str(user.get("email"))
+
+    data.update({
         "verified": False,
         "is_verified": False,
         "status": "deleted",
@@ -902,10 +906,10 @@ def delete_verification(verification_id: int, db: Session = Depends(get_db), use
         "review_status": "deleted",
         "public_verification_status": "deleted",
         "public_verification_label": "Deleted",
-        "dismissed_at": _now_iso(),
-        "deleted_at": _now_iso(),
-        "dismissed_by": user.get("email"),
-        "deleted_by": user.get("email"),
+        "dismissed_at": now_iso,
+        "deleted_at": now_iso,
+        "dismissed_by": admin_email,
+        "deleted_by": admin_email,
     })
 
     row.verified = False
@@ -913,3 +917,10 @@ def delete_verification(verification_id: int, db: Session = Depends(get_db), use
     row.review_status = "deleted"
     row.public_verification_status = "deleted"
     row.public_verification_label = "Deleted"
+    row.data = data
+
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    return {"ok": True, "deleted": _profile_public(row)}
