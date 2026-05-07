@@ -326,12 +326,9 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
     explicit_verified = bool(explicit_verified and has_verification_evidence)
     verified = bool(explicit_verified and not explicit_unverified)
 
-    if verified:
-        status = "verified"
-        review = "approved"
-        public_status = "verified"
-        public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
-    elif (
+    # Deleted/dismissed state must win before any stale verified flags.
+    # Otherwise old verified records can reappear in the admin queue after delete.
+    if (
         status_raw in {"deleted", "dismissed"}
         or review_raw in {"deleted", "dismissed"}
         or public_status_raw in {"deleted", "dismissed"}
@@ -342,6 +339,12 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         review = "deleted"
         public_status = "deleted"
         public_label = "Deleted"
+        verified = False
+    elif verified:
+        status = "verified"
+        review = "approved"
+        public_status = "verified"
+        public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
     elif has_submitted and (review_raw == "rejected" or status_raw == "rejected"):
         status = "rejected"
         review = "rejected"
@@ -717,10 +720,9 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
     """Only show real verification workflow records in the admin queue.
 
-    The admin queue should never resurrect deleted profiles, dismissed profiles,
-    empty shells created by stale sessions, or test/example accounts. A record
-    only belongs here when it has real verification evidence: docs, payment,
-    submitted/reviewed metadata, or an explicit workflow status.
+    The queue must never resurrect deleted/dismissed profiles or empty shells.
+    A profile belongs here only if it has real verification evidence or an
+    explicit active verification workflow status.
     """
     email = _safe_lower(record.get("email"))
     role = _safe_lower(record.get("role"))
@@ -748,31 +750,18 @@ def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
     payment_status = _safe_lower(record.get("payment_status"))
     verification_payment_status = _safe_lower(record.get("verification_payment_status"))
     has_paid = payment_status == "paid" or verification_payment_status == "paid" or bool(record.get("fee_paid"))
-    has_submission = bool(record.get("submitted_at")) or bool(record.get("reviewed_at")) or bool(record.get("last_verified_at"))
     has_docs = bool(docs)
+    has_submission = bool(record.get("submitted_at")) or bool(record.get("reviewed_at")) or bool(record.get("last_verified_at"))
+    active_status = status in {"verified", "pending", "submitted", "under_review", "rejected", "expired", "expiring_soon", "needs_renewal", "renewal_pending"}
+    active_review = review in {"approved", "verified", "pending", "submitted", "under_review", "rejected"}
+    active_public = public_status in {"verified", "renewal_pending"}
 
-    # Prevent deleted/recreated empty profile shells from coming back as
-    # not_started/not_verified queue cards after admin deletion.
-    if (
-        record.get("verified") is False
-        and not has_docs
-        and not has_submission
-        and not has_paid
-        and status in {"", "not_started", "unverified"}
-        and review in {"", "not_started"}
-        and public_status in {"", "not_verified", "unverified"}
-    ):
+    # Empty stale shells, including shells recreated after account/profile delete,
+    # should not appear in the admin verification queue.
+    if not (has_docs or has_submission or has_paid or active_status or active_review or active_public or record.get("verified") is True):
         return False
 
-    return bool(
-        record.get("verified") is True
-        or status in {"verified", "pending", "submitted", "under_review", "rejected", "expired", "expiring_soon", "needs_renewal", "renewal_pending"}
-        or review in {"approved", "verified", "pending", "submitted", "under_review", "rejected"}
-        or public_status in {"verified", "renewal_pending"}
-        or has_paid
-        or has_submission
-        or has_docs
-    )
+    return True
 
 
 @router.get("/admin/verifications")

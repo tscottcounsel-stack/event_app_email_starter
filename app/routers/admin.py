@@ -264,8 +264,6 @@ def admin_delete_profile_and_account(
         try:
             deleted_account = admin_delete_user(account_id)
         except Exception as exc:
-            # If the profile was deleted but the auth account is already gone,
-            # the admin queue should still clear successfully.
             deleted_account = {"error": str(exc), "id": account_id}
 
     if not deleted_profile and deleted_account is None:
