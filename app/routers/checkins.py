@@ -293,18 +293,49 @@ def _upsert_checkin(db: Session, event_id: int, app: Application) -> tuple[Event
     return checkin, False
 
 
-# Generate QR by application user_id.
-@router.get("/events/{event_id}/vendors/{vendor_id}/qr")
-def generate_qr(event_id: int, vendor_id: int, db: Session = Depends(get_db)):
-    app = _find_application(db, int(event_id), vendor_id=vendor_id)
-    token = generate_qr_token(int(event_id), _application_vendor_id(app), _application_id(app))
+# Generate QR by flexible vendor/application identifier.
+# Accepts:
+# - vendor/user id
+# - application id
+# - vendor email
+# This keeps older QR pass pages working even when the frontend only has an
+# application id or email available.
+@router.get("/events/{event_id}/vendors/{vendor_key}/qr")
+def generate_qr(event_id: int, vendor_key: str, db: Session = Depends(get_db)):
+    app = _find_application(
+        db,
+        int(event_id),
+        application_id=vendor_key,
+        vendor_id=vendor_key,
+    )
+
+    vendor_id = _application_vendor_id(app)
+    application_id = _application_id(app)
+    token = generate_qr_token(int(event_id), vendor_id, application_id)
 
     return {
+        "ok": True,
         "token": token,
+        "qr_code": token,
+        "qrCode": token,
+        "event_id": int(event_id),
+        "eventId": int(event_id),
+        "vendor_id": vendor_id,
+        "vendorId": vendor_id,
+        "vendor_email": _application_email(app),
+        "vendor_name": _application_name(app),
+        "business_name": _application_name(app),
+        "application_id": application_id,
+        "applicationId": application_id,
+        "booth_id": _application_booth(app),
+        "booth_category": _application_category(app),
+        "payment_status": _payment_status(app),
+        "status": _application_status(app) or "approved",
         "payload": {
             "event_id": int(event_id),
-            "vendor_id": _application_vendor_id(app),
-            "application_id": _application_id(app),
+            "vendor_id": vendor_id,
+            "vendor_email": _application_email(app),
+            "application_id": application_id,
         },
     }
 
