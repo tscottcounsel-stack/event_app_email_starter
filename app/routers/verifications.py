@@ -715,8 +715,20 @@ def get_verification_status(email: str, role: str = "", db: Session = Depends(ge
 
 
 def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
-    """Only show real verification workflow records in the admin queue."""
-    if record.get("deleted_at") or record.get("dismissed_at"):
+    """Only show real verification workflow records in the admin queue.
+
+    The admin queue should never resurrect deleted profiles, dismissed profiles,
+    empty shells created by stale sessions, or test/example accounts. A record
+    only belongs here when it has real verification evidence: docs, payment,
+    submitted/reviewed metadata, or an explicit workflow status.
+    """
+    email = _safe_lower(record.get("email"))
+    role = _safe_lower(record.get("role"))
+
+    if not email or role not in VALID_ROLES:
+        return False
+
+    if email == "admin@example.com" or email.endswith("@example.com"):
         return False
 
     status = _safe_lower(record.get("verification_status") or record.get("status"))
@@ -724,29 +736,42 @@ def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
     public_status = _safe_lower(record.get("public_verification_status"))
 
     if (
-        status in {"dismissed", "deleted"}
+        record.get("deleted_at")
+        or record.get("dismissed_at")
+        or status in {"dismissed", "deleted"}
         or review in {"dismissed", "deleted"}
         or public_status in {"dismissed", "deleted"}
     ):
         return False
 
-    email = _safe_lower(record.get("email"))
-    if email == "admin@example.com" or email.endswith("@example.com"):
-        return False
-
     docs = record.get("documents") if isinstance(record.get("documents"), list) else []
     payment_status = _safe_lower(record.get("payment_status"))
+    verification_payment_status = _safe_lower(record.get("verification_payment_status"))
+    has_paid = payment_status == "paid" or verification_payment_status == "paid" or bool(record.get("fee_paid"))
+    has_submission = bool(record.get("submitted_at")) or bool(record.get("reviewed_at")) or bool(record.get("last_verified_at"))
+    has_docs = bool(docs)
+
+    # Prevent deleted/recreated empty profile shells from coming back as
+    # not_started/not_verified queue cards after admin deletion.
+    if (
+        record.get("verified") is False
+        and not has_docs
+        and not has_submission
+        and not has_paid
+        and status in {"", "not_started", "unverified"}
+        and review in {"", "not_started"}
+        and public_status in {"", "not_verified", "unverified"}
+    ):
+        return False
 
     return bool(
         record.get("verified") is True
         or status in {"verified", "pending", "submitted", "under_review", "rejected", "expired", "expiring_soon", "needs_renewal", "renewal_pending"}
         or review in {"approved", "verified", "pending", "submitted", "under_review", "rejected"}
         or public_status in {"verified", "renewal_pending"}
-        or payment_status == "paid"
-        or bool(record.get("fee_paid"))
-        or bool(record.get("submitted_at"))
-        or bool(record.get("reviewed_at"))
-        or bool(docs)
+        or has_paid
+        or has_submission
+        or has_docs
     )
 
 

@@ -218,14 +218,43 @@ def admin_delete_profile_and_account(
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
 
     deleted_profile = False
-    profile = (
+    profiles = (
         db.query(Profile)
         .filter(func.lower(Profile.email) == email, Profile.role == role)
-        .one_or_none()
+        .all()
     )
 
-    if profile is not None:
-        db.delete(profile)
+    if profiles:
+        now_iso = utc_now_iso()
+        admin_email = _safe_lower(user.get("email"))
+
+        for profile in profiles:
+            data = profile.data if isinstance(profile.data, dict) else {}
+            profile.verified = False
+            profile.verification_status = "deleted"
+            profile.public_verification_status = "deleted"
+            profile.public_verification_label = "Deleted"
+            profile.review_status = "deleted"
+            profile.featured = False
+            profile.promoted = False
+            profile.data = {
+                **data,
+                "email": email,
+                "role": role,
+                "verified": False,
+                "is_verified": False,
+                "status": "deleted",
+                "verification_status": "deleted",
+                "review_status": "deleted",
+                "public_verification_status": "deleted",
+                "public_verification_label": "Deleted",
+                "deleted_at": now_iso,
+                "dismissed_at": now_iso,
+                "deleted_by": admin_email,
+                "dismissed_by": admin_email,
+            }
+            db.add(profile)
+
         db.commit()
         deleted_profile = True
 
