@@ -19,3 +19,6 @@ requests==2.31.0
 
 # AWS S3 private verification document storage
 boto3==1.34.162
+
+# PostgreSQL driver for Railway Postgres
+psycopg2-binary==2.9.9
