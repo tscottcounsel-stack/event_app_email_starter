@@ -56,7 +56,11 @@ def _application_id(app: Application) -> int:
 
 def _application_vendor_id(app: Application) -> int:
     raw = _model_value(app, "user_id", "vendor_id", "userId", "vendorId")
-    return int(raw or 0)
+    parsed = _to_int(raw)
+    # Some imported/test applications do not have a numeric user/vendor id.
+    # Use the application id as a stable non-zero fallback so EventCheckIn rows
+    # can still be persisted and matched by application_id.
+    return int(parsed or _application_id(app) or 0)
 
 
 def _application_email(app: Application) -> str:
@@ -312,12 +316,20 @@ def generate_qr(event_id: int, vendor_key: str, db: Session = Depends(get_db)):
     vendor_id = _application_vendor_id(app)
     application_id = _application_id(app)
     token = generate_qr_token(int(event_id), vendor_id, application_id)
+    qr_value = (
+        f"vendcore://check-in?event_id={int(event_id)}"
+        f"&vendor_id={vendor_id}"
+        f"&application_id={application_id}"
+        f"&token={token}"
+    )
 
     return {
         "ok": True,
         "token": token,
-        "qr_code": token,
-        "qrCode": token,
+        "qr_code": qr_value,
+        "qrCode": qr_value,
+        "pass_url": qr_value,
+        "passUrl": qr_value,
         "event_id": int(event_id),
         "eventId": int(event_id),
         "vendor_id": vendor_id,
@@ -362,7 +374,22 @@ def global_check_in(data: Dict[str, Any], db: Session = Depends(get_db)):
         vendor_id=payload.get("vendor_id"),
     )
     checkin, already_checked_in = _upsert_checkin(db, event_id, app)
-    row = _row_payload(app, checkin)
+
+    # Hard verification: never return success unless the row is actually in Postgres.
+    persisted = (
+        db.query(EventCheckIn)
+        .filter(
+            EventCheckIn.event_id == int(event_id),
+            EventCheckIn.application_id == int(_application_id(app)),
+            EventCheckIn.status == "checked_in",
+        )
+        .first()
+    )
+
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="Check-in could not be persisted. Please try again.")
+
+    row = _row_payload(app, persisted)
 
     return {
         "ok": True,
