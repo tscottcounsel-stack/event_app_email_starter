@@ -243,12 +243,6 @@ def create_verification_document_upload_url(payload: Dict[str, Any], request: Re
                 "Bucket": bucket,
                 "Key": key,
                 "ContentType": mime_type,
-                "Metadata": {
-                    "owner_email": email,
-                    "owner_role": role,
-                    "document_type": document_type,
-                    "verification_document_id": str(row.id),
-                },
             },
             ExpiresIn=DEFAULT_UPLOAD_URL_SECONDS,
         )
