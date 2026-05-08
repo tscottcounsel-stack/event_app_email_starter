@@ -373,7 +373,10 @@ def _apply_subscription_state(
     normalized_status = str(subscription_status or "inactive").strip().lower()
 
     user["plan"] = normalized_plan
+    user["subscription_plan"] = normalized_plan
+    user["subscriptionPlan"] = normalized_plan
     user["subscription_status"] = normalized_status
+    user["subscriptionStatus"] = normalized_status
     user["stripe_customer_id"] = customer_id or user.get("stripe_customer_id")
     user["stripe_subscription_id"] = subscription_id
     user["current_period_end"] = _to_iso(current_period_end)
@@ -381,9 +384,43 @@ def _apply_subscription_state(
 
     if normalized_status in {"canceled", "cancelled", "unpaid", "incomplete_expired", "inactive"}:
         user["plan"] = "starter"
+        user["subscription_plan"] = "starter"
+        user["subscriptionPlan"] = "starter"
         user["subscription_status"] = "inactive"
+        user["subscriptionStatus"] = "inactive"
         user["stripe_subscription_id"] = None
         user["cancel_at_period_end"] = False
+
+    _save_user_updates(user)
+
+
+def _force_paid_checkout_premium_state(user: Dict[str, Any], *, plan: str) -> None:
+    """Immediately persist paid checkout access for premium subscriptions.
+
+    Webhooks can arrive late or fail during early production testing. After a
+    checkout session is confirmed complete, this mirrors the premium state into
+    both the auth user object and the Profile row so /me, /vendors/me, badges,
+    and feature gates all agree after refresh/login.
+    """
+    role = str(user.get("role") or "").strip().lower()
+    normalized_plan = str(plan or user.get("plan") or "").strip().lower()
+
+    if role == "vendor":
+        normalized_plan = "pro_vendor"
+        user["visibility_tier"] = "premium"
+        user["visibilityTier"] = "premium"
+        user["featured"] = True
+        user["promoted"] = True
+    elif role == "organizer":
+        normalized_plan = "enterprise_organizer"
+    else:
+        return
+
+    user["plan"] = normalized_plan
+    user["subscription_plan"] = normalized_plan
+    user["subscriptionPlan"] = normalized_plan
+    user["subscription_status"] = "active"
+    user["subscriptionStatus"] = "active"
 
     _save_user_updates(user)
 
@@ -655,12 +692,22 @@ def _apply_checkout_session_to_user(session: Any, *, user_hint: Optional[Dict[st
         cancel_at_period_end=cancel_at_period_end,
     )
 
+    # Checkout has been verified as complete above. Persist premium immediately
+    # so the vendor/organizer dashboard updates even before Stripe webhook retry.
+    if subscription_status in {"active", "trialing", "paid"}:
+        _force_paid_checkout_premium_state(user, plan=plan)
+
     return {
         "ok": True,
         "plan": user.get("plan"),
         "subscription_plan": user.get("subscription_plan") or user.get("plan"),
+        "subscriptionPlan": user.get("subscriptionPlan") or user.get("subscription_plan") or user.get("plan"),
         "subscription_status": user.get("subscription_status"),
         "subscriptionStatus": user.get("subscriptionStatus") or user.get("subscription_status"),
+        "visibility_tier": user.get("visibility_tier"),
+        "visibilityTier": user.get("visibilityTier") or user.get("visibility_tier"),
+        "featured": bool(user.get("featured")),
+        "promoted": bool(user.get("promoted")),
         "stripe_customer_id": user.get("stripe_customer_id"),
         "stripe_subscription_id": user.get("stripe_subscription_id"),
     }
