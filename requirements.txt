@@ -26,3 +26,4 @@ python-multipart==0.0.9
 
 # JWT library used by app.routers.checkins/imports as jwt
 PyJWT==2.8.0
+stripe
