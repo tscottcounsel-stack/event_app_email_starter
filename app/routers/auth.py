@@ -6,12 +6,14 @@ import os
 import requests
 import tempfile
 import time
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
+from fastapi.responses import HTMLResponse
 
 from sqlalchemy import func
 from app.db import SessionLocal
@@ -263,6 +265,68 @@ def _send_resend_email(*, to_email: str, subject: str, html: str, text: str = ""
         print(f"Email failed to {recipient}: {exc}")
 
 
+
+def _email_verification_required() -> bool:
+    return _norm(os.getenv("AUTH_REQUIRE_EMAIL_VERIFICATION")) in {"1", "true", "yes"}
+
+
+def _new_email_verification_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _verification_link(token: str) -> str:
+    api_base = (os.getenv("PUBLIC_API_BASE_URL") or os.getenv("API_BASE_URL") or "https://api.vendcore.co").strip().rstrip("/")
+    return f"{api_base}/verify-email?token={token}"
+
+
+def send_email_confirmation_email(email: str, role: str, token: str, full_name: Optional[str] = None) -> None:
+    """Send email ownership confirmation.
+
+    This confirms email control only. It is not public Vendor/Organizer verification.
+    """
+    display_name = (full_name or "").strip() or "there"
+    link = _verification_link(token)
+    role_label = (role or "user").strip().title()
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+      <h1 style="color: #111827;">Confirm your VendCore email</h1>
+      <p>Hi {display_name},</p>
+      <p>Thanks for creating a {role_label} account on VendCore.</p>
+      <p>Please confirm that this email address belongs to you by clicking the button below.</p>
+      <p style="margin: 28px 0;">
+        <a href="{link}" style="background:#4f46e5;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;display:inline-block;font-weight:700;">
+          Confirm Email
+        </a>
+      </p>
+      <p style="font-size:13px;color:#6b7280;">
+        This only confirms your email address. Vendor or organizer verification is a separate review process inside VendCore.
+      </p>
+      <p style="font-size:13px;color:#6b7280;">
+        If the button does not work, copy and paste this link into your browser:<br />
+        {link}
+      </p>
+      <p>— VendCore Support</p>
+    </div>
+    """
+
+    text = (
+        f"Hi {display_name},\n\n"
+        f"Thanks for creating a {role_label} account on VendCore.\n\n"
+        "Confirm your email address here:\n"
+        f"{link}\n\n"
+        "This only confirms your email address. Vendor or organizer verification is a separate review process inside VendCore.\n\n"
+        "— VendCore Support"
+    )
+
+    _send_resend_email(
+        to_email=email,
+        subject="Confirm your VendCore email",
+        html=html,
+        text=text,
+    )
+
+
 def send_verification_approved_email(email: str, full_name: Optional[str] = None) -> None:
     display_name = (full_name or "").strip() or "there"
     html = f"""
@@ -421,7 +485,8 @@ def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "plan", "subscription_status", "subscription_plan", "subscriptionStatus",
         "visibility_tier", "visibilityTier", "featured", "promoted",
         "stripe_customer_id", "stripe_subscription_id", "current_period_end",
-        "cancel_at_period_end",
+        "cancel_at_period_end", "email_verified", "email_verified_at",
+        "email_verification_token", "email_verification_expires_at",
     ):
         if key in user:
             serialized[key] = user.get(key)
@@ -486,53 +551,6 @@ def _verify_password(pw: str, hashed: str) -> bool:
     if hashed.startswith("plain$"):
         return hashed == ("plain$" + pw)
     return False
-
-
-def _password_policy_errors(password: str) -> List[str]:
-    value = str(password or "")
-    errors: List[str] = []
-
-    if len(value) < 12:
-        errors.append("at least 12 characters")
-    if not any(ch.isupper() for ch in value):
-        errors.append("one uppercase letter")
-    if not any(ch.islower() for ch in value):
-        errors.append("one lowercase letter")
-    if not any(ch.isdigit() for ch in value):
-        errors.append("one number")
-    if not any(not ch.isalnum() for ch in value):
-        errors.append("one special character")
-
-    weak_values = {
-        "password",
-        "password1",
-        "password12",
-        "password123",
-        "password123!",
-        "welcome123",
-        "welcome123!",
-        "vendcore123",
-        "vendcore123!",
-        "qwerty123",
-        "qwerty123!",
-        "admin123",
-        "organizer123",
-        "vendor123",
-        "aabbcc1",
-    }
-    if value.strip().lower() in weak_values:
-        errors.append("a password that is not commonly used or easy to guess")
-
-    return errors
-
-
-def _validate_password_policy(password: str) -> None:
-    errors = _password_policy_errors(password)
-    if errors:
-        raise HTTPException(
-            status_code=400,
-            detail="Password must include " + ", ".join(errors) + ".",
-        )
 
 
 def _add_user(
@@ -689,13 +707,17 @@ def admin_create_user(
 
     if not normalized_email:
         raise HTTPException(status_code=400, detail="Email required")
-    _validate_password_policy(password)
+    if len(str(password or "")) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     if normalized_role not in {"vendor", "organizer", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")
     if normalized_email in _USERS_BY_EMAIL:
         raise HTTPException(status_code=409, detail="Account already exists")
     if normalized_username in _USERS_BY_USERNAME:
         raise HTTPException(status_code=409, detail="Username already exists")
+
+    email_verification_token = _new_email_verification_token()
+    email_verification_expires_at = int(time.time()) + (60 * 60 * 24)
 
     user = _add_user(
         user_id=int(_NEXT_ID),
@@ -706,6 +728,10 @@ def admin_create_user(
         full_name=full_name,
         persist=True,
     )
+    user["email_verified"] = False
+    user["email_verification_token"] = email_verification_token
+    user["email_verification_expires_at"] = email_verification_expires_at
+
     _NEXT_ID = max(_NEXT_ID + 1, _next_user_id())
     _persist_users()
     try:
@@ -881,6 +907,70 @@ class AuthResponse(BaseModel):
     user_id: Optional[int] = None
 
 
+
+@router.get("/verify-email", response_class=HTMLResponse)
+def verify_email(token: str):
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        raise HTTPException(status_code=400, detail="Missing verification token")
+
+    now = int(time.time())
+    matched_user: Optional[Dict[str, Any]] = None
+
+    for user in _USERS.values():
+        if not isinstance(user, dict):
+            continue
+        if str(user.get("email_verification_token") or "") == clean_token:
+            matched_user = user
+            break
+
+    if not matched_user:
+        raise HTTPException(status_code=404, detail="Invalid or expired verification link")
+
+    expires_at = int(matched_user.get("email_verification_expires_at") or 0)
+    if expires_at and expires_at < now:
+        raise HTTPException(status_code=400, detail="Verification link expired")
+
+    matched_user["email_verified"] = True
+    matched_user["email_verified_at"] = now
+    matched_user["email_verification_token"] = None
+    matched_user["email_verification_expires_at"] = None
+    matched_user["updated_at"] = now
+    _persist_users()
+
+    safe_email = _norm(matched_user.get("email"))
+
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Email Confirmed | VendCore</title>
+        <style>
+          body {{ margin: 0; font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; }}
+          .wrap {{ min-height: 100vh; display: grid; place-items: center; padding: 24px; }}
+          .card {{ max-width: 560px; background: white; border: 1px solid #e2e8f0; border-radius: 28px; padding: 36px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); }}
+          .badge {{ display: inline-block; background: #dcfce7; color: #166534; padding: 8px 12px; border-radius: 999px; font-weight: 800; font-size: 14px; }}
+          h1 {{ margin: 20px 0 10px; font-size: 34px; line-height: 1.1; }}
+          p {{ line-height: 1.6; color: #475569; font-weight: 600; }}
+          a {{ display: inline-block; margin-top: 18px; background: #4f46e5; color: white; text-decoration: none; padding: 12px 18px; border-radius: 14px; font-weight: 800; }}
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <div class="card">
+            <span class="badge">Email confirmed</span>
+            <h1>Your VendCore email is confirmed.</h1>
+            <p>{safe_email} has been confirmed for account access.</p>
+            <p>This confirms your email address only. Vendor or organizer verification is still a separate VendCore review process.</p>
+            <a href="https://vendcore.co/login">Continue to Sign In</a>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
 @router.post("/register", response_model=AuthResponse, status_code=201)
 def register(payload: RegisterRequest) -> AuthResponse:
     user = admin_create_user(
@@ -892,13 +982,14 @@ def register(payload: RegisterRequest) -> AuthResponse:
     )
 
     try:
-        send_welcome_email(
+        send_email_confirmation_email(
             email=str(user.get("email") or ""),
             role=str(user.get("role") or payload.role or "user"),
+            token=str(user.get("email_verification_token") or ""),
             full_name=user.get("full_name") or payload.full_name,
         )
     except Exception as exc:
-        print(f"Welcome email failed: {exc}")
+        print(f"Email confirmation failed: {exc}")
 
     token = _create_access_token(
         email=str(user["email"]),
@@ -946,6 +1037,8 @@ def login(payload: LoginRequest) -> AuthResponse:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.get("is_active", True):
         raise HTTPException(status_code=403, detail="Inactive account")
+    if _email_verification_required() and user.get("email_verified") is not True:
+        raise HTTPException(status_code=403, detail="Please confirm your email address before signing in.")
     token = _create_access_token(
         email=str(user["email"]),
         role=str(user["role"]),
