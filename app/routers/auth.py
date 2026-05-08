@@ -1066,3 +1066,72 @@ def get_me(user: Dict[str, Any] = Depends(get_current_user)):
     # expect { user }.
     return {**payload, "user": payload}
 
+```python
+@router.post("/debug/force-premium/{email}")
+def debug_force_premium(email: str):
+    normalized_email = _norm(email)
+
+    # ---------- AUTH STORE ----------
+    uid = _USERS_BY_EMAIL.get(normalized_email)
+
+    if uid and int(uid) in _USERS:
+        user = _USERS[int(uid)]
+
+        user["plan"] = "pro_vendor"
+        user["subscription_plan"] = "pro_vendor"
+        user["subscriptionStatus"] = "active"
+        user["subscription_status"] = "active"
+        user["visibility_tier"] = "premium"
+        user["visibilityTier"] = "premium"
+        user["featured"] = True
+        user["promoted"] = True
+
+        _persist_users()
+
+    # ---------- POSTGRES PROFILE ----------
+    db = SessionLocal()
+
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(
+                func.lower(Profile.email) == normalized_email,
+                Profile.role == "vendor",
+            )
+            .first()
+        )
+
+        if profile:
+            profile.subscription_plan = "pro_vendor"
+            profile.subscription_status = "active"
+            profile.visibility_tier = "premium"
+            profile.featured = True
+            profile.promoted = True
+
+            data = profile.data if isinstance(profile.data, dict) else {}
+
+            data["plan"] = "pro_vendor"
+            data["subscription_plan"] = "pro_vendor"
+            data["subscription_status"] = "active"
+            data["subscriptionStatus"] = "active"
+            data["visibility_tier"] = "premium"
+            data["visibilityTier"] = "premium"
+            data["featured"] = True
+            data["promoted"] = True
+
+            profile.data = data
+
+            db.add(profile)
+            db.commit()
+
+        return {
+            "success": True,
+            "email": normalized_email,
+            "premium": True,
+        }
+
+    finally:
+        db.close()
+```
+
+
