@@ -488,6 +488,53 @@ def _verify_password(pw: str, hashed: str) -> bool:
     return False
 
 
+def _password_policy_errors(password: str) -> List[str]:
+    value = str(password or "")
+    errors: List[str] = []
+
+    if len(value) < 12:
+        errors.append("at least 12 characters")
+    if not any(ch.isupper() for ch in value):
+        errors.append("one uppercase letter")
+    if not any(ch.islower() for ch in value):
+        errors.append("one lowercase letter")
+    if not any(ch.isdigit() for ch in value):
+        errors.append("one number")
+    if not any(not ch.isalnum() for ch in value):
+        errors.append("one special character")
+
+    weak_values = {
+        "password",
+        "password1",
+        "password12",
+        "password123",
+        "password123!",
+        "welcome123",
+        "welcome123!",
+        "vendcore123",
+        "vendcore123!",
+        "qwerty123",
+        "qwerty123!",
+        "admin123",
+        "organizer123",
+        "vendor123",
+        "aabbcc1",
+    }
+    if value.strip().lower() in weak_values:
+        errors.append("a password that is not commonly used or easy to guess")
+
+    return errors
+
+
+def _validate_password_policy(password: str) -> None:
+    errors = _password_policy_errors(password)
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must include " + ", ".join(errors) + ".",
+        )
+
+
 def _add_user(
     *,
     user_id: int,
@@ -642,8 +689,7 @@ def admin_create_user(
 
     if not normalized_email:
         raise HTTPException(status_code=400, detail="Email required")
-    if len(str(password or "")) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    _validate_password_policy(password)
     if normalized_role not in {"vendor", "organizer", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")
     if normalized_email in _USERS_BY_EMAIL:
