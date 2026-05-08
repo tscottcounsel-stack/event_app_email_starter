@@ -1059,38 +1059,54 @@ def _public_current_user_payload(user: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
-@router.get("/me")
-def get_me(user: Dict[str, Any] = Depends(get_current_user)):
-    payload = _public_current_user_payload(user)
-    # Keep the historical flat response while also supporting consumers that
-    # expect { user }.
-    return {**payload, "user": payload}
 
-```python
 @router.post("/debug/force-premium/{email}")
 def debug_force_premium(email: str):
+    """One-time repair helper for syncing an existing vendor premium account.
+
+    This is intentionally narrow: it only upgrades vendor profile/subscription
+    fields for the supplied email and mirrors the same state into the lightweight
+    auth store plus the persistent Postgres profiles table. Remove or protect
+    this route after the repair is complete.
+    """
     normalized_email = _norm(email)
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="Email required")
 
     # ---------- AUTH STORE ----------
     uid = _USERS_BY_EMAIL.get(normalized_email)
+    auth_updated = False
 
-    if uid and int(uid) in _USERS:
+    if uid is not None and int(uid) in _USERS:
         user = _USERS[int(uid)]
-
         user["plan"] = "pro_vendor"
         user["subscription_plan"] = "pro_vendor"
-        user["subscriptionStatus"] = "active"
+        user["subscriptionPlan"] = "pro_vendor"
         user["subscription_status"] = "active"
+        user["subscriptionStatus"] = "active"
         user["visibility_tier"] = "premium"
         user["visibilityTier"] = "premium"
         user["featured"] = True
         user["promoted"] = True
-
+        user["updated_at"] = int(time.time())
         _persist_users()
+        auth_updated = True
 
     # ---------- POSTGRES PROFILE ----------
-    db = SessionLocal()
+    profile_updated = False
+    profile_created = False
 
+    if SessionLocal is None:
+        return {
+            "success": True,
+            "email": normalized_email,
+            "auth_updated": auth_updated,
+            "profile_updated": False,
+            "profile_created": False,
+            "warning": "SessionLocal unavailable; auth store updated only",
+        }
+
+    db = SessionLocal()
     try:
         profile = (
             db.query(Profile)
@@ -1098,40 +1114,64 @@ def debug_force_premium(email: str):
                 func.lower(Profile.email) == normalized_email,
                 Profile.role == "vendor",
             )
-            .first()
+            .one_or_none()
         )
 
-        if profile:
-            profile.subscription_plan = "pro_vendor"
-            profile.subscription_status = "active"
-            profile.visibility_tier = "premium"
-            profile.featured = True
-            profile.promoted = True
-
-            data = profile.data if isinstance(profile.data, dict) else {}
-
-            data["plan"] = "pro_vendor"
-            data["subscription_plan"] = "pro_vendor"
-            data["subscription_status"] = "active"
-            data["subscriptionStatus"] = "active"
-            data["visibility_tier"] = "premium"
-            data["visibilityTier"] = "premium"
-            data["featured"] = True
-            data["promoted"] = True
-
-            profile.data = data
-
+        if profile is None:
+            profile = Profile(email=normalized_email, role="vendor")
             db.add(profile)
-            db.commit()
+            profile_created = True
+
+        profile.subscription_plan = "pro_vendor"
+        profile.subscription_status = "active"
+        profile.visibility_tier = "premium"
+        profile.featured = True
+        profile.promoted = True
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+        profile.data = {
+            **data,
+            "email": normalized_email,
+            "plan": "pro_vendor",
+            "subscription_plan": "pro_vendor",
+            "subscriptionPlan": "pro_vendor",
+            "subscription_status": "active",
+            "subscriptionStatus": "active",
+            "visibility_tier": "premium",
+            "visibilityTier": "premium",
+            "featured": True,
+            "promoted": True,
+            "premium": True,
+            "is_premium": True,
+            "premium_active": True,
+            "subscription_active": True,
+            "premium_repaired_at": int(time.time()),
+        }
+
+        db.commit()
+        profile_updated = True
 
         return {
             "success": True,
             "email": normalized_email,
             "premium": True,
+            "auth_updated": auth_updated,
+            "profile_updated": profile_updated,
+            "profile_created": profile_created,
+            "plan": "pro_vendor",
+            "subscription_status": "active",
+            "visibility_tier": "premium",
         }
-
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Premium repair failed: {exc}")
     finally:
         db.close()
-```
 
+@router.get("/me")
+def get_me(user: Dict[str, Any] = Depends(get_current_user)):
+    payload = _public_current_user_payload(user)
+    # Keep the historical flat response while also supporting consumers that
+    # expect { user }.
+    return {**payload, "user": payload}
 
