@@ -117,6 +117,51 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+def _event_end_datetime_value(event_data: Dict[str, Any]) -> Optional[datetime]:
+    """Return the best lifecycle date for an event as UTC.
+
+    End date wins; start date is the fallback for one-day events.
+    """
+    value = event_data.get("end_date") or event_data.get("endDate") or event_data.get("start_date") or event_data.get("startDate")
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _event_is_past(event_data: Dict[str, Any]) -> bool:
+    lifecycle_date = _event_end_datetime_value(event_data)
+    if lifecycle_date is None:
+        return False
+    today = datetime.now(timezone.utc).date()
+    return lifecycle_date.date() < today
+
+
+def _event_lifecycle_status(event_data: Dict[str, Any]) -> str:
+    if bool(event_data.get("archived")):
+        return "archived"
+    if _event_is_past(event_data):
+        return "completed"
+    if bool(event_data.get("published")):
+        return "published"
+    return "draft"
+
+
+def _event_is_active_marketplace_event(event_data: Dict[str, Any]) -> bool:
+    return bool(event_data.get("published")) and not bool(event_data.get("archived")) and not _event_is_past(event_data)
+
+
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -203,7 +248,7 @@ def _event_belongs_to_user(event: Dict[str, Any], user: Optional[Dict[str, Any]]
 
 
 def _serialize_event_model(ev: Event) -> Dict[str, Any]:
-    return {
+    payload = {
         "id": ev.id,
         "title": ev.title,
         "description": ev.description,
@@ -232,6 +277,10 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "created_at": _dt_to_iso(ev.created_at),
         "updated_at": _dt_to_iso(ev.updated_at),
     }
+    payload["is_past"] = _event_is_past(payload)
+    payload["lifecycle_status"] = _event_lifecycle_status(payload)
+    payload["active_marketplace_event"] = _event_is_active_marketplace_event(payload)
+    return payload
 
 
 def _event_organizer_display_name(user: Optional[Dict[str, Any]], event_data: Optional[Dict[str, Any]] = None) -> str:
@@ -759,14 +808,19 @@ async def get_events(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    total = int(db.query(func.count(Event.id)).scalar() or 0)
-    rows = (
+    all_rows = (
         db.query(Event)
+        .filter(Event.published == True)  # noqa: E712
+        .filter(Event.archived == False)  # noqa: E712
         .order_by(Event.id.desc())
-        .offset(_page_offset(offset))
-        .limit(_page_limit(limit))
         .all()
     )
+
+    active_rows = [row for row in all_rows if _event_is_active_marketplace_event(_serialize_event_model(row))]
+    total = len(active_rows)
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    rows = active_rows[safe_offset:safe_offset + safe_limit]
 
     result = []
     for row in rows:
@@ -774,8 +828,6 @@ async def get_events(
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
         result.append(event_dict)
 
-    safe_limit = _page_limit(limit)
-    safe_offset = _page_offset(offset)
     return {
         "events": result,
         "items": result,
@@ -909,6 +961,38 @@ def organizer_publish_event(
     _sync_event_to_store(serialized, user)
     if not was_published:
         _create_vendor_event_alerts(db, serialized)
+    return serialized
+
+
+@router.post("/organizer/events/{event_id}/archive")
+def organizer_archive_event(
+    event_id: int,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ev = _get_owned_event_or_404(db, event_id, user)
+    ev.archived = True
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    serialized = _serialize_event_model(ev)
+    _sync_event_to_store(serialized, user)
+    return serialized
+
+
+@router.post("/organizer/events/{event_id}/restore")
+def organizer_restore_event(
+    event_id: int,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ev = _get_owned_event_or_404(db, event_id, user)
+    ev.archived = False
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    serialized = _serialize_event_model(ev)
+    _sync_event_to_store(serialized, user)
     return serialized
 
 
@@ -1214,14 +1298,18 @@ def public_list_events(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    query = (
+    rows_all = (
         db.query(Event)
         .filter(Event.published == True)  # noqa: E712
         .filter(Event.archived == False)  # noqa: E712
         .order_by(Event.id.desc())
+        .all()
     )
-    total = int(query.with_entities(func.count(Event.id)).scalar() or 0)
-    rows = query.offset(_page_offset(offset)).limit(_page_limit(limit)).all()
+    active_rows = [row for row in rows_all if _event_is_active_marketplace_event(_serialize_event_model(row))]
+    total = len(active_rows)
+    safe_limit = _page_limit(limit)
+    safe_offset = _page_offset(offset)
+    rows = active_rows[safe_offset:safe_offset + safe_limit]
 
     out = []
     for event in rows:
@@ -1229,8 +1317,6 @@ def public_list_events(
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
         out.append(event_dict)
 
-    safe_limit = _page_limit(limit)
-    safe_offset = _page_offset(offset)
     return {
         "events": out,
         "items": out,
