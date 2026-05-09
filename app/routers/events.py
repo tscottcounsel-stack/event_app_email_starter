@@ -148,7 +148,28 @@ def _event_is_past(event_data: Dict[str, Any]) -> bool:
     return lifecycle_date.date() < today
 
 
+def _event_is_canceled(event_data: Dict[str, Any]) -> bool:
+    status = str(
+        event_data.get("status")
+        or event_data.get("lifecycle_status")
+        or event_data.get("lifecycleStatus")
+        or ""
+    ).strip().lower()
+    return bool(
+        event_data.get("canceled")
+        or event_data.get("cancelled")
+        or event_data.get("canceled_at")
+        or event_data.get("cancelled_at")
+        or status in {"canceled", "cancelled", "event_canceled"}
+    )
+
+
 def _event_lifecycle_status(event_data: Dict[str, Any]) -> str:
+    raw_status = str(event_data.get("status") or "").strip().lower()
+    if _event_is_canceled(event_data):
+        return "canceled"
+    if raw_status == "closed":
+        return "closed"
     if bool(event_data.get("archived")):
         return "archived"
     if _event_is_past(event_data):
@@ -159,7 +180,12 @@ def _event_lifecycle_status(event_data: Dict[str, Any]) -> str:
 
 
 def _event_is_active_marketplace_event(event_data: Dict[str, Any]) -> bool:
-    return bool(event_data.get("published")) and not bool(event_data.get("archived")) and not _event_is_past(event_data)
+    return (
+        bool(event_data.get("published"))
+        and not bool(event_data.get("archived"))
+        and not _event_is_canceled(event_data)
+        and not _event_is_past(event_data)
+    )
 
 
 def _norm_email(value: Any) -> str:
@@ -248,6 +274,7 @@ def _event_belongs_to_user(event: Dict[str, Any], user: Optional[Dict[str, Any]]
 
 
 def _serialize_event_model(ev: Event) -> Dict[str, Any]:
+    store_payload = _EVENTS.get(int(ev.id or 0), {}) if isinstance(_EVENTS.get(int(ev.id or 0)), dict) else {}
     payload = {
         "id": ev.id,
         "title": ev.title,
@@ -277,6 +304,25 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "created_at": _dt_to_iso(ev.created_at),
         "updated_at": _dt_to_iso(ev.updated_at),
     }
+
+    # Store-only operational metadata is preserved here because the Event model
+    # currently stores published/archived in Postgres while cancellation details
+    # live in the event store until the schema is expanded.
+    for key in (
+        "status",
+        "accepting_vendors",
+        "acceptingVendors",
+        "canceled",
+        "cancelled",
+        "canceled_at",
+        "cancelled_at",
+        "cancellation_reason",
+        "cancellation_message",
+        "canceled_by",
+    ):
+        if key in store_payload:
+            payload[key] = store_payload.get(key)
+
     payload["is_past"] = _event_is_past(payload)
     payload["lifecycle_status"] = _event_lifecycle_status(payload)
     payload["active_marketplace_event"] = _event_is_active_marketplace_event(payload)
@@ -964,6 +1010,60 @@ def organizer_publish_event(
     return serialized
 
 
+@router.post("/organizer/events/{event_id}/cancel")
+def organizer_cancel_event(
+    event_id: int,
+    payload: Dict[str, Any] = Body(default={}),
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    ev = _get_owned_event_or_404(db, event_id, user)
+    now_iso = utc_now_iso()
+    reason = str((payload or {}).get("reason") or (payload or {}).get("cancellation_reason") or "").strip()
+    message = str((payload or {}).get("message") or (payload or {}).get("cancellation_message") or "").strip()
+
+    # Canceled events leave public/vendor discovery immediately but remain
+    # available to the organizer as operational records.
+    ev.published = False
+    ev.archived = True
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+
+    serialized = _serialize_event_model(ev)
+    serialized.update({
+        "status": "canceled",
+        "lifecycle_status": "canceled",
+        "accepting_vendors": False,
+        "acceptingVendors": False,
+        "canceled": True,
+        "canceled_at": now_iso,
+        "cancellation_reason": reason,
+        "cancellation_message": message,
+        "canceled_by": str(user.get("email") or ""),
+    })
+    _sync_event_to_store(serialized, user)
+
+    # Mark existing application records without destroying payment/history data.
+    for app in _APPLICATIONS.values():
+        if not isinstance(app, dict):
+            continue
+        try:
+            app_event_id = int(app.get("event_id") or app.get("eventId") or 0)
+        except Exception:
+            app_event_id = 0
+        if app_event_id != int(event_id):
+            continue
+        app["event_canceled"] = True
+        app["event_canceled_at"] = now_iso
+        app["event_cancellation_reason"] = reason
+        if str(app.get("status") or "").strip().lower() not in {"paid", "confirmed"}:
+            app["status"] = "event_canceled"
+
+    save_store()
+    return serialized
+
+
 @router.post("/organizer/events/{event_id}/archive")
 def organizer_archive_event(
     event_id: int,
@@ -992,6 +1092,16 @@ def organizer_restore_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
+    serialized.update({
+        "status": "draft" if not bool(ev.published) else "published",
+        "lifecycle_status": "draft" if not bool(ev.published) else "published",
+        "canceled": False,
+        "cancelled": False,
+        "canceled_at": None,
+        "cancelled_at": None,
+        "cancellation_reason": "",
+        "cancellation_message": "",
+    })
     _sync_event_to_store(serialized, user)
     return serialized
 
@@ -1331,9 +1441,9 @@ def public_list_events(
 @router.get("/public/events/{event_id}")
 def public_get_event(event_id: int, db: Session = Depends(get_db)):
     ev = _get_event_row_or_404(db, event_id)
-    if not ev.published or ev.archived:
-        raise HTTPException(status_code=404, detail="Event not found")
     event_dict = _serialize_event_model(ev)
+    if not _event_is_active_marketplace_event(event_dict):
+        raise HTTPException(status_code=404, detail="Event not found")
     event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
     return event_dict
 
