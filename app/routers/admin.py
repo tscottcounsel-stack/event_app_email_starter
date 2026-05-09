@@ -113,6 +113,72 @@ def _profile_payload(profile: Profile) -> Dict[str, Any]:
     }
 
 
+def _mark_profiles_deleted(
+    *,
+    db: Session,
+    email: str,
+    role: str | None = None,
+    admin_email: str = "",
+) -> int:
+    """Soft-delete every matching profile/verification row for an account.
+
+    Account deletion must clear the login record and also remove the profile from
+    public/admin verification surfaces. We keep the row for audit/history, but
+    force every verification/status field into a deleted state.
+    """
+    normalized_email = _safe_lower(email)
+    normalized_role = _safe_lower(role)
+    if not normalized_email:
+        return 0
+
+    query = db.query(Profile).filter(func.lower(Profile.email) == normalized_email)
+    if normalized_role in {"vendor", "organizer", "admin"}:
+        query = query.filter(Profile.role == normalized_role)
+
+    profiles = query.all()
+    if not profiles:
+        return 0
+
+    now_iso = utc_now_iso()
+    deleted_by = _safe_lower(admin_email)
+
+    for profile in profiles:
+        data = profile.data if isinstance(profile.data, dict) else {}
+
+        profile.verified = False
+        profile.verification_status = "deleted"
+        profile.public_verification_status = "deleted"
+        profile.public_verification_label = "Deleted"
+        profile.review_status = "deleted"
+        profile.featured = False
+        profile.promoted = False
+        profile.visibility_tier = "standard"
+
+        profile.data = {
+            **data,
+            "email": normalized_email,
+            "role": _safe_lower(profile.role or normalized_role),
+            "verified": False,
+            "is_verified": False,
+            "status": "deleted",
+            "verification_status": "deleted",
+            "review_status": "deleted",
+            "public_verification_status": "deleted",
+            "public_verification_label": "Deleted",
+            "featured": False,
+            "promoted": False,
+            "visibility_tier": "standard",
+            "deleted_at": now_iso,
+            "dismissed_at": now_iso,
+            "deleted_by": deleted_by,
+            "dismissed_by": deleted_by,
+        }
+        db.add(profile)
+
+    db.commit()
+    return len(profiles)
+
+
 @router.get("/dashboard")
 async def admin_dashboard(
     user: dict = Depends(require_admin),
@@ -122,19 +188,62 @@ async def admin_dashboard(
     vendor_items = [u for u in accounts if _safe_lower(u.get("role")) == "vendor"]
     organizer_items = [u for u in accounts if _safe_lower(u.get("role")) == "organizer"]
 
-    pending_profiles = (
+    pending_candidates = (
         db.query(Profile)
         .filter(
             Profile.role.in_(["vendor", "organizer"]),
             Profile.verified.is_(False),
-            func.lower(func.coalesce(Profile.review_status, "")).in_(["pending", "renewal_pending", "submitted", "under_review"]),
+            func.lower(Profile.email) != "admin@example.com",
+            ~func.lower(Profile.email).like("%@example.com"),
+            func.lower(func.coalesce(Profile.review_status, "")).in_(
+                ["pending", "renewal_pending", "submitted", "under_review"]
+            ),
         )
         .order_by(Profile.updated_at.desc())
         .all()
     )
 
-    total_vendors = db.query(Profile).filter(Profile.role == "vendor").count() or len(vendor_items)
-    total_organizers = db.query(Profile).filter(Profile.role == "organizer").count() or len(organizer_items)
+    def _visible_pending_profile(profile: Profile) -> bool:
+        data = profile.data if isinstance(profile.data, dict) else {}
+        status_values = {
+            _safe_lower(profile.verification_status),
+            _safe_lower(profile.public_verification_status),
+            _safe_lower(profile.review_status),
+            _safe_lower(data.get("status")),
+            _safe_lower(data.get("verification_status")),
+            _safe_lower(data.get("public_verification_status")),
+            _safe_lower(data.get("review_status")),
+        }
+        if status_values.intersection({"deleted", "dismissed"}):
+            return False
+        if data.get("deleted_at") or data.get("dismissed_at"):
+            return False
+        return True
+
+    pending_profiles = [
+        profile for profile in pending_candidates if _visible_pending_profile(profile)
+    ]
+
+    total_vendors = (
+        db.query(Profile)
+        .filter(
+            Profile.role == "vendor",
+            func.lower(func.coalesce(Profile.review_status, "")) != "deleted",
+            func.lower(func.coalesce(Profile.public_verification_status, "")) != "deleted",
+        )
+        .count()
+        or len(vendor_items)
+    )
+    total_organizers = (
+        db.query(Profile)
+        .filter(
+            Profile.role == "organizer",
+            func.lower(func.coalesce(Profile.review_status, "")) != "deleted",
+            func.lower(func.coalesce(Profile.public_verification_status, "")) != "deleted",
+        )
+        .count()
+        or len(organizer_items)
+    )
 
     return {
         "stats": {
@@ -177,12 +286,48 @@ async def admin_accounts_create(
 
 
 @router.delete("/accounts/{user_id}")
-async def admin_accounts_delete(user_id: int, user: dict = Depends(require_admin)):
+async def admin_accounts_delete(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+):
     if int(user.get("id") or 0) == int(user_id):
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
 
+    target_account = None
+    for account in list_all_users():
+        try:
+            if int(account.get("id") or 0) == int(user_id):
+                target_account = account
+                break
+        except Exception:
+            continue
+
+    if target_account is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+
+    target_email = _safe_lower(target_account.get("email"))
+    target_role = _safe_lower(target_account.get("role"))
+
+    if _safe_lower(user.get("email")) == target_email:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+
+    # Important: clear profile/verification rows before deleting the auth account,
+    # otherwise the user disappears from Account Management but remains visible in
+    # verification/admin profile surfaces.
+    deleted_profiles = _mark_profiles_deleted(
+        db=db,
+        email=target_email,
+        role=target_role if target_role in {"vendor", "organizer"} else None,
+        admin_email=_safe_lower(user.get("email")),
+    )
+
     deleted = admin_delete_user(user_id)
-    return {"ok": True, "account": deleted}
+    return {
+        "ok": True,
+        "account": deleted,
+        "deleted_profiles": deleted_profiles,
+    }
 
 
 
@@ -217,46 +362,13 @@ def admin_delete_profile_and_account(
     if _safe_lower(user.get("email")) == email:
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
 
-    deleted_profile = False
-    profiles = (
-        db.query(Profile)
-        .filter(func.lower(Profile.email) == email, Profile.role == role)
-        .all()
+    deleted_profile_count = _mark_profiles_deleted(
+        db=db,
+        email=email,
+        role=role,
+        admin_email=_safe_lower(user.get("email")),
     )
-
-    if profiles:
-        now_iso = utc_now_iso()
-        admin_email = _safe_lower(user.get("email"))
-
-        for profile in profiles:
-            data = profile.data if isinstance(profile.data, dict) else {}
-            profile.verified = False
-            profile.verification_status = "deleted"
-            profile.public_verification_status = "deleted"
-            profile.public_verification_label = "Deleted"
-            profile.review_status = "deleted"
-            profile.featured = False
-            profile.promoted = False
-            profile.data = {
-                **data,
-                "email": email,
-                "role": role,
-                "verified": False,
-                "is_verified": False,
-                "status": "deleted",
-                "verification_status": "deleted",
-                "review_status": "deleted",
-                "public_verification_status": "deleted",
-                "public_verification_label": "Deleted",
-                "deleted_at": now_iso,
-                "dismissed_at": now_iso,
-                "deleted_by": admin_email,
-                "dismissed_by": admin_email,
-            }
-            db.add(profile)
-
-        db.commit()
-        deleted_profile = True
+    deleted_profile = deleted_profile_count > 0
 
     deleted_account = None
     account_id = _find_user_id_by_email(email)
