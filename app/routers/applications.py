@@ -885,6 +885,73 @@ def _normalize_documents_payload(raw: Any) -> Dict[str, Any]:
 
 
 
+def _normalize_document_requests(raw: Any) -> List[Dict[str, Any]]:
+    """Normalize organizer-requested document records stored on an application.
+
+    These are manual, application-specific requests that sit on top of the
+    automatic event requirements engine. They let an organizer request an
+    updated/special document without breaking reusable vault documents.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        uploaded_document = item.get("uploaded_document")
+        uploaded_payload = (
+            _normalize_document_entry(uploaded_document)
+            if isinstance(uploaded_document, dict)
+            else None
+        )
+
+        status = _as_str(item.get("status") or "requested").lower()
+        if status not in {"requested", "fulfilled", "dismissed", "rejected"}:
+            status = "requested"
+
+        normalized.append(
+            {
+                "id": _as_str(item.get("id") or str(int(time.time() * 1000))),
+                "document_key": _as_str(item.get("document_key") or item.get("key")),
+                "document_label": _as_str(item.get("document_label") or item.get("label") or item.get("name")),
+                "status": status,
+                "requested_by": _as_str(item.get("requested_by") or "organizer"),
+                "request_note": _as_str(item.get("request_note") or item.get("note") or item.get("message")),
+                "due_date": _as_str(item.get("due_date") or item.get("dueBy") or item.get("due_by")),
+                "created_at": _as_str(item.get("created_at") or _now_iso()),
+                "fulfilled_at": _as_str(item.get("fulfilled_at")),
+                "uploaded_document": uploaded_payload,
+            }
+        )
+
+    return normalized
+
+
+def _build_document_request_key(label: Any, fallback: str = "requested_document") -> str:
+    key = _slugify(label)
+    return key or fallback
+
+
+def _append_application_notification(app: Dict[str, Any], notification: Dict[str, Any]) -> None:
+    existing = app.get("notifications")
+    if not isinstance(existing, list):
+        existing = []
+        app["notifications"] = existing
+
+    existing.append(
+        {
+            "id": _as_str(notification.get("id") or str(int(time.time() * 1000))),
+            "type": _as_str(notification.get("type") or "info"),
+            "message": _as_str(notification.get("message")),
+            "created_at": _as_str(notification.get("created_at") or _now_iso()),
+            "read": bool(notification.get("read") is True),
+        }
+    )
+
+
 def _document_aliases_for_matching(key: Any, value: Any = None) -> set[str]:
     aliases: set[str] = set()
 
@@ -1044,6 +1111,7 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
         enriched["documents"] = enriched["docs"]
 
     _merge_vendor_doc_vault(enriched)
+    enriched["document_requests"] = _normalize_document_requests(enriched.get("document_requests"))
 
     requirement_status = _compute_requirement_status(enriched)
     enriched["booth_selected"] = requirement_status["booth_selected"]
@@ -1743,6 +1811,7 @@ def create_vendor_application(
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
         "archived": False,
+        "document_requests": [],
     }
 
     booth_price = payload.get("booth_price")
@@ -1928,6 +1997,140 @@ def organizer_release_reservation(app_id: str) -> Dict[str, Any]:
     app.pop("reservation_expires_at", None)
     app.pop("booth_id", None)
     _save_store()
+    return {"ok": True, "application": _serialize_application(app)}
+
+
+@router.post("/organizer/applications/{app_id}/request-document")
+def organizer_request_document(
+    app_id: str,
+    payload: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+    user = _extract_user_from_token(authorization)
+
+    role = _as_str(user.get("role")).lower()
+    # Keep this permissive for existing dev/admin flows, but still reject obvious vendor-only requests.
+    if role and role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Only organizers can request documents")
+
+    label = _as_str(
+        payload.get("document_label")
+        or payload.get("label")
+        or payload.get("name")
+        or payload.get("document_key")
+    )
+    if not label:
+        raise HTTPException(status_code=400, detail="document_label is required")
+
+    document_key = _as_str(payload.get("document_key")) or _build_document_request_key(label)
+
+    requests_existing = _normalize_document_requests(app.get("document_requests"))
+
+    request_item = {
+        "id": str(int(time.time() * 1000)),
+        "document_key": document_key,
+        "document_label": label,
+        "status": "requested",
+        "requested_by": _as_str(user.get("email") or user.get("sub") or "organizer") or "organizer",
+        "request_note": _as_str(payload.get("request_note") or payload.get("note") or payload.get("message")),
+        "due_date": _as_str(payload.get("due_date") or payload.get("dueBy") or payload.get("due_by")),
+        "created_at": _now_iso(),
+        "fulfilled_at": "",
+        "uploaded_document": None,
+    }
+
+    requests_existing.append(request_item)
+    app["document_requests"] = requests_existing
+    app["updated_at"] = _now_iso()
+
+    _append_application_notification(
+        app,
+        {
+            "type": "document_requested",
+            "message": f"Organizer requested: {label}",
+            "created_at": _now_iso(),
+            "read": False,
+        },
+    )
+
+    _save_store()
+
+    return {
+        "ok": True,
+        "request": request_item,
+        "application": _serialize_application(app),
+    }
+
+
+@router.post("/vendor/applications/{app_id}/upload-requested-document")
+def vendor_upload_requested_document(
+    app_id: str,
+    payload: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    app = _get_application_or_404(app_id)
+    user = _extract_user_from_token(authorization)
+
+    if user and not _can_access_messages(app, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    request_id = _as_str(payload.get("request_id"))
+    uploaded_document = payload.get("uploaded_document")
+
+    if not request_id:
+        raise HTTPException(status_code=400, detail="request_id is required")
+    if not isinstance(uploaded_document, dict):
+        raise HTTPException(status_code=400, detail="uploaded_document is required")
+
+    normalized_upload = _normalize_document_entry(uploaded_document)
+    if not isinstance(normalized_upload, dict):
+        raise HTTPException(status_code=400, detail="Invalid uploaded_document")
+
+    requests_existing = _normalize_document_requests(app.get("document_requests"))
+    updated = False
+    document_key = ""
+
+    for item in requests_existing:
+        if _as_str(item.get("id")) != request_id:
+            continue
+
+        item["status"] = "fulfilled"
+        item["fulfilled_at"] = _now_iso()
+        item["uploaded_document"] = normalized_upload
+        document_key = _as_str(item.get("document_key")) or _build_document_request_key(item.get("document_label"), request_id)
+        updated = True
+        break
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    documents = _normalize_documents_payload(app.get("documents") if isinstance(app.get("documents"), dict) else app.get("docs"))
+    documents[document_key or request_id] = normalized_upload
+    app["documents"] = documents
+    app["docs"] = documents
+    app["document_requests"] = requests_existing
+
+    requirement_status = _compute_requirement_status(app)
+    app["booth_selected"] = requirement_status["booth_selected"]
+    app["compliance_complete"] = requirement_status["compliance_complete"]
+    app["documents_complete"] = requirement_status["documents_complete"]
+    app["requirements_complete"] = requirement_status["requirements_complete"]
+    app["progress_percent"] = requirement_status["progress_percent"]
+    app["updated_at"] = _now_iso()
+
+    _append_application_notification(
+        app,
+        {
+            "type": "document_uploaded",
+            "message": f"Requested document uploaded: {normalized_upload.get('name') or document_key or 'Document'}",
+            "created_at": _now_iso(),
+            "read": False,
+        },
+    )
+
+    _save_store()
+
     return {"ok": True, "application": _serialize_application(app)}
 
 
