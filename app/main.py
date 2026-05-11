@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib
 import logging
@@ -225,6 +225,7 @@ for module_name in [
     "app.routers.requirements_alias",
     "app.routers.requirement_templates",
     "app.routers.organizers",
+    "app.routers.organizer_profiles",
     # "app.routers.reviews",  # temporarily disabled while import issues are resolved
     #"app.routers.seed",
     "app.routers.slots",
@@ -244,3 +245,5 @@ for module_name in [
 def debug_vendors():
     from app.store import _VENDORS
     return _VENDORS
+
+
