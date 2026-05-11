@@ -1014,13 +1014,27 @@ def get_public_vendors(
     db: Session = Depends(get_db),
 ):
     results = []
-    vendors = _load_all_vendors_from_db(db)
-    if not vendors:
-        vendors = dict(_VENDORS)
+ vendors = _load_all_vendors_from_db(db)
 
-    for vendor_key, vendor in vendors.items():
-        if not isinstance(vendor, dict):
-            continue
+for vendor in vendors:
+    status = _safe_str(
+        vendor.get("verification_status")
+        or vendor.get("public_verification_status")
+        or vendor.get("status")
+    ).lower()
+
+    is_deleted = status in {
+        "deleted",
+        "archived",
+        "inactive",
+        "removed",
+        "hidden",
+    }
+
+    if is_deleted:
+        continue
+
+    # existing logic continues here
 
         payload = _vendor_public_payload(vendor_key, vendor)
 
