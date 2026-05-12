@@ -59,10 +59,40 @@ class DocumentAccessGrant(Base):
     owner_email = sa.Column(String, nullable=False, index=True)
     granted_to_email = sa.Column(String, nullable=False, index=True)
     granted_to_role = sa.Column(String, nullable=False, default="organizer", index=True)
+
+    # Bundle token enables accountless, organizer-safe public access links.
+    # Multiple rows may share the same token when a vendor shares a package of docs.
+    access_token = sa.Column(String, nullable=True, index=True)
+    granted_to_name = sa.Column(String, nullable=True)
+    organization_name = sa.Column(String, nullable=True)
+    public_note = sa.Column(Text, nullable=True)
+    metadata_json = sa.Column(_json_type(), nullable=False, default=dict)
+
     purpose = sa.Column(String, nullable=True)
     expires_at = sa.Column(DateTime(timezone=True), nullable=False, index=True)
     revoked_at = sa.Column(DateTime(timezone=True), nullable=True, index=True)
     created_by = sa.Column(String, nullable=True)
+    created_at = sa.Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = sa.Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class DocumentAccessRequest(Base):
+    __tablename__ = "document_access_requests"
+    __table_args__ = {"extend_existing": True}
+
+    id = sa.Column(Integer, primary_key=True, index=True)
+    vendor_email = sa.Column(String, nullable=False, index=True)
+    requester_email = sa.Column(String, nullable=False, index=True)
+    requester_name = sa.Column(String, nullable=True)
+    organization_name = sa.Column(String, nullable=True)
+    event_name = sa.Column(String, nullable=True)
+    requested_document_types = sa.Column(_json_type(), nullable=False, default=list)
+    message = sa.Column(Text, nullable=True)
+    status = sa.Column(String, nullable=False, default="pending", index=True)
+    share_token = sa.Column(String, nullable=True, index=True)
+    responded_at = sa.Column(DateTime(timezone=True), nullable=True)
+    responded_by = sa.Column(String, nullable=True)
+    metadata_json = sa.Column(_json_type(), nullable=False, default=dict)
     created_at = sa.Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = sa.Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
