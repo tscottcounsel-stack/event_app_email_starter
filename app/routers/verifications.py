@@ -157,6 +157,46 @@ def _verification_fee_amount(role: str) -> int:
         return int(DEFAULT_VERIFICATION_FEES.get(role, 25))
 
 
+
+
+def _verification_price_id(role: str) -> str:
+    """Return a recurring Stripe Price ID for annual verification checkout.
+
+    Preferred Railway env vars:
+    - vendor: STRIPE_PRICE_VERIFICATION_VENDOR
+    - organizer: STRIPE_PRICE_VERIFICATION_ORGANIZER
+
+    Backward/alternate names are supported so production can be configured
+    without another code change. If no recurring price is configured, checkout
+    falls back to the legacy one-time price_data flow.
+    """
+    normalized_role = _safe_lower(role)
+    if normalized_role == "organizer":
+        candidates = [
+            "STRIPE_PRICE_VERIFICATION_ORGANIZER",
+            "STRIPE_ORGANIZER_VERIFICATION_PRICE_ID",
+            "STRIPE_VERIFICATION_ORGANIZER_PRICE_ID",
+            "STRIPE_PRICE_ORGANIZER_VERIFICATION",
+        ]
+    else:
+        candidates = [
+            "STRIPE_PRICE_VERIFICATION_VENDOR",
+            "STRIPE_VENDOR_VERIFICATION_PRICE_ID",
+            "STRIPE_VERIFICATION_VENDOR_PRICE_ID",
+            "STRIPE_PRICE_VENDOR_VERIFICATION",
+        ]
+
+    candidates.extend([
+        "STRIPE_PRICE_VERIFICATION",
+        "STRIPE_VERIFICATION_PRICE_ID",
+    ])
+
+    for name in candidates:
+        value = _safe_str(os.getenv(name))
+        if value:
+            return value
+    return ""
+
 def _require_stripe() -> Any:
     if stripe is None:
         raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
@@ -609,15 +649,39 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
     _set_profile_state(row, data)
     db.commit()
 
-    try:
-        session = stripe_sdk.checkout.Session.create(
-            mode="payment",
-            payment_method_types=["card"],
-            success_url=success_url,
-            cancel_url=cancel_url,
-            client_reference_id=str(user.get("id") or ""),
-            customer_email=email or None,
-            line_items=[{
+    price_id = _verification_price_id(role)
+    metadata = {
+        "payment_type": "verification_fee",
+        "verification": "true",
+        "email": email,
+        "role": role,
+        "renewal": "true" if payload.get("renewal") else "false",
+    }
+
+    session_kwargs: Dict[str, Any] = {
+        "payment_method_types": ["card"],
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "client_reference_id": str(user.get("id") or ""),
+        "customer_email": email or None,
+        "metadata": metadata,
+    }
+
+    if price_id:
+        # Annual verification billing: use a recurring Stripe Price created in Stripe.
+        # This keeps verification separate from premium subscriptions because the
+        # metadata still identifies the checkout as payment_type=verification_fee.
+        session_kwargs.update({
+            "mode": "subscription",
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "subscription_data": {"metadata": metadata},
+        })
+    else:
+        # Legacy fallback for local/dev environments without Stripe recurring price env vars.
+        # Production should set STRIPE_PRICE_VERIFICATION_VENDOR to the $25/year Price ID.
+        session_kwargs.update({
+            "mode": "payment",
+            "line_items": [{
                 "price_data": {
                     "currency": "usd",
                     "product_data": {"name": f"VendCore {role.title()} Verification Fee"},
@@ -625,9 +689,11 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
                 },
                 "quantity": 1,
             }],
-            metadata={"payment_type": "verification_fee", "verification": "true", "email": email, "role": role, "renewal": "true" if payload.get("renewal") else "false"},
-            payment_intent_data={"metadata": {"payment_type": "verification_fee", "verification": "true", "email": email, "role": role}},
-        )
+            "payment_intent_data": {"metadata": metadata},
+        })
+
+    try:
+        session = stripe_sdk.checkout.Session.create(**session_kwargs)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Stripe verification checkout failed: {exc}")
 

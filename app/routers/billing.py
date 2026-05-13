@@ -579,6 +579,26 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
 
+    if _is_verification_checkout(metadata):
+        # Verification can now be an annual Stripe subscription. Do NOT sync it
+        # through the premium subscription pipeline, because that would overwrite
+        # plan/subscription fields or accidentally affect marketplace placement.
+        status = str(getattr(subscription, "status", None) or "").strip().lower()
+        if status in {"active", "trialing", "past_due"}:
+            try:
+                from app.routers.verifications import mark_verification_paid
+
+                mark_verification_paid(
+                    email=str(metadata.get("email") or "").strip().lower(),
+                    role=str(metadata.get("role") or "vendor").strip().lower(),
+                    stripe_session_id="",
+                    stripe_payment_intent_id=str(getattr(subscription, "id", None) or ""),
+                    amount_paid=None,
+                )
+            except Exception as exc:
+                print("🔥 Verification subscription sync failed:", str(exc))
+        return True
+
     customer_id = str(
         getattr(subscription, "customer", None) or metadata.get("customer") or ""
     ).strip() or None
