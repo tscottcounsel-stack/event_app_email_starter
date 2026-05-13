@@ -413,10 +413,119 @@ def complete_verification_document_upload(document_id: int, payload: Dict[str, A
     return {"ok": True, "document": _document_public(row)}
 
 
-@router.get("/verification-documents/me")
-def list_my_verification_documents(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def _doc_url_from_legacy_doc(doc: Dict[str, Any]) -> str:
+    return _safe_str(
+        doc.get("url")
+        or doc.get("file_url")
+        or doc.get("fileUrl")
+        or doc.get("secure_url")
+        or doc.get("href")
+        or doc.get("dataUrl")
+        or doc.get("path")
+    )
+
+
+def _legacy_doc_type(doc: Dict[str, Any]) -> str:
+    raw = _safe_lower(doc.get("type") or doc.get("document_type") or doc.get("category") or doc.get("key") or "other")
+    raw = raw.replace(" ", "_").replace("-", "_")
+    return raw if raw in VALID_DOCUMENT_TYPES else "other"
+
+
+def _legacy_doc_label(doc: Dict[str, Any], doc_type: str) -> str:
+    return _safe_str(doc.get("label") or doc.get("display_name") or doc.get("name") or doc.get("original_filename") or doc_type.replace("_", " ").title())
+
+
+def _sync_legacy_profile_documents(db: Session, *, email: str, role: str) -> None:
+    """Backfill older verification docs stored in Profile.data into the secure document table.
+
+    Earlier VendCore verification uploads were stored as document metadata on the
+    profile/verification record. The new sharing flow expects rows in
+    verification_documents. This keeps existing verified users from seeing an
+    empty share vault while we move toward the S3-backed document vault.
+    """
+    profile = _profile_for_user(db, email, role)
+    if profile is None:
+        return
+
+    data = profile.data if isinstance(profile.data, dict) else {}
+    legacy_docs = data.get("documents") if isinstance(data.get("documents"), list) else []
+    if not legacy_docs:
+        return
+
+    changed = False
+    for item in legacy_docs:
+        if not isinstance(item, dict):
+            continue
+
+        external_url = _doc_url_from_legacy_doc(item)
+        if not external_url:
+            continue
+
+        doc_type = _legacy_doc_type(item)
+        label = _legacy_doc_label(item, doc_type)
+        filename = _clean_filename(_safe_str(item.get("name") or item.get("original_filename") or f"{doc_type}.pdf"))
+        storage_key = f"legacy-profile-doc://{role}/{email}/{doc_type}/{abs(hash(external_url))}"
+
+        existing = (
+            db.query(VerificationDocument)
+            .filter(
+                func.lower(VerificationDocument.owner_email) == email,
+                VerificationDocument.owner_role == role,
+                VerificationDocument.storage_key == storage_key,
+                VerificationDocument.deleted_at.is_(None),
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            continue
+
+        expires_at = None
+        try:
+            expires_at = _parse_datetime(item.get("expires_at") or item.get("expiration_date") or item.get("expirationDate"))
+        except HTTPException:
+            expires_at = None
+
+        row = VerificationDocument(
+            owner_email=email,
+            owner_role=role,
+            owner_profile_id=profile.id,
+            document_type=doc_type,
+            display_name=label,
+            bucket="legacy_profile_document",
+            storage_key=storage_key,
+            original_filename=filename,
+            mime_type=_safe_str(item.get("mime_type") or item.get("type") or "application/pdf") or "application/pdf",
+            file_size=int(item.get("size") or item.get("file_size") or 0) or None,
+            checksum_sha256=None,
+            status="approved" if profile.verified else "uploaded",
+            review_status="approved" if profile.verified else "pending",
+            scan_status="legacy",
+            expires_at=expires_at,
+            reviewed_at=profile.updated_at if profile.verified else None,
+            reviewed_by="legacy_profile_import" if profile.verified else None,
+            notes="Imported from existing verification profile document metadata.",
+            metadata_json={
+                "source": "legacy_profile_document",
+                "external_url": external_url,
+                "legacy_document": item,
+            },
+        )
+        db.add(row)
+        changed = True
+
+    if changed:
+        db.commit()
+
+
+def _list_my_verification_documents_payload(user: dict, db: Session) -> Dict[str, Any]:
+    _ensure_document_access_schema(db)
     email = _safe_lower(user.get("email"))
     role = _require_role(user.get("role"))
+    if not email:
+        raise HTTPException(status_code=401, detail="Authenticated email required")
+
+    _sync_legacy_profile_documents(db, email=email, role=role)
+
     rows = (
         db.query(VerificationDocument)
         .filter(func.lower(VerificationDocument.owner_email) == email, VerificationDocument.owner_role == role, VerificationDocument.deleted_at.is_(None))
@@ -424,6 +533,16 @@ def list_my_verification_documents(user: dict = Depends(get_current_user), db: S
         .all()
     )
     return {"ok": True, "documents": [_document_public(row) for row in rows]}
+
+
+@router.get("/verification-documents/me")
+def list_my_verification_documents(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _list_my_verification_documents_payload(user, db)
+
+
+@router.get("/verification-documents/my")
+def list_my_verification_documents_alias(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _list_my_verification_documents_payload(user, db)
 
 
 @router.get("/verification-documents/admin/pending")
@@ -670,18 +789,25 @@ def get_public_shared_documents(token: str, request: Request, db: Session = Depe
     first_grant = rows[0][0]
     documents = []
     for grant, doc in rows:
-        try:
-            view_url = _s3_client().generate_presigned_url(
-                ClientMethod="get_object",
-                Params={"Bucket": doc.bucket, "Key": doc.storage_key, "ResponseContentDisposition": f'inline; filename="{_clean_filename(doc.original_filename or doc.document_type)}"'},
-                ExpiresIn=DEFAULT_VIEW_URL_SECONDS,
-            )
-        except (BotoCoreError, ClientError) as exc:
-            raise HTTPException(status_code=500, detail=f"Unable to create S3 view URL: {exc}")
+        metadata = doc.metadata_json if isinstance(doc.metadata_json, dict) else {}
+        external_url = _safe_str(metadata.get("external_url"))
+
+        if external_url:
+            view_url = external_url
+        else:
+            try:
+                view_url = _s3_client().generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": doc.bucket, "Key": doc.storage_key, "ResponseContentDisposition": f'inline; filename="{_clean_filename(doc.original_filename or doc.document_type)}"'},
+                    ExpiresIn=DEFAULT_VIEW_URL_SECONDS,
+                )
+            except (BotoCoreError, ClientError) as exc:
+                raise HTTPException(status_code=500, detail=f"Unable to create S3 view URL: {exc}")
+
         _audit(db, request, {"email": first_grant.granted_to_email, "role": "external_organizer"}, "shared_document_public_view_url_created", doc.id, {"token": cleaned})
         public_doc = _document_public(doc)
         public_doc["view_url"] = view_url
-        public_doc["view_url_expires_in_seconds"] = DEFAULT_VIEW_URL_SECONDS
+        public_doc["view_url_expires_in_seconds"] = DEFAULT_VIEW_URL_SECONDS if not external_url else None
         documents.append(public_doc)
 
     db.commit()
