@@ -1,135 +1,59 @@
+# app/main.py
 import importlib
-import logging
 import os
-from pathlib import Path
+print("MAIN LOADED FROM:", __file__)
+print("CWD:", os.getcwd())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from app.routers import auth
+from app.routers import organizer_event_update
 
-logger = logging.getLogger(__name__)
+app = FastAPI(title="Event App API", version="0.1.0")
 
-BASE_DIR = Path(__file__).resolve().parent
-UPLOADS_DIR = BASE_DIR / "uploads"
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _safe_call(func, label: str) -> None:
-    try:
-        func()
-        logger.info("%s initialized", label)
-    except Exception as exc:
-        logger.warning("%s init skipped: %s", label, exc)
-
-
-def _try_include(app: FastAPI, module_name: str, attr_name: str = "router") -> None:
-    try:
-        module = importlib.import_module(module_name)
-        router = getattr(module, attr_name, None)
-        if router is None:
-            logger.warning("Module %s has no %s", module_name, attr_name)
-            return
-        app.include_router(router)
-        logger.info("Included router from %s", module_name)
-    except Exception as exc:
-        logger.warning("Skipping router %s: %s", module_name, exc)
-
-
-def _load_store_if_available() -> None:
-    try:
-        from app.store import load_store
-        from app.store import _DATA_PATH  # type: ignore
-
-        logger.info("STORE DATA PATH: %s", _DATA_PATH)
-        _safe_call(load_store, "store")
-    except Exception as exc:
-        logger.warning("Store loader unavailable: %s", exc)
-
-
-def _init_db_if_available() -> None:
-    try:
-        from app.db import init_db
-
-        _safe_call(init_db, "db")
-    except Exception as exc:
-        logger.warning("DB init unavailable: %s", exc)
-
-
-def _env_csv(name: str) -> list[str]:
-    raw = os.getenv(name, "")
-    if not raw.strip():
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
-app = FastAPI(title="Vendor Connect API")
-
-frontend_origin = os.getenv("FRONTEND_URL", "").strip()
-
-allowed_origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "https://eventappemailstarter-production.up.railway.app",
-    "https://event-app-frontend-xi.vercel.app",
-]
-
-allowed_origins.extend(_env_csv("CORS_ALLOWED_ORIGINS"))
-
-if frontend_origin:
-    allowed_origins.append(frontend_origin)
-
-allowed_origins = list(dict.fromkeys([origin for origin in allowed_origins if origin]))
-
+# ✅ GLOBAL CORS (dev-safe)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.up\.railway\.app|https://.*\.vercel\.app",
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logger.info("CORS allowed origins: %s", allowed_origins)
+ROUTER_MODULES = [
+    "app.routers.applications",
+    "app.routers.auth",
+    "app.routers.events",  # ✅ ADD THIS
+    "app.routers.organizer_applications",
+    "app.routers.organizer_diagram",
+    "app.routers.public_diagram",
+    "app.routers.seed",
+    "app.routers.slots",
+    "app.routers.stats",
+    "app.routers.users",
+    "app.routers.vendor_diagram",
+    "app.routers.vendors",
+    "app.routers.vendors_v2",
+]
 
-_load_store_if_available()
-
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-
-_init_db_if_available()
-
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
+for module_str in ROUTER_MODULES:
+    try:
+        mod = importlib.import_module(module_str)
+        router = getattr(mod, "router", None)
+        if router is None:
+            print(f"[main] Skipping router module {module_str} (no router attr)")
+            continue
+        app.include_router(router)
+        print(f"[main] Included router from {module_str}")
+    except Exception as e:
+        print(f"[main] Skipping router module {module_str} (import failed): {e}")
+        app.include_router(organizer_event_update.router)
+        # Force OpenAPI schema regeneration (prevents stale schema when routers are added later)
+        app.openapi_schema = None
 
 @app.get("/health")
 def health():
     return {"ok": True}
-
-
-for module_name in [
-    "app.routers.admin",
-    "app.routers.applications",
-    "app.routers.auth",
-    "app.routers.booths",
-    "app.routers.diagrams",
-    "app.routers.events",
-    "app.routers.layout",
-    "app.routers.organizer_applications",
-    "app.routers.organizer_diagram",
-    "app.routers.requirements",
-    "app.routers.requirements_alias",
-    "app.routers.requirement_templates",
-    "app.routers.reviews",
-    "app.routers.seed",
-    "app.routers.slots",
-    "app.routers.stats",
-    "app.routers.templates",
-    "app.routers.users",
-    "app.routers.vendors",
-    "app.routers.vendors_v2",
-]:
-    _try_include(app, module_name, "router")
