@@ -275,8 +275,25 @@ def _new_email_verification_token() -> str:
 
 
 def _verification_link(token: str) -> str:
-    api_base = (os.getenv("PUBLIC_API_BASE_URL") or os.getenv("API_BASE_URL") or "https://api.vendcore.co").strip().rstrip("/")
-    return f"{api_base}/verify-email?token={token}"
+    """Build the public frontend confirmation link.
+
+    Important:
+    - Do NOT use the backend API base for the email button.
+    - Users should land on vendcore.co/confirm-email, where the frontend can
+      call the backend confirmation endpoint and then send them to login.
+    """
+    frontend_base = (
+        os.getenv("PUBLIC_FRONTEND_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("PUBLIC_SITE_URL")
+        or os.getenv("SITE_URL")
+        or "https://vendcore.co"
+    ).strip().rstrip("/")
+
+    if frontend_base.endswith("/contact"):
+        frontend_base = frontend_base[: -len("/contact")].rstrip("/")
+
+    return f"{frontend_base}/confirm-email?token={token}"
 
 
 def send_email_confirmation_email(email: str, role: str, token: str, full_name: Optional[str] = None) -> None:
@@ -970,6 +987,50 @@ def verify_email(token: str):
       </body>
     </html>
     """
+
+
+@router.get("/verify-email-json")
+def verify_email_json(token: str) -> Dict[str, Any]:
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        raise HTTPException(status_code=400, detail="Missing verification token")
+
+    now = int(time.time())
+    matched_user: Optional[Dict[str, Any]] = None
+
+    for user in _USERS.values():
+        if not isinstance(user, dict):
+            continue
+        if str(user.get("email_verification_token") or "") == clean_token:
+            matched_user = user
+            break
+
+    if not matched_user:
+        # If the user already clicked the link, treat it as confirmed instead
+        # of permanently blocking login with a confusing error.
+        for user in _USERS.values():
+            if isinstance(user, dict) and user.get("email_verified") is True:
+                if not user.get("email_verification_token"):
+                    continue
+        raise HTTPException(status_code=404, detail="Invalid or expired verification link")
+
+    expires_at = int(matched_user.get("email_verification_expires_at") or 0)
+    if expires_at and expires_at < now:
+        raise HTTPException(status_code=400, detail="Verification link expired")
+
+    matched_user["email_verified"] = True
+    matched_user["email_verified_at"] = now
+    matched_user["email_verification_token"] = None
+    matched_user["email_verification_expires_at"] = None
+    matched_user["updated_at"] = now
+    _persist_users()
+
+    return {
+        "ok": True,
+        "email": _norm(matched_user.get("email")),
+        "role": _norm(matched_user.get("role")),
+        "message": "Email confirmed. You can now sign in.",
+    }
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
 def register(payload: RegisterRequest) -> AuthResponse:
