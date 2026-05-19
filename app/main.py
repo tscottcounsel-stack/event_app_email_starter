@@ -7,7 +7,6 @@ print("CWD:", os.getcwd())
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth
-from app.routers import organizer_event_update
 
 app = FastAPI(title="Event App API", version="0.1.0")
 
@@ -50,7 +49,6 @@ for module_str in ROUTER_MODULES:
         print(f"[main] Included router from {module_str}")
     except Exception as e:
         print(f"[main] Skipping router module {module_str} (import failed): {e}")
-        app.include_router(organizer_event_update.router)
         # Force OpenAPI schema regeneration (prevents stale schema when routers are added later)
         app.openapi_schema = None
 
