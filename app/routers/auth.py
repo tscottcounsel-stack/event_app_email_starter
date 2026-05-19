@@ -916,6 +916,11 @@ class RegisterRequest(BaseModel):
     username: Optional[str] = None
 
 
+class ResendVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    email: str
+
+
 class AuthResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     accessToken: str
@@ -1030,6 +1035,65 @@ def verify_email_json(token: str) -> Dict[str, Any]:
         "email": _norm(matched_user.get("email")),
         "role": _norm(matched_user.get("role")),
         "message": "Email confirmed. You can now sign in.",
+    }
+
+
+@router.post("/resend-verification")
+def resend_verification(payload: ResendVerificationRequest) -> Dict[str, Any]:
+    """Issue a fresh email-confirmation token for unverified accounts.
+
+    Response intentionally stays generic when an account is not found so the
+    endpoint cannot be used to enumerate registered emails.
+    """
+    email = _norm(payload.email)
+    generic_response = {
+        "ok": True,
+        "message": "If the account exists, a new confirmation email has been sent.",
+    }
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+
+    user_id = _USERS_BY_EMAIL.get(email)
+    if user_id is None:
+        return generic_response
+
+    user = _USERS.get(int(user_id))
+    if not isinstance(user, dict):
+        return generic_response
+
+    if user.get("email_verified") is True:
+        return {
+            "ok": True,
+            "message": "This email is already confirmed. You can sign in now.",
+            "email": _norm(user.get("email")),
+            "role": _norm(user.get("role")),
+            "already_confirmed": True,
+        }
+
+    now = int(time.time())
+    token = _new_email_verification_token()
+    user["email_verification_token"] = token
+    user["email_verification_expires_at"] = now + (60 * 60 * 24)
+    user["updated_at"] = now
+    _persist_users()
+
+    try:
+        send_email_confirmation_email(
+            email=str(user.get("email") or email),
+            role=str(user.get("role") or "vendor"),
+            token=token,
+            full_name=user.get("full_name"),
+        )
+    except Exception as exc:
+        print(f"Resend verification email failed: {exc}")
+        raise HTTPException(status_code=500, detail="Unable to send confirmation email right now")
+
+    return {
+        "ok": True,
+        "message": "A new confirmation email has been sent.",
+        "email": _norm(user.get("email")),
+        "role": _norm(user.get("role")),
     }
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
