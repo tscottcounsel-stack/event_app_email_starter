@@ -110,6 +110,7 @@ for module_name in [
     "app.routers.layout",
     "app.routers.organizer_applications",
     "app.routers.organizer_diagram",
+    "app.routers.organizer_profiles",
     "app.routers.requirements",
     "app.routers.requirements_alias",
     "app.routers.requirement_templates",
