@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, Integer, String, func
