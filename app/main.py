@@ -123,5 +123,6 @@ for module_name in [
     "app.routers.vendors",
     "app.routers.vendors_v2",
     "app.routers._init_",
+    "app.routers.organizer_profiles",
 ]:
     _try_include(app, module_name, "router")
