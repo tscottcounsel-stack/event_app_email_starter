@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import requests
 import tempfile
 import time
@@ -708,6 +709,15 @@ def list_all_users() -> List[Dict[str, Any]]:
     return [_serialize_user(user) for _, user in sorted(_USERS.items(), key=lambda item: int(item[0]))]
 
 
+def _is_strong_password(password: str) -> bool:
+    value = str(password or "")
+    if len(value) < 8:
+        return False
+    return all(
+        re.search(pattern, value)
+        for pattern in (r"[A-Z]", r"[a-z]", r"\d", r"[^A-Za-z0-9]")
+    )
+
 def admin_create_user(
     *,
     email: str,
@@ -724,8 +734,11 @@ def admin_create_user(
 
     if not normalized_email:
         raise HTTPException(status_code=400, detail="Email required")
-    if len(str(password or "")) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if not _is_strong_password(password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters and include uppercase, lowercase, number, and special character",
+        )
     if normalized_role not in {"vendor", "organizer", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")
     if normalized_email in _USERS_BY_EMAIL:
