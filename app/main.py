@@ -104,6 +104,7 @@ for module_name in [
     "app.routers.applications",
     "app.routers.auth",
     "app.routers.billing",
+    "app.routers.presence",
     "app.routers.contact",
     "app.routers.booths",
     "app.routers.diagrams",
