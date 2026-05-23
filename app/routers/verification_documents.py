@@ -290,6 +290,7 @@ def _document_public(row: VerificationDocument) -> Dict[str, Any]:
         "rejection_reason": row.rejection_reason,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "lifecycle_status": "expired" if row.expires_at and row.expires_at < _now() else ("expiring_soon" if row.expires_at and (row.expires_at - _now()) <= timedelta(days=30) else ("needs_review" if not row.expires_at else "valid")),
     }
 
 

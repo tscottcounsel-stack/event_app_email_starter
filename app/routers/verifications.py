@@ -142,6 +142,61 @@ def _document_status_summary(role: str, documents: List[Dict[str, Any]]) -> Dict
     }
 
 
+def _compliance_lifecycle_status(doc_status: Dict[str, Any], expiration: Optional[datetime]) -> str:
+    """Return the compliance status that is allowed to override stale verified flags."""
+    now = _now()
+    if doc_status.get("missing_docs"):
+        return "needs_review"
+    if doc_status.get("missing_expiration_docs"):
+        return "needs_review"
+    if doc_status.get("expired_docs"):
+        return "expired"
+    if doc_status.get("expiring_soon_docs"):
+        return "expiring_soon"
+    if expiration:
+        if expiration < now:
+            return "expired"
+        if expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
+            return "expiring_soon"
+    return "current"
+
+
+def _verification_authority(*, row: Profile, data: Dict[str, Any], doc_status: Dict[str, Any], expiration: Optional[datetime], payment_paid: bool) -> Dict[str, Any]:
+    """Canonical verification truth for badges, public pages, and admin display.
+
+    A stale profile flag is not enough. Public trust requires approval plus
+    current required docs. Expiring/expired/missing docs remove the verified badge.
+    """
+    public_status_raw = _safe_lower(row.public_verification_status or data.get("public_verification_status") or data.get("publicVerificationStatus"))
+    status_raw = _safe_lower(row.verification_status or data.get("verification_status") or data.get("verificationStatus") or data.get("status"))
+    review_raw = _safe_lower(row.review_status or data.get("review_status") or data.get("reviewStatus"))
+    lifecycle = _compliance_lifecycle_status(doc_status, expiration)
+
+    deleted = (
+        status_raw in {"deleted", "dismissed"}
+        or review_raw in {"deleted", "dismissed"}
+        or public_status_raw in {"deleted", "dismissed"}
+        or bool(data.get("deleted_at") or data.get("dismissed_at"))
+    )
+    rejected = status_raw == "rejected" or review_raw == "rejected"
+    pending = status_raw in {"pending", "submitted", "under_review"} or review_raw in {"pending", "submitted", "under_review"}
+    approved = review_raw in {"approved", "verified"} or status_raw in {"approved", "verified", "complete"} or row.verified is True or data.get("verified") is True or data.get("is_verified") is True
+
+    if deleted:
+        return {"verified": False, "status": "deleted", "review": "deleted", "public_status": "deleted", "public_label": "Deleted", "lifecycle_status": "deleted"}
+    if rejected:
+        return {"verified": False, "status": "rejected", "review": "rejected", "public_status": "not_verified", "public_label": "Not verified", "lifecycle_status": "rejected"}
+    if lifecycle in {"expired", "expiring_soon", "needs_review"}:
+        label = "Expired" if lifecycle == "expired" else ("Renewal due" if lifecycle == "expiring_soon" else "Compliance review needed")
+        public_status = "expired" if lifecycle == "expired" else "renewal_pending"
+        return {"verified": False, "status": lifecycle, "review": lifecycle, "public_status": public_status, "public_label": label, "lifecycle_status": lifecycle}
+    if approved and payment_paid:
+        return {"verified": True, "status": "verified", "review": "approved", "public_status": "verified", "public_label": row.public_verification_label or data.get("public_verification_label") or "Verified", "lifecycle_status": "current"}
+    if pending or payment_paid:
+        return {"verified": False, "status": "pending", "review": "pending", "public_status": "renewal_pending", "public_label": "Renewal pending", "lifecycle_status": "pending"}
+    return {"verified": False, "status": "not_started", "review": "not_started", "public_status": "not_verified", "public_label": "Not verified", "lifecycle_status": "not_started"}
+
+
 def _earliest_expiration(documents: List[Dict[str, Any]]) -> Optional[datetime]:
     expirations = [_parse_datetime(doc.get("expiration_date")) for doc in documents if isinstance(doc, dict)]
     expirations = [dt for dt in expirations if dt]
@@ -331,80 +386,19 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
     expires_at = data.get("expires_at") or data.get("expiration_date")
     expiration = _parse_datetime(expires_at) or _earliest_expiration(documents)
 
-    # Single source of truth for UI/admin display:
-    # public_verification_status wins, then explicit verified booleans, then DB status fields.
-    public_status_raw = _safe_lower(
-        row.public_verification_status
-        or data.get("public_verification_status")
-        or data.get("publicVerificationStatus")
+    authority = _verification_authority(
+        row=row,
+        data=data,
+        doc_status=doc_status,
+        expiration=expiration,
+        payment_paid=payment_paid,
     )
-    status_raw = _safe_lower(
-        row.verification_status
-        or data.get("verification_status")
-        or data.get("verificationStatus")
-        or data.get("status")
-    )
-    review_raw = _safe_lower(row.review_status or data.get("review_status") or data.get("reviewStatus"))
-
-    explicit_unverified = (
-        data.get("verified") is False
-        or data.get("is_verified") is False
-        or status_raw in {"pending", "submitted", "under_review", "rejected", "not_started", "unverified"}
-        or review_raw in {"pending", "submitted", "under_review", "rejected", "not_started"}
-        or public_status_raw in {"renewal_pending", "not_verified", "unverified"}
-    )
-    # Only explicit approval flags should make a profile verified.
-    # Do not re-verify old/test accounts from stale JSON status strings like
-    # status='verified' or public_verification_status='verified'.
-    explicit_verified = (
-        row.verified is True
-        or data.get("verified") is True
-        or data.get("is_verified") is True
-    )
-    # Guard against old polluted rows: a stale verified flag without payment, documents,
-    # review metadata, or expiration data should not be displayed as verified.
-    explicit_verified = bool(explicit_verified and has_verification_evidence)
-    verified = bool(explicit_verified and not explicit_unverified)
-
-    # Deleted/dismissed state must win before any stale verified flags.
-    # Otherwise old verified records can reappear in the admin queue after delete.
-    if (
-        status_raw in {"deleted", "dismissed"}
-        or review_raw in {"deleted", "dismissed"}
-        or public_status_raw in {"deleted", "dismissed"}
-        or data.get("deleted_at")
-        or data.get("dismissed_at")
-    ):
-        status = "deleted"
-        review = "deleted"
-        public_status = "deleted"
-        public_label = "Deleted"
-        verified = False
-    elif verified:
-        status = "verified"
-        review = "approved"
-        public_status = "verified"
-        public_label = row.public_verification_label or data.get("public_verification_label") or "Verified"
-    elif has_submitted and (review_raw == "rejected" or status_raw == "rejected"):
-        status = "rejected"
-        review = "rejected"
-        public_status = "not_verified"
-        public_label = row.public_verification_label or data.get("public_verification_label") or "Not verified"
-    elif status_raw in {"expired", "expiring_soon", "needs_renewal", "renewal_pending"}:
-        status = status_raw
-        review = review_raw or status_raw
-        public_status = "renewal_pending"
-        public_label = row.public_verification_label or data.get("public_verification_label") or "Renewal pending"
-    elif status_raw in {"pending", "submitted", "under_review"} or review_raw in {"pending", "submitted", "under_review"}:
-        status = "pending"
-        review = "pending"
-        public_status = public_status_raw or "renewal_pending"
-        public_label = row.public_verification_label or data.get("public_verification_label") or "Renewal pending"
-    else:
-        status = "not_started"
-        review = "not_started"
-        public_status = "not_verified"
-        public_label = "Not verified"
+    verified = bool(authority["verified"])
+    status = authority["status"]
+    review = authority["review"]
+    public_status = authority["public_status"]
+    public_label = authority["public_label"]
+    lifecycle_status = authority["lifecycle_status"]
 
     return {
         **data,
@@ -428,6 +422,7 @@ def _profile_public(row: Profile) -> Dict[str, Any]:
         "fee_amount": data.get("fee_amount") or _verification_fee_amount(_safe_lower(row.role)),
         "documents": documents,
         "document_status": doc_status,
+        "lifecycle_status": lifecycle_status,
         "submitted_at": data.get("submitted_at"),
         "created_at": data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
         "reviewed_at": data.get("reviewed_at") or data.get("last_verified_at"),
