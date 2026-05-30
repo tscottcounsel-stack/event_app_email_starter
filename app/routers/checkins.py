@@ -241,13 +241,11 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
     app_id_text = _safe_str(application_id)
     vendor_id_text = _safe_str(vendor_id)
     vendor_id_int = _to_int(vendor_id)
+    event_id_text = _safe_str(event_id)
 
-    # Base event query. Keep the normal ORM integer lookup, but also support
-    # string/large-id comparisons because some legacy/imported application ids
-    # are timestamp-style values that may not match cleanly through int-only filters.
     query = db.query(Application).filter(Application.event_id == int(event_id))
 
-    # Direct application-id lookup is the strongest QR pass signal.
+    # First try direct SQL lookups for normal records.
     if app_id_text:
         app_filters = []
 
@@ -264,7 +262,7 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
         if app_filters:
             app = (
                 db.query(Application)
-                .filter(cast(Application.event_id, String) == _safe_str(event_id))
+                .filter(cast(Application.event_id, String) == event_id_text)
                 .filter(or_(*app_filters))
                 .order_by(Application.id.desc())
                 .first()
@@ -272,13 +270,35 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             if app:
                 return app
 
-        # Fallback to the old exact integer event/app lookup.
-        if app_id_int is not None:
-            app = query.filter(Application.id == app_id_int).first()
-            if app:
-                return app
+    # IMPORTANT FALLBACK:
+    # The live roster already proves these applications exist for this event.
+    # Match against the loaded event roster using the same helper functions that
+    # build the check-in rows. This avoids mismatches caused by legacy/imported
+    # timestamp-style ids, aliased columns, or email fields that do not behave
+    # cleanly in direct SQL filters.
+    event_apps = query.order_by(Application.id.desc()).all()
 
-    # Vendor/user id lookup is broader, so keep readiness validation here.
+    for app in event_apps:
+        app_id_value = _safe_str(_application_id(app))
+        app_email_value = _safe_lower(_application_email(app))
+        app_vendor_id_value = _safe_str(_application_vendor_id(app))
+
+        if app_id_text and app_id_text == app_id_value:
+            return app
+
+        if app_id_text and "@" in app_id_text and app_email_value == _safe_lower(app_id_text):
+            return app
+
+        if vendor_id_text and "@" in vendor_id_text and app_email_value == _safe_lower(vendor_id_text):
+            return app
+
+        if vendor_id_int is not None and _safe_str(vendor_id_int) == app_vendor_id_value:
+            return app
+
+        if app_id_int is not None and _safe_str(app_id_int) == app_vendor_id_value:
+            return app
+
+    # Broader vendor/user id SQL lookup.
     if vendor_id_int is not None:
         filters = []
         if hasattr(Application, "user_id"):
@@ -287,19 +307,20 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(Application.vendor_id == vendor_id_int)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
+            if app:
                 return app
 
-    # Email lookup is broader, so keep readiness validation here.
-    if vendor_id_text and "@" in vendor_id_text:
+    # Broader email SQL lookup.
+    email_key = _safe_lower(vendor_id_text if "@" in vendor_id_text else app_id_text if "@" in app_id_text else "")
+    if email_key:
         filters = []
         if hasattr(Application, "vendor_email"):
-            filters.append(func.lower(Application.vendor_email) == vendor_id_text.lower())
+            filters.append(func.lower(Application.vendor_email) == email_key)
         if hasattr(Application, "email"):
-            filters.append(func.lower(Application.email) == vendor_id_text.lower())
+            filters.append(func.lower(Application.email) == email_key)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
+            if app:
                 return app
 
     raise HTTPException(
