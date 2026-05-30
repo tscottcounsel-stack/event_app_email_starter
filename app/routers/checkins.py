@@ -5,12 +5,16 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.event_checkin import EventCheckIn
 from app.models.application import Application
+try:
+    from app.models.event import Event
+except Exception:  # pragma: no cover
+    Event = None  # type: ignore
 from app.utils.qr_tokens import generate_qr_token, verify_qr_token
 
 router = APIRouter(tags=["checkins"])
@@ -467,4 +471,339 @@ def _checkin_stats_payload(event_id: int, db: Session) -> Dict[str, Any]:
         "checkins": rows,
         "applications": rows,
         "vendors": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Organizer-confirmed participation / trust history
+# ---------------------------------------------------------------------------
+
+TRUST_HISTORY_STATUSES = {"confirmed", "flagged"}
+
+
+def _ensure_trust_history_schema(db: Session) -> None:
+    """Runtime schema guard until formal migrations are added.
+
+    This creates a durable trust history table used for organizer-confirmed
+    participation records. It is intentionally small and additive.
+    """
+    try:
+        bind = db.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS vendor_trust_history (
+                id SERIAL PRIMARY KEY,
+                vendor_email VARCHAR NOT NULL,
+                vendor_id VARCHAR,
+                organizer_email VARCHAR,
+                organizer_name VARCHAR,
+                event_id INTEGER,
+                event_name VARCHAR,
+                application_id INTEGER,
+                trust_status VARCHAR NOT NULL DEFAULT 'confirmed',
+                public_label VARCHAR,
+                notes TEXT,
+                confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_vendor_trust_history_vendor_email ON vendor_trust_history (lower(vendor_email))"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_vendor_trust_history_event_id ON vendor_trust_history (event_id)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_vendor_trust_history_application_id ON vendor_trust_history (application_id)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_vendor_trust_history_status ON vendor_trust_history (trust_status)"))
+        db.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_vendor_trust_history_event_app_status
+            ON vendor_trust_history (event_id, application_id, trust_status)
+        """))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print(f"Trust history schema guard skipped: {exc}")
+
+
+def _event_for_id(db: Session, event_id: int) -> Any:
+    if Event is None:
+        return None
+    try:
+        return db.query(Event).filter(Event.id == int(event_id)).first()
+    except Exception:
+        return None
+
+
+def _event_title_from_model(event: Any, event_id: int) -> str:
+    if event is None:
+        return f"Event #{event_id}"
+    return _safe_str(
+        _model_value(event, "title", "name", "event_title", "eventTitle")
+        or f"Event #{event_id}"
+    )
+
+
+def _event_organizer_email_from_model(event: Any) -> str:
+    if event is None:
+        return ""
+    return _safe_lower(
+        _model_value(event, "organizer_email", "owner_email", "email")
+        or ""
+    )
+
+
+def _event_organizer_name_from_model(event: Any) -> str:
+    if event is None:
+        return ""
+    return _safe_str(
+        _model_value(event, "organizer_name", "company_name", "host_name", "venue_name")
+        or _event_organizer_email_from_model(event)
+        or "Organizer"
+    )
+
+
+def _trust_history_row_to_payload(row: Any) -> Dict[str, Any]:
+    # SQLAlchemy RowMapping / dict-like compatible
+    get = row._mapping.get if hasattr(row, "_mapping") else row.get
+    confirmed_at = get("confirmed_at")
+    created_at = get("created_at")
+
+    def iso(value: Any) -> str:
+        try:
+            return value.isoformat() if value else ""
+        except Exception:
+            return _safe_str(value)
+
+    return {
+        "id": get("id"),
+        "vendor_email": _safe_lower(get("vendor_email")),
+        "vendor_id": _safe_str(get("vendor_id")),
+        "organizer_email": _safe_lower(get("organizer_email")),
+        "organizer_name": _safe_str(get("organizer_name")),
+        "event_id": get("event_id"),
+        "event_name": _safe_str(get("event_name")),
+        "application_id": get("application_id"),
+        "trust_status": _safe_lower(get("trust_status") or "confirmed"),
+        "public_label": _safe_str(get("public_label") or "Verified participation"),
+        "notes": _safe_str(get("notes")),
+        "confirmed_at": iso(confirmed_at),
+        "created_at": iso(created_at),
+    }
+
+
+@router.post("/events/{event_id}/applications/{application_id}/confirm-participation")
+def confirm_vendor_participation(
+    event_id: int,
+    application_id: int,
+    data: Dict[str, Any] | None = None,
+    db: Session = Depends(get_db),
+):
+    """Organizer confirms a vendor successfully participated.
+
+    This creates a public trust-history record only after a real operational
+    relationship exists: an application on the event, preferably with a
+    persisted check-in row.
+    """
+    _ensure_trust_history_schema(db)
+    data = data or {}
+
+    app = (
+        db.query(Application)
+        .filter(Application.event_id == int(event_id), Application.id == int(application_id))
+        .first()
+    )
+    if app is None:
+        raise HTTPException(status_code=404, detail="Application not found for this event")
+
+    status = _safe_lower(data.get("trust_status") or data.get("status") or "confirmed")
+    if status not in TRUST_HISTORY_STATUSES:
+        raise HTTPException(status_code=400, detail="trust_status must be confirmed or flagged")
+
+    checkin = (
+        db.query(EventCheckIn)
+        .filter(
+            EventCheckIn.event_id == int(event_id),
+            EventCheckIn.application_id == int(application_id),
+            EventCheckIn.status == "checked_in",
+        )
+        .first()
+    )
+
+    # Confirming without check-in is allowed as a manual organizer override,
+    # but the public label makes the difference clear.
+    public_label = (
+        "Organizer-confirmed participation"
+        if checkin
+        else "Organizer-confirmed participation"
+    )
+
+    event = _event_for_id(db, int(event_id))
+    vendor_email = _application_email(app)
+    if not vendor_email:
+        raise HTTPException(status_code=400, detail="Vendor email is missing on this application")
+
+    vendor_id = _safe_str(_application_vendor_id(app))
+    event_name = _event_title_from_model(event, int(event_id))
+    organizer_email = _safe_lower(data.get("organizer_email") or _event_organizer_email_from_model(event))
+    organizer_name = _safe_str(data.get("organizer_name") or _event_organizer_name_from_model(event) or "Organizer")
+    notes = _safe_str(data.get("notes"))
+
+    existing = db.execute(
+        text("""
+            SELECT id FROM vendor_trust_history
+            WHERE event_id = :event_id
+              AND application_id = :application_id
+              AND trust_status = :trust_status
+            LIMIT 1
+        """),
+        {
+            "event_id": int(event_id),
+            "application_id": int(application_id),
+            "trust_status": status,
+        },
+    ).first()
+
+    if existing:
+        db.execute(
+            text("""
+                UPDATE vendor_trust_history
+                SET vendor_email = :vendor_email,
+                    vendor_id = :vendor_id,
+                    organizer_email = :organizer_email,
+                    organizer_name = :organizer_name,
+                    event_name = :event_name,
+                    public_label = :public_label,
+                    notes = :notes,
+                    confirmed_at = now(),
+                    updated_at = now()
+                WHERE id = :id
+            """),
+            {
+                "id": existing[0],
+                "vendor_email": vendor_email,
+                "vendor_id": vendor_id,
+                "organizer_email": organizer_email,
+                "organizer_name": organizer_name,
+                "event_name": event_name,
+                "public_label": public_label,
+                "notes": notes,
+            },
+        )
+    else:
+        db.execute(
+            text("""
+                INSERT INTO vendor_trust_history (
+                    vendor_email,
+                    vendor_id,
+                    organizer_email,
+                    organizer_name,
+                    event_id,
+                    event_name,
+                    application_id,
+                    trust_status,
+                    public_label,
+                    notes,
+                    confirmed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :vendor_email,
+                    :vendor_id,
+                    :organizer_email,
+                    :organizer_name,
+                    :event_id,
+                    :event_name,
+                    :application_id,
+                    :trust_status,
+                    :public_label,
+                    :notes,
+                    now(),
+                    now(),
+                    now()
+                )
+            """),
+            {
+                "vendor_email": vendor_email,
+                "vendor_id": vendor_id,
+                "organizer_email": organizer_email,
+                "organizer_name": organizer_name,
+                "event_id": int(event_id),
+                "event_name": event_name,
+                "application_id": int(application_id),
+                "trust_status": status,
+                "public_label": public_label,
+                "notes": notes,
+            },
+        )
+
+    db.commit()
+
+    history = get_vendor_trust_history(email=vendor_email, role="vendor", db=db)
+    return {
+        "ok": True,
+        "message": "Participation confirmed and added to trust history.",
+        "vendor_email": vendor_email,
+        "event_id": int(event_id),
+        "application_id": int(application_id),
+        "trust_history": history.get("trust_history", []),
+        "summary": history.get("summary", {}),
+    }
+
+
+@router.get("/trust-history")
+def get_vendor_trust_history(
+    email: str,
+    role: str = "vendor",
+    limit: int = 12,
+    db: Session = Depends(get_db),
+):
+    """Public trust history used by VendCore Verify credential pages."""
+    _ensure_trust_history_schema(db)
+
+    normalized_email = _safe_lower(email)
+    normalized_role = _safe_lower(role)
+    if normalized_role != "vendor":
+        return {
+            "ok": True,
+            "role": normalized_role,
+            "email": normalized_email,
+            "trust_history": [],
+            "summary": {
+                "confirmed_count": 0,
+                "flagged_count": 0,
+                "organizer_count": 0,
+                "event_count": 0,
+            },
+        }
+
+    safe_limit = max(1, min(int(limit or 12), 50))
+    rows = db.execute(
+        text("""
+            SELECT *
+            FROM vendor_trust_history
+            WHERE lower(vendor_email) = :email
+            ORDER BY confirmed_at DESC, id DESC
+            LIMIT :limit
+        """),
+        {"email": normalized_email, "limit": safe_limit},
+    ).fetchall()
+
+    payload = [_trust_history_row_to_payload(row) for row in rows]
+    confirmed = [row for row in payload if row.get("trust_status") == "confirmed"]
+    flagged = [row for row in payload if row.get("trust_status") == "flagged"]
+    organizers = {row.get("organizer_name") or row.get("organizer_email") for row in confirmed if row.get("organizer_name") or row.get("organizer_email")}
+    events = {row.get("event_id") or row.get("event_name") for row in confirmed if row.get("event_id") or row.get("event_name")}
+
+    return {
+        "ok": True,
+        "role": normalized_role,
+        "email": normalized_email,
+        "trust_history": payload,
+        "summary": {
+            "confirmed_count": len(confirmed),
+            "flagged_count": len(flagged),
+            "organizer_count": len(organizers),
+            "event_count": len(events),
+        },
     }
