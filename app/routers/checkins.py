@@ -245,7 +245,12 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
 
     if app_id_int is not None:
         app = query.filter(Application.id == app_id_int).first()
-        if app and _ready_for_checkin(app):
+        if app and (
+            _ready_for_checkin(app)
+            or _has_assigned_booth(app)
+            or _has_paid_or_completed_payment(app)
+            or _has_approved_operational_status(app)
+        ):
             return app
 
     if vendor_id_int is not None:
