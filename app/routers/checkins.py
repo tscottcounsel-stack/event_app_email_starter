@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, or_, text
+from sqlalchemy import func, or_, text, cast, String
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -16,6 +16,11 @@ try:
 except Exception:  # pragma: no cover
     Event = None  # type: ignore
 from app.utils.qr_tokens import generate_qr_token, verify_qr_token
+
+try:
+    from app import store as legacy_store  # type: ignore
+except Exception:  # pragma: no cover
+    legacy_store = None  # type: ignore
 
 router = APIRouter(tags=["checkins"])
 
@@ -46,6 +51,13 @@ def _now_utc() -> datetime:
 
 
 def _model_value(obj: Any, *names: str) -> Any:
+    if isinstance(obj, dict):
+        for name in names:
+            value = obj.get(name)
+            if value not in (None, ""):
+                return value
+        return None
+
     for name in names:
         if hasattr(obj, name):
             value = getattr(obj, name)
@@ -236,24 +248,155 @@ def _parse_payload(data: Dict[str, Any], fallback_event_id: Optional[int] = None
     }
 
 
-def _find_application(db: Session, event_id: int, application_id: Any = None, vendor_id: Any = None) -> Application:
+def _legacy_app_event_id(app: Any) -> str:
+    return _safe_str(
+        _model_value(app, "event_id", "eventId", "event", "eventID")
+        or ""
+    )
+
+
+def _legacy_app_match_values(app: Any) -> set[str]:
+    values: set[str] = set()
+    for value in (
+        _model_value(app, "id", "application_id", "applicationId", "app_id", "appId", "app_ref", "appRef"),
+        _model_value(app, "vendor_id", "vendorId", "user_id", "userId"),
+        _model_value(app, "vendor_email", "vendorEmail", "email", "user_email"),
+    ):
+        text_value = _safe_str(value)
+        if text_value:
+            values.add(text_value.lower())
+    return values
+
+
+def _iter_legacy_applications() -> list[Any]:
+    if legacy_store is None:
+        return []
+
+    raw = getattr(legacy_store, "_APPLICATIONS", {})
+    if isinstance(raw, dict):
+        out = []
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                merged = {"id": value.get("id") or key, **value}
+                out.append(merged)
+        return out
+
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+
+    return []
+
+
+def _find_legacy_application(event_id: int, application_id: Any = None, vendor_id: Any = None) -> Any:
+    event_id_text = _safe_str(event_id)
+    wanted_values = {
+        _safe_str(application_id).lower(),
+        _safe_str(vendor_id).lower(),
+    }
+    wanted_values = {value for value in wanted_values if value}
+
+    candidates = []
+    for app in _iter_legacy_applications():
+        if _legacy_app_event_id(app) != event_id_text:
+            continue
+        candidates.append(app)
+
+    # Strong match first: app id, vendor id, or email.
+    for app in candidates:
+        if wanted_values & _legacy_app_match_values(app):
+            return app
+
+    # If this vendor only has one eligible app for this event, use it.
+    eligible = [app for app in candidates if _is_approved_or_ready(app)]
+    if len(eligible) == 1:
+        return eligible[0]
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
+
+
+def _debug_application_lookup_payload(
+    *,
+    event_id: int,
+    application_id: Any = None,
+    vendor_id: Any = None,
+    db_count: int = 0,
+    legacy_count: int = 0,
+) -> Dict[str, Any]:
+    return {
+        "event_id": int(event_id),
+        "application_id": _safe_str(application_id),
+        "vendor_id": _safe_str(vendor_id),
+        "db_candidates_for_event": int(db_count),
+        "legacy_candidates_for_event": int(legacy_count),
+    }
+
+
+def _find_application(db: Session, event_id: int, application_id: Any = None, vendor_id: Any = None) -> Any:
     app_id_int = _to_int(application_id)
+    app_id_text = _safe_str(application_id)
     vendor_id_text = _safe_str(vendor_id)
     vendor_id_int = _to_int(vendor_id)
+    event_id_text = _safe_str(event_id)
 
     query = db.query(Application).filter(Application.event_id == int(event_id))
 
-    # Direct application-id lookup is the strongest signal.
-    # The vendor dashboard builds QR links from an actual event/application record.
-    # If that exact record exists for the event, return it and let the pass payload
-    # expose the lifecycle fields instead of blocking the QR page because one
-    # readiness field is stale or named differently.
-    if app_id_int is not None:
-        app = query.filter(Application.id == app_id_int).first()
-        if app:
+    # First try direct SQL lookups for normal records.
+    if app_id_text:
+        app_filters = []
+
+        if hasattr(Application, "id"):
+            app_filters.append(cast(Application.id, String) == app_id_text)
+            if app_id_int is not None:
+                app_filters.append(Application.id == app_id_int)
+
+        for attr_name in ("application_id", "applicationId", "app_id", "appId", "app_ref", "appRef"):
+            if hasattr(Application, attr_name):
+                column = getattr(Application, attr_name)
+                app_filters.append(cast(column, String) == app_id_text)
+
+        if app_filters:
+            app = (
+                db.query(Application)
+                .filter(cast(Application.event_id, String) == event_id_text)
+                .filter(or_(*app_filters))
+                .order_by(Application.id.desc())
+                .first()
+            )
+            if app:
+                return app
+
+    # IMPORTANT FALLBACK:
+    # The live roster already proves these applications exist for this event.
+    # Match against the loaded event roster using the same helper functions that
+    # build the check-in rows. This avoids mismatches caused by legacy/imported
+    # timestamp-style ids, aliased columns, or email fields that do not behave
+    # cleanly in direct SQL filters.
+    event_apps = query.order_by(Application.id.desc()).all()
+
+    for app in event_apps:
+        app_id_value = _safe_str(_application_id(app))
+        app_email_value = _safe_lower(_application_email(app))
+        app_vendor_id_value = _safe_str(_application_vendor_id(app))
+
+        if app_id_text and app_id_text == app_id_value:
             return app
 
-    # Vendor/user id lookup is broader, so keep readiness validation here.
+        if app_id_text and "@" in app_id_text and app_email_value == _safe_lower(app_id_text):
+            return app
+
+        if vendor_id_text and "@" in vendor_id_text and app_email_value == _safe_lower(vendor_id_text):
+            return app
+
+        if vendor_id_int is not None and _safe_str(vendor_id_int) == app_vendor_id_value:
+            return app
+
+        if app_id_int is not None and _safe_str(app_id_int) == app_vendor_id_value:
+            return app
+
+    # Broader vendor/user id SQL lookup.
     if vendor_id_int is not None:
         filters = []
         if hasattr(Application, "user_id"):
@@ -262,27 +405,47 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(Application.vendor_id == vendor_id_int)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
+            if app:
                 return app
 
-    # Email lookup is also broader, so keep readiness validation here.
-    if vendor_id_text and "@" in vendor_id_text:
+    # Broader email SQL lookup.
+    email_key = _safe_lower(vendor_id_text if "@" in vendor_id_text else app_id_text if "@" in app_id_text else "")
+    if email_key:
         filters = []
         if hasattr(Application, "vendor_email"):
-            filters.append(func.lower(Application.vendor_email) == vendor_id_text.lower())
+            filters.append(func.lower(Application.vendor_email) == email_key)
         if hasattr(Application, "email"):
-            filters.append(func.lower(Application.email) == vendor_id_text.lower())
+            filters.append(func.lower(Application.email) == email_key)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
+            if app:
                 return app
+
+    legacy_app = _find_legacy_application(event_id, application_id=application_id, vendor_id=vendor_id)
+    if legacy_app is not None:
+        return legacy_app
+
+    legacy_count = len([
+        app for app in _iter_legacy_applications()
+        if _legacy_app_event_id(app) == event_id_text
+    ])
+    db_count = len(event_apps)
 
     raise HTTPException(
         status_code=403,
-        detail=(
-            "Vendor is not approved or ready for this event. "
-            "No matching event/application record was found for this QR pass."
-        ),
+        detail={
+            "message": (
+                "Vendor is not approved or ready for this event. "
+                "No matching event/application record was found for this QR pass."
+            ),
+            "lookup": _debug_application_lookup_payload(
+                event_id=event_id,
+                application_id=application_id,
+                vendor_id=vendor_id,
+                db_count=db_count,
+                legacy_count=legacy_count,
+            ),
+        },
     )
 
 
