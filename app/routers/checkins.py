@@ -124,14 +124,26 @@ def _payment_status(app: Application) -> str:
     return _safe_lower(_model_value(app, "payment_status", "paymentStatus") or "")
 
 
+def _has_assigned_booth(app: Application) -> bool:
+    return bool(_application_booth(app))
+
+
+def _has_paid_or_completed_payment(app: Application) -> bool:
+    return _payment_status(app) in PAID_PAYMENT_STATUSES
+
+
+def _has_approved_operational_status(app: Application) -> bool:
+    return _application_status(app) in {"approved", "paid", "checked_in", "participated"}
+
+
 def _is_approved_or_ready(app: Application) -> bool:
-    status = _application_status(app)
-    payment = _payment_status(app)
-    return status in APPROVED_APPLICATION_STATUSES or payment in PAID_PAYMENT_STATUSES
+    """Single eligibility source for QR pass, roster, and check-in lookup."""
+    return _has_approved_operational_status(app) or _has_paid_or_completed_payment(app)
 
 
 def _ready_for_checkin(app: Application) -> bool:
-    return bool(_application_booth(app)) and _payment_status(app) in PAID_PAYMENT_STATUSES
+    """Single readiness source for QR/pass/check-in flows."""
+    return _has_assigned_booth(app) and _is_approved_or_ready(app)
 
 
 def _row_payload(app: Application, checkin: Optional[EventCheckIn] = None) -> Dict[str, Any]:
