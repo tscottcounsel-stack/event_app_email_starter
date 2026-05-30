@@ -243,16 +243,17 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
 
     query = db.query(Application).filter(Application.event_id == int(event_id))
 
+    # Direct application-id lookup is the strongest signal.
+    # The vendor dashboard builds QR links from an actual event/application record.
+    # If that exact record exists for the event, return it and let the pass payload
+    # expose the lifecycle fields instead of blocking the QR page because one
+    # readiness field is stale or named differently.
     if app_id_int is not None:
         app = query.filter(Application.id == app_id_int).first()
-        if app and (
-            _ready_for_checkin(app)
-            or _has_assigned_booth(app)
-            or _has_paid_or_completed_payment(app)
-            or _has_approved_operational_status(app)
-        ):
+        if app:
             return app
 
+    # Vendor/user id lookup is broader, so keep readiness validation here.
     if vendor_id_int is not None:
         filters = []
         if hasattr(Application, "user_id"):
@@ -261,9 +262,10 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(Application.vendor_id == vendor_id_int)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and _ready_for_checkin(app):
+            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
                 return app
 
+    # Email lookup is also broader, so keep readiness validation here.
     if vendor_id_text and "@" in vendor_id_text:
         filters = []
         if hasattr(Application, "vendor_email"):
@@ -272,14 +274,14 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(func.lower(Application.email) == vendor_id_text.lower())
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and _ready_for_checkin(app):
+            if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
                 return app
 
     raise HTTPException(
         status_code=403,
         detail=(
             "Vendor is not approved or ready for this event. "
-            "The application must have an assigned booth and an approved/confirmed/paid lifecycle state."
+            "No matching event/application record was found for this QR pass."
         ),
     )
 
