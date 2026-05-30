@@ -19,8 +19,8 @@ from app.utils.qr_tokens import generate_qr_token, verify_qr_token
 
 router = APIRouter(tags=["checkins"])
 
-APPROVED_APPLICATION_STATUSES = ("approved", "paid", "checked_in")
-PAID_PAYMENT_STATUSES = ("paid", "succeeded", "completed", "complete")
+APPROVED_APPLICATION_STATUSES = ("approved", "paid", "confirmed", "checked_in", "participated")
+PAID_PAYMENT_STATUSES = ("paid", "succeeded", "completed", "complete", "confirmed", "settled")
 
 
 def _safe_str(value: Any) -> str:
@@ -95,8 +95,14 @@ def _application_booth(app: Application) -> str:
             "boothId",
             "requested_booth_id",
             "requestedBoothId",
+            "assigned_booth_id",
+            "assignedBoothId",
+            "selected_booth_id",
+            "selectedBoothId",
             "booth_number",
             "boothNumber",
+            "booth_label",
+            "boothLabel",
         )
         or ""
     )
@@ -133,7 +139,7 @@ def _has_paid_or_completed_payment(app: Application) -> bool:
 
 
 def _has_approved_operational_status(app: Application) -> bool:
-    return _application_status(app) in {"approved", "paid", "checked_in", "participated"}
+    return _application_status(app) in APPROVED_APPLICATION_STATUSES
 
 
 def _is_approved_or_ready(app: Application) -> bool:
@@ -264,7 +270,13 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             if app and _ready_for_checkin(app):
                 return app
 
-    raise HTTPException(status_code=403, detail="Vendor is not approved or ready for this event")
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Vendor is not approved or ready for this event. "
+            "The application must have an assigned booth and an approved/confirmed/paid lifecycle state."
+        ),
+    )
 
 
 def _upsert_checkin(db: Session, event_id: int, app: Application) -> tuple[EventCheckIn, bool]:
