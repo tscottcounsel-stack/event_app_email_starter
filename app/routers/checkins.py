@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, or_, text, cast, String
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -238,45 +238,20 @@ def _parse_payload(data: Dict[str, Any], fallback_event_id: Optional[int] = None
 
 def _find_application(db: Session, event_id: int, application_id: Any = None, vendor_id: Any = None) -> Application:
     app_id_int = _to_int(application_id)
-    app_id_text = _safe_str(application_id)
     vendor_id_text = _safe_str(vendor_id)
     vendor_id_int = _to_int(vendor_id)
 
-    # Base event query. Keep the normal ORM integer lookup, but also support
-    # string/large-id comparisons because some legacy/imported application ids
-    # are timestamp-style values that may not match cleanly through int-only filters.
     query = db.query(Application).filter(Application.event_id == int(event_id))
 
-    # Direct application-id lookup is the strongest QR pass signal.
-    if app_id_text:
-        app_filters = []
-
-        if hasattr(Application, "id"):
-            app_filters.append(cast(Application.id, String) == app_id_text)
-            if app_id_int is not None:
-                app_filters.append(Application.id == app_id_int)
-
-        for attr_name in ("application_id", "applicationId", "app_id", "appId", "app_ref", "appRef"):
-            if hasattr(Application, attr_name):
-                column = getattr(Application, attr_name)
-                app_filters.append(cast(column, String) == app_id_text)
-
-        if app_filters:
-            app = (
-                db.query(Application)
-                .filter(cast(Application.event_id, String) == _safe_str(event_id))
-                .filter(or_(*app_filters))
-                .order_by(Application.id.desc())
-                .first()
-            )
-            if app:
-                return app
-
-        # Fallback to the old exact integer event/app lookup.
-        if app_id_int is not None:
-            app = query.filter(Application.id == app_id_int).first()
-            if app:
-                return app
+    # Direct application-id lookup is the strongest signal.
+    # The vendor dashboard builds QR links from an actual event/application record.
+    # If that exact record exists for the event, return it and let the pass payload
+    # expose the lifecycle fields instead of blocking the QR page because one
+    # readiness field is stale or named differently.
+    if app_id_int is not None:
+        app = query.filter(Application.id == app_id_int).first()
+        if app:
+            return app
 
     # Vendor/user id lookup is broader, so keep readiness validation here.
     if vendor_id_int is not None:
@@ -290,7 +265,7 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             if app and (_ready_for_checkin(app) or _is_approved_or_ready(app)):
                 return app
 
-    # Email lookup is broader, so keep readiness validation here.
+    # Email lookup is also broader, so keep readiness validation here.
     if vendor_id_text and "@" in vendor_id_text:
         filters = []
         if hasattr(Application, "vendor_email"):
