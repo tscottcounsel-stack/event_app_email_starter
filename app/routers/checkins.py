@@ -148,8 +148,8 @@ def _is_approved_or_ready(app: Application) -> bool:
 
 
 def _ready_for_checkin(app: Application) -> bool:
-    """Single readiness source for QR/pass/check-in flows."""
-    return _has_assigned_booth(app) and _is_approved_or_ready(app)
+"""Single readiness source for QR/pass/check-in flows."""
+return _is_approved_or_ready(app)
 
 
 def _row_payload(app: Application, checkin: Optional[EventCheckIn] = None) -> Dict[str, Any]:
