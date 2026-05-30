@@ -239,7 +239,7 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
 
     if app_id_int is not None:
         app = query.filter(Application.id == app_id_int).first()
-        if app and _is_approved_or_ready(app):
+        if app and _ready_for_checkin(app):
             return app
 
     if vendor_id_int is not None:
@@ -250,7 +250,7 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(Application.vendor_id == vendor_id_int)
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and _is_approved_or_ready(app):
+            if app and _ready_for_checkin(app):
                 return app
 
     if vendor_id_text and "@" in vendor_id_text:
@@ -261,7 +261,7 @@ def _find_application(db: Session, event_id: int, application_id: Any = None, ve
             filters.append(func.lower(Application.email) == vendor_id_text.lower())
         if filters:
             app = query.filter(or_(*filters)).order_by(Application.id.desc()).first()
-            if app and _is_approved_or_ready(app):
+            if app and _ready_for_checkin(app):
                 return app
 
     raise HTTPException(status_code=403, detail="Vendor is not approved or ready for this event")
