@@ -14,7 +14,7 @@ class EventCheckIn(Base, TimestampMixin):
 
     event_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
     vendor_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
-    application_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
+    application_id: Mapped[int] = mapped_column(sa.BigInteger, nullable=False, index=True)
 
     status: Mapped[str] = mapped_column(
         sa.String, default="pending"
