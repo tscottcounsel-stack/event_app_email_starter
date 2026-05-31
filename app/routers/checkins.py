@@ -621,24 +621,86 @@ def checkin_stats_hyphen(event_id: int, db: Session = Depends(get_db)):
 
 
 def _checkin_stats_payload(event_id: int, db: Session) -> Dict[str, Any]:
-    applications = (
+    event_id_int = int(event_id)
+    event_id_text = _safe_str(event_id_int)
+
+    # Load normal Postgres applications first.
+    db_applications = (
         db.query(Application)
-        .filter(Application.event_id == int(event_id))
+        .filter(Application.event_id == event_id_int)
         .order_by(Application.id.desc())
         .all()
     )
+
+    # Some current/live application records still come from the legacy application
+    # store and use timestamp-style ids. The QR pass and vendor applications page
+    # can see those records, so the check-in roster must read them too.
+    legacy_applications = [
+        app for app in _iter_legacy_applications()
+        if _legacy_app_event_id(app) == event_id_text
+    ]
+
+    applications: list[Any] = []
+    seen_keys: set[str] = set()
+
+    for app in list(db_applications) + list(legacy_applications):
+        key = (
+            _safe_str(_model_value(app, "id", "application_id", "applicationId", "app_id", "appId"))
+            or _application_email(app)
+            or _safe_str(_application_vendor_id(app))
+        ).lower()
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        applications.append(app)
+
     approved_apps = [app for app in applications if _is_approved_or_ready(app)]
 
-    checkins = db.query(EventCheckIn).filter(EventCheckIn.event_id == int(event_id)).all()
-    checkins_by_app = {int(row.application_id): row for row in checkins if row.application_id is not None}
-    checkins_by_vendor = {int(row.vendor_id): row for row in checkins if row.vendor_id is not None}
+    checkins = db.query(EventCheckIn).filter(EventCheckIn.event_id == event_id_int).all()
+    checkins_by_app = {
+        int(row.application_id): row
+        for row in checkins
+        if row.application_id is not None
+    }
+    checkins_by_vendor = {
+        int(row.vendor_id): row
+        for row in checkins
+        if row.vendor_id is not None
+    }
 
     rows = []
+    matched_checkin_ids: set[int] = set()
+
     for app in approved_apps:
         app_id = _application_id(app)
         vendor_id = _application_vendor_id(app)
         checkin = checkins_by_app.get(app_id) or checkins_by_vendor.get(vendor_id)
+        if checkin is not None and getattr(checkin, "id", None) is not None:
+            matched_checkin_ids.add(int(checkin.id))
         rows.append(_row_payload(app, checkin))
+
+    # If a persisted check-in exists but its application record cannot be loaded,
+    # still surface it so the dashboard count does not drop back to zero.
+    for checkin in checkins:
+        if getattr(checkin, "id", None) is not None and int(checkin.id) in matched_checkin_ids:
+            continue
+
+        fallback = {
+            "id": int(checkin.application_id or 0),
+            "application_id": int(checkin.application_id or 0),
+            "event_id": event_id_int,
+            "vendor_id": int(checkin.vendor_id or 0),
+            "status": "approved",
+            "payment_status": "paid",
+            "vendor_email": "",
+            "vendor_name": f"Vendor #{int(checkin.vendor_id or 0)}",
+            "business_name": f"Vendor #{int(checkin.vendor_id or 0)}",
+            "booth_id": "",
+            "booth_category": "General",
+            "category": "General",
+        }
+        rows.append(_row_payload(fallback, checkin))
 
     checked_in = len([row for row in rows if row.get("checked_in") is True])
     late = len([row for row in checkins if row.status == "late"])
