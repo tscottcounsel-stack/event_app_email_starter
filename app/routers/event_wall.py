@@ -25,7 +25,8 @@ router = APIRouter(tags=["Event Wall"])
 
 class EventWallPostCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    message: str
+    message: str = ""
+    image_url: str = ""
 
 
 def _now_iso() -> str:
@@ -164,10 +165,14 @@ def create_event_wall_post(
         raise HTTPException(status_code=403, detail="Vendor, organizer, or admin account required")
 
     message = _safe_str(payload.message)
-    if not message:
-        raise HTTPException(status_code=400, detail="Message is required")
+    image_url = _safe_str(payload.image_url)
+
+    if not message and not image_url:
+        raise HTTPException(status_code=400, detail="Message or image is required")
     if len(message) > 500:
         raise HTTPException(status_code=400, detail="Wall post must be 500 characters or fewer")
+    if image_url and not image_url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Image URL must be a valid public URL")
 
     author = _author_payload(user, db)
     post = {
@@ -175,6 +180,7 @@ def create_event_wall_post(
         "event_id": int(event_id),
         **author,
         "message": message,
+        "image_url": image_url,
         "created_at": _now_iso(),
     }
     saved = append_event_wall_post(event_id, post)
