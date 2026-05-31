@@ -13,6 +13,7 @@ from app.db import get_db
 from app.models.profile import Profile
 from app.routers.auth import get_current_user
 from app.store import (
+    _APPLICATIONS,
     _EVENTS,
     _VENDORS,
     append_event_wall_post,
@@ -97,7 +98,139 @@ def _profile_for_user(db: Session, email: str, role: str) -> Dict[str, Any]:
     }
 
 
-def _author_payload(user: Dict[str, Any], db: Session) -> Dict[str, Any]:
+def _first_list_value(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            text = _safe_str(item)
+            if text:
+                return text
+        return ""
+    if isinstance(value, str):
+        raw = _safe_str(value)
+        if not raw:
+            return ""
+        for part in raw.replace("|", ",").replace(";", ",").split(","):
+            text = _safe_str(part)
+            if text:
+                return text
+    return ""
+
+
+def _pick_first(*values: Any) -> str:
+    for value in values:
+        text = _safe_str(value)
+        if text:
+            return text
+    return ""
+
+
+def _short_booth_label(value: Any) -> str:
+    text = _safe_str(value)
+    if not text:
+        return ""
+    if len(text) <= 20:
+        return text
+    parts = [part for part in text.split("-") if part]
+    if len(parts) >= 2:
+        return "-".join(parts[-2:])[:20]
+    return text[-20:]
+
+
+def _vendor_event_identity(event_id: int, email: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    category = _pick_first(
+        _first_list_value(profile.get("categories")),
+        _first_list_value(profile.get("vendor_categories")),
+        profile.get("category"),
+        profile.get("vendor_category"),
+        profile.get("business_category"),
+        profile.get("business_type"),
+    )
+
+    logo_url = _pick_first(
+        profile.get("logo_url"),
+        profile.get("logoUrl"),
+        profile.get("logo_data_url"),
+        profile.get("logoDataUrl"),
+        profile.get("avatar_url"),
+        profile.get("avatarUrl"),
+    )
+
+    booth_label = ""
+    booth_id = ""
+
+    for app in (_APPLICATIONS or {}).values():
+        if not isinstance(app, dict):
+            continue
+        try:
+            app_event_id = int(app.get("event_id") or app.get("eventId") or 0)
+        except Exception:
+            continue
+        if app_event_id != int(event_id):
+            continue
+
+        app_vendor_email = _norm(app.get("vendor_email") or app.get("email") or app.get("vendorEmail"))
+        app_vendor_id = _norm(app.get("vendor_id") or app.get("vendorId"))
+        if email and email not in {app_vendor_email, app_vendor_id}:
+            continue
+
+        booth_label = _pick_first(
+            app.get("booth_label"),
+            app.get("boothLabel"),
+            app.get("booth_number"),
+            app.get("boothNumber"),
+            app.get("requested_booth_label"),
+            app.get("requestedBoothLabel"),
+        )
+        booth_id = _pick_first(
+            app.get("booth_id"),
+            app.get("boothId"),
+            app.get("requested_booth_id"),
+            app.get("requestedBoothId"),
+        )
+        if not booth_label:
+            booth_label = _short_booth_label(booth_id)
+
+        app_category = _pick_first(
+            _first_list_value(app.get("vendor_categories")),
+            app.get("vendor_category"),
+            app.get("category"),
+            app.get("requested_booth_category"),
+            app.get("requestedBoothCategory"),
+        )
+        if app_category:
+            category = app_category
+        break
+
+    return {
+        "author_logo_url": logo_url,
+        "author_category": category,
+        "author_booth_label": booth_label,
+        "author_booth_id": booth_id,
+    }
+
+
+def _organizer_identity(profile: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "author_logo_url": _pick_first(
+            profile.get("logo_url"),
+            profile.get("logoUrl"),
+            profile.get("logoDataUrl"),
+            profile.get("logo_data_url"),
+            profile.get("banner_url"),
+            profile.get("bannerUrl"),
+        ),
+        "author_category": _pick_first(
+            profile.get("organizationType"),
+            profile.get("organization_type"),
+            _first_list_value(profile.get("organizer_categories")),
+            _first_list_value(profile.get("categories")),
+        ),
+        "author_booth_label": "",
+        "author_booth_id": "",
+    }
+
+
+def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[str, Any]:
     role = _norm(user.get("role") or "vendor")
     email = _norm(user.get("email") or user.get("sub"))
     full_name = _safe_str(user.get("full_name") or user.get("name") or user.get("display_name"))
@@ -127,13 +260,15 @@ def _author_payload(user: Dict[str, Any], db: Session) -> Dict[str, Any]:
     if role not in {"vendor", "organizer", "admin"}:
         role = "vendor"
 
+    identity = _vendor_event_identity(event_id, email, profile) if role == "vendor" else _organizer_identity(profile)
+
     return {
         "author_name": author_name,
         "author_email": email,
         "author_role": role,
         "verified": _is_verified(profile),
+        **identity,
     }
-
 
 def _event_organizer_email(event_id: int) -> str:
     event = _EVENTS.get(int(event_id)) if str(event_id).isdigit() else None
@@ -206,7 +341,7 @@ def create_event_wall_post(
     if image_url and not image_url.lower().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Image URL must be a valid public URL")
 
-    author = _author_payload(user, db)
+    author = _author_payload(user, db, event_id)
     post = {
         "id": uuid4().hex,
         "event_id": int(event_id),
