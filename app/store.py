@@ -77,6 +77,7 @@ _TEMPLATES: Dict[int, Dict[str, Any]] = {}
 
 _VENDORS: Dict[str, Dict[str, Any]] = {}
 _REVIEWS: Dict[str, Dict[int, Dict[str, Any]]] = {}
+_EVENT_WALLS: Dict[int, Dict[str, Any]] = {}
 
 _NEXT_EVENT_ID = 1
 _NEXT_BOOTH_ID = 1
@@ -88,7 +89,7 @@ def load_store() -> None:
     global _EVENTS, _REQUIREMENTS, _REQUIREMENT_TEMPLATES, _DIAGRAMS, _APPLICATIONS
     global _PAYMENTS, _PAYOUTS, _AUDIT_LOGS, _VERIFICATIONS
     global _LAYOUT_META, _BOOTHS, _TEMPLATES
-    global _VENDORS, _REVIEWS
+    global _VENDORS, _REVIEWS, _EVENT_WALLS
     global _NEXT_EVENT_ID, _NEXT_BOOTH_ID, _NEXT_TEMPLATE_ID, _NEXT_APPLICATION_ID
 
     with _LOCK:
@@ -177,6 +178,7 @@ def load_store() -> None:
         _BOOTHS = _int_keyed(raw.get("booths", {}))
         _TEMPLATES = _int_keyed(raw.get("templates", {}))
         _VENDORS = _lower_str_keyed(raw.get("vendors", {}))
+        _EVENT_WALLS = _int_keyed(raw.get("event_walls", {}))
 
         raw_reviews = raw.get("reviews", {}) or {}
         _REVIEWS = {}
@@ -245,6 +247,7 @@ def save_store() -> None:
                 vendor_key: _str_keyed(vendor_reviews)
                 for vendor_key, vendor_reviews in _REVIEWS.items()
             },
+            "event_walls": _str_keyed(_EVENT_WALLS),
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
@@ -353,6 +356,7 @@ def get_store_snapshot() -> Dict[str, Any]:
                 vendor_key: _str_keyed(vendor_reviews)
                 for vendor_key, vendor_reviews in _REVIEWS.items()
             },
+            "event_walls": _str_keyed(_EVENT_WALLS),
             "next": {
                 "event_id": _NEXT_EVENT_ID,
                 "booth_id": _NEXT_BOOTH_ID,
@@ -490,3 +494,60 @@ def get_or_create_application(
         save_store()
         return application
 
+
+
+
+def _event_wall_event_id(value: Any) -> int:
+    try:
+        event_id = int(value)
+    except Exception:
+        raise ValueError("event_id must be an integer")
+    if event_id <= 0:
+        raise ValueError("event_id must be a positive integer")
+    return event_id
+
+
+def get_event_wall(event_id: Any) -> Dict[str, Any]:
+    eid = _event_wall_event_id(event_id)
+    with _LOCK:
+        existing = _EVENT_WALLS.get(eid)
+        if not isinstance(existing, dict):
+            existing = {"event_id": eid, "posts": []}
+            _EVENT_WALLS[eid] = existing
+        posts = existing.get("posts") if isinstance(existing.get("posts"), list) else []
+        return {"event_id": eid, "posts": [dict(p) for p in posts if isinstance(p, dict)]}
+
+
+def append_event_wall_post(event_id: Any, post: Dict[str, Any]) -> Dict[str, Any]:
+    eid = _event_wall_event_id(event_id)
+    with _LOCK:
+        existing = _EVENT_WALLS.get(eid)
+        if not isinstance(existing, dict):
+            existing = {"event_id": eid, "posts": []}
+        posts = existing.get("posts") if isinstance(existing.get("posts"), list) else []
+        clean_post = dict(post or {})
+        clean_post["event_id"] = eid
+        posts.append(clean_post)
+        existing["posts"] = posts[-250:]
+        _EVENT_WALLS[eid] = existing
+        save_store()
+        return dict(clean_post)
+
+
+def delete_event_wall_post(event_id: Any, post_id: Any) -> bool:
+    eid = _event_wall_event_id(event_id)
+    target = str(post_id or "").strip()
+    if not target:
+        return False
+    with _LOCK:
+        existing = _EVENT_WALLS.get(eid)
+        if not isinstance(existing, dict):
+            return False
+        posts = existing.get("posts") if isinstance(existing.get("posts"), list) else []
+        before = len(posts)
+        existing["posts"] = [p for p in posts if str((p or {}).get("id") or "") != target]
+        changed = len(existing["posts"]) != before
+        if changed:
+            _EVENT_WALLS[eid] = existing
+            save_store()
+        return changed

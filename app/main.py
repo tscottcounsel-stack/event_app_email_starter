@@ -111,6 +111,7 @@ for module_name in [
     "app.routers.booths",
     "app.routers.diagrams",
     "app.routers.events",
+    "app.routers.event_wall",
     "app.routers.layout",
     "app.routers.organizer_applications",
     "app.routers.organizer_diagram",
