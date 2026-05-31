@@ -663,11 +663,6 @@ def _checkin_stats_payload(event_id: int, db: Session) -> Dict[str, Any]:
         for row in checkins
         if row.application_id is not None
     }
-    checkins_by_vendor = {
-        int(row.vendor_id): row
-        for row in checkins
-        if row.vendor_id is not None
-    }
 
     rows = []
     matched_checkin_ids: set[int] = set()
@@ -675,7 +670,13 @@ def _checkin_stats_payload(event_id: int, db: Session) -> Dict[str, Any]:
     for app in approved_apps:
         app_id = _application_id(app)
         vendor_id = _application_vendor_id(app)
-        checkin = checkins_by_app.get(app_id) or checkins_by_vendor.get(vendor_id)
+
+        # STRICT MATCH:
+        # Only treat this application as checked in if its exact
+        # application_id exists in event_checkins. Do not fall back to
+        # vendor_id here because multiple applications can share the same
+        # vendor/user id, which makes the whole roster appear checked in.
+        checkin = checkins_by_app.get(app_id)
         if checkin is not None and getattr(checkin, "id", None) is not None:
             matched_checkin_ids.add(int(checkin.id))
         rows.append(_row_payload(app, checkin))
