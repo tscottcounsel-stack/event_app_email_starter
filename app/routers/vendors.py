@@ -423,12 +423,11 @@ def _is_internal_or_demo_identity(email: Any, name: Any = "") -> bool:
 
 
 def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
-    """Only publish vendors that have earned marketplace visibility.
+    """Publish real vendor profiles in the public marketplace.
 
-    Public directory visibility is intentionally strict:
-    - verified vendors are visible
-    - active premium/pro/growth/enterprise vendors are visible
-    - pending/standard/inactive profiles stay private
+    Premium and verified vendors still rank higher on the frontend, but standard
+    vendors with a completed public profile should also appear in /vendors.
+    Hidden/deleted/inactive/test/demo profiles are filtered before this helper.
     """
     public_status = _safe_str(row.get("public_verification_status")).lower()
     verification_status = _safe_str(row.get("verification_status") or row.get("status")).lower()
@@ -436,6 +435,10 @@ def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
     visibility_tier = _safe_str(row.get("visibility_tier") or row.get("visibilityTier")).lower()
     plan = _safe_str(row.get("subscription_plan") or row.get("plan")).lower()
     subscription_status = _safe_str(row.get("subscription_status")).lower()
+
+    blocked_statuses = {"deleted", "archived", "inactive", "removed", "hidden", "disabled", "suspended"}
+    if public_status in blocked_statuses or verification_status in blocked_statuses or review_status in blocked_statuses:
+        return False
 
     is_verified = (
         row.get("verified") is True
@@ -452,7 +455,19 @@ def _is_public_marketplace_visible(row: Dict[str, Any]) -> bool:
         or (has_premium_plan and is_active_subscription)
     )
 
-    return bool(is_verified or is_premium)
+    # Standard vendors should still appear when they have enough real public
+    # profile content. The frontend sorts premium/verified above standard.
+    profile_markers = [
+        row.get("business_name") or row.get("businessName") or row.get("name"),
+        row.get("description") or row.get("business_description") or row.get("businessDescription"),
+        row.get("logo_url") or row.get("logoUrl") or row.get("logo_data_url") or row.get("logoDataUrl"),
+        row.get("banner_url") or row.get("bannerUrl"),
+        row.get("city"),
+        row.get("state"),
+    ]
+    has_public_profile = bool(_safe_str(profile_markers[0])) and any(_safe_str(value) for value in profile_markers[1:])
+
+    return bool(is_verified or is_premium or has_public_profile)
 
 
 def _parse_datetime(value: Any) -> datetime | None:
