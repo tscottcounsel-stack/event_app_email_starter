@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import logging
@@ -1435,6 +1435,311 @@ def public_list_events(
         "limit": safe_limit,
         "offset": safe_offset,
         "has_more": safe_offset + safe_limit < total,
+    }
+
+
+def _public_booth_label(booth: Dict[str, Any], fallback: str) -> str:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    value = (
+        booth.get("label")
+        or booth.get("booth_label")
+        or booth.get("boothLabel")
+        or booth.get("number")
+        or booth.get("name")
+        or booth.get("code")
+        or meta.get("label")
+        or meta.get("booth_label")
+        or meta.get("number")
+        or fallback
+    )
+    return str(value or fallback).strip()
+
+
+def _public_booth_id(booth: Dict[str, Any], fallback: str) -> str:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    value = (
+        booth.get("id")
+        or booth.get("booth_id")
+        or booth.get("boothId")
+        or booth.get("key")
+        or booth.get("code")
+        or meta.get("id")
+        or meta.get("booth_id")
+        or fallback
+    )
+    return str(value or fallback).strip()
+
+
+def _public_booth_category(booth: Dict[str, Any]) -> str:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    return str(
+        booth.get("category")
+        or booth.get("booth_category")
+        or booth.get("boothCategory")
+        or booth.get("vendor_category")
+        or booth.get("vendorCategory")
+        or booth.get("category_name")
+        or booth.get("categoryName")
+        or meta.get("category")
+        or meta.get("booth_category")
+        or meta.get("vendor_category")
+        or ""
+    ).strip()
+
+
+def _public_booth_number(value: Any, fallback: float) -> float:
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except Exception:
+        return fallback
+
+
+def _public_booth_match_tokens(booth: Dict[str, Any], booth_id: str, label: str) -> set[str]:
+    tokens = {str(booth_id or "").strip().lower(), str(label or "").strip().lower()}
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for key in (
+        "id",
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
+        "selected_booth_id",
+        "selectedBoothId",
+        "assigned_booth_id",
+        "assignedBoothId",
+        "label",
+        "booth_label",
+        "boothLabel",
+        "number",
+        "name",
+        "code",
+    ):
+        raw = booth.get(key)
+        if raw not in (None, ""):
+            tokens.add(str(raw).strip().lower())
+        raw_meta = meta.get(key)
+        if raw_meta not in (None, ""):
+            tokens.add(str(raw_meta).strip().lower())
+    return {token for token in tokens if token}
+
+
+def _public_application_booth_tokens(app: Dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in (
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
+        "selected_booth_id",
+        "selectedBoothId",
+        "assigned_booth_id",
+        "assignedBoothId",
+        "booth_label",
+        "boothLabel",
+        "booth_number",
+        "boothNumber",
+        "booth_name",
+        "boothName",
+    ):
+        raw = app.get(key)
+        if raw not in (None, ""):
+            tokens.add(str(raw).strip().lower())
+    booth = app.get("booth")
+    if isinstance(booth, dict):
+        for key in ("id", "label", "number", "name", "code"):
+            raw = booth.get(key)
+            if raw not in (None, ""):
+                tokens.add(str(raw).strip().lower())
+    return {token for token in tokens if token}
+
+
+def _public_application_status(app: Dict[str, Any]) -> str:
+    payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
+    status = str(app.get("status") or app.get("application_status") or "").strip().lower()
+    if payment_status == "paid":
+        return "paid"
+    if status in {"approved", "accepted", "confirmed"}:
+        return "assigned"
+    if status in {"submitted", "under_review", "pending"}:
+        return "reserved"
+    if payment_status in {"pending", "processing"}:
+        return "reserved"
+    return status or "assigned"
+
+
+def _public_profile_for_vendor(db: Session, email: str) -> Optional[Profile]:
+    normalized = _norm_email(email)
+    if not normalized:
+        return None
+    try:
+        return (
+            db.query(Profile)
+            .filter(Profile.role == "vendor")
+            .filter(func.lower(Profile.email) == normalized)
+            .first()
+        )
+    except Exception:
+        return None
+
+
+def _public_vendor_payload_from_app(db: Session, app: Dict[str, Any]) -> Dict[str, Any]:
+    email = _norm_email(app.get("vendor_email") or app.get("email") or app.get("user_email"))
+    profile = _public_profile_for_vendor(db, email)
+    profile_data = dict(profile.data or {}) if profile and isinstance(profile.data, dict) else {}
+    business_name = str(
+        app.get("business_name")
+        or app.get("vendor_name")
+        or app.get("vendor_business_name")
+        or profile_data.get("business_name")
+        or profile_data.get("businessName")
+        or profile_data.get("company_name")
+        or (getattr(profile, "business_name", None) if profile else "")
+        or email
+        or ""
+    ).strip()
+    logo_url = str(
+        app.get("vendor_logo_url")
+        or app.get("logo_url")
+        or profile_data.get("logo_url")
+        or profile_data.get("logoUrl")
+        or profile_data.get("logo")
+        or ""
+    ).strip()
+    category = str(
+        app.get("vendor_category")
+        or app.get("requested_booth_category")
+        or app.get("booth_category")
+        or profile_data.get("category")
+        or profile_data.get("business_category")
+        or ""
+    ).strip()
+    verified = bool(
+        app.get("verified")
+        or app.get("vendor_verified")
+        or profile_data.get("verified")
+        or profile_data.get("is_verified")
+        or str(profile_data.get("verification_status") or "").lower() == "verified"
+    )
+    return {
+        "vendor_name": business_name,
+        "vendor_email": email,
+        "vendor_logo_url": logo_url,
+        "category": category,
+        "verified": verified,
+    }
+
+
+def _public_applications_for_event(event_id: int) -> list[Dict[str, Any]]:
+    out: list[Dict[str, Any]] = []
+    for app in _APPLICATIONS.values():
+        if not isinstance(app, dict):
+            continue
+        try:
+            app_event_id = int(app.get("event_id") or app.get("eventId") or 0)
+        except Exception:
+            continue
+        if app_event_id == int(event_id):
+            out.append(app)
+    return out
+
+
+@router.get("/public/events/{event_id}/diagram")
+def public_event_diagram(event_id: int, db: Session = Depends(get_db)):
+    """Return a no-login, read-only floorplan payload for public visitors.
+
+    This intentionally exposes only map geometry and assigned/reserved vendor
+    display data. It does not expose vendor application controls or private
+    application documents.
+    """
+    event = (
+        db.query(Event)
+        .filter(Event.id == int(event_id))
+        .filter(Event.published == True)  # noqa: E712
+        .filter(Event.archived == False)  # noqa: E712
+        .first()
+    )
+
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    event_dict = _serialize_event_model(event)
+    if not _event_is_active_marketplace_event(event_dict):
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    diagram_row = (
+        db.query(Diagram)
+        .filter(Diagram.event_id == int(event_id))
+        .order_by(Diagram.id.desc())
+        .first()
+    )
+
+    diagram_payload = diagram_row.diagram if diagram_row and isinstance(diagram_row.diagram, dict) else {}
+    raw_booths = _iter_diagram_booths(diagram_payload)
+    event_apps = _public_applications_for_event(int(event_id))
+
+    public_booths: list[Dict[str, Any]] = []
+    for index, booth in enumerate(raw_booths, start=1):
+        if not isinstance(booth, dict) or not _booth_is_sellable(booth):
+            continue
+
+        booth_id = _public_booth_id(booth, f"booth-{index}")
+        label = _public_booth_label(booth, f"B{index}")
+        booth_tokens = _public_booth_match_tokens(booth, booth_id, label)
+
+        matched_app: Optional[Dict[str, Any]] = None
+        for app in event_apps:
+            app_tokens = _public_application_booth_tokens(app)
+            if booth_tokens.intersection(app_tokens):
+                status = str(app.get("status") or "").strip().lower()
+                payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
+                if status in {"approved", "accepted", "confirmed", "submitted", "under_review", "pending"} or payment_status in {"paid", "pending"}:
+                    matched_app = app
+                    break
+
+        vendor_payload: Dict[str, Any] = {}
+        if matched_app:
+            vendor_payload = _public_vendor_payload_from_app(db, matched_app)
+
+        meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+        base_status = str(booth.get("status") or meta.get("status") or "available").strip().lower()
+        status = _public_application_status(matched_app) if matched_app else base_status
+        category = vendor_payload.get("category") or _public_booth_category(booth)
+
+        public_booths.append(
+            {
+                "id": booth_id,
+                "booth_id": booth_id,
+                "label": label,
+                "booth_label": label,
+                "name": label,
+                "type": "booth",
+                "x": _public_booth_number(booth.get("x") or booth.get("left") or meta.get("x"), 40 + ((index - 1) % 5) * 150),
+                "y": _public_booth_number(booth.get("y") or booth.get("top") or meta.get("y"), 40 + ((index - 1) // 5) * 120),
+                "width": _public_booth_number(booth.get("width") or booth.get("w") or meta.get("width"), 110),
+                "height": _public_booth_number(booth.get("height") or booth.get("h") or meta.get("height"), 72),
+                "rotation": _public_booth_number(booth.get("rotation") or meta.get("rotation"), 0),
+                "status": status,
+                "category": category,
+                "vendor_category": category,
+                "price": _booth_price_value(booth) or None,
+                "vendor_name": vendor_payload.get("vendor_name") or "",
+                "vendor_email": vendor_payload.get("vendor_email") or "",
+                "vendor_logo_url": vendor_payload.get("vendor_logo_url") or "",
+                "verified": bool(vendor_payload.get("verified")),
+            }
+        )
+
+    public_diagram = dict(diagram_payload or {})
+    public_diagram["booths"] = public_booths
+
+    return {
+        "ok": True,
+        "event_id": int(event_id),
+        "diagram": public_diagram,
+        "booths": public_booths,
+        "count": len(public_booths),
     }
 
 
