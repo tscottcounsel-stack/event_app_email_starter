@@ -36,6 +36,14 @@ class EventWallPinUpdate(BaseModel):
     pinned: bool = True
 
 
+class EventWallReactionUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    reaction: str
+
+
+_ALLOWED_REACTIONS = {"fire", "love", "clap", "eyes"}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -290,6 +298,40 @@ def _can_manage_event_wall(event_id: int, user: Dict[str, Any]) -> bool:
     return not organizer_email or organizer_email == email
 
 
+
+def _reaction_counts(post: Dict[str, Any]) -> Dict[str, int]:
+    reactions = post.get("reactions_by_user")
+    counts = {key: 0 for key in _ALLOWED_REACTIONS}
+    if not isinstance(reactions, dict):
+        return counts
+
+    for values in reactions.values():
+        if isinstance(values, list):
+            for value in values:
+                key = _norm(value)
+                if key in counts:
+                    counts[key] += 1
+    return counts
+
+
+def _public_post(post: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(post or {})
+    out["reaction_counts"] = _reaction_counts(out)
+    out.pop("reactions_by_user", None)
+    return out
+
+
+def _update_wall_post(event_id: int, post_id: str, updated_post: Dict[str, Any]) -> Dict[str, Any]:
+    wall = get_event_wall(event_id)
+    posts = wall.get("posts") if isinstance(wall.get("posts"), list) else []
+    for index, post in enumerate(posts):
+        if str(post.get("id") or "") == str(post_id):
+            posts[index] = updated_post
+            wall["posts"] = posts
+            save_store()
+            return updated_post
+    raise HTTPException(status_code=404, detail="Wall post not found")
+
 def _clean_posts(posts: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
     clean = [dict(post) for post in posts if isinstance(post, dict)]
     clean.sort(
@@ -299,7 +341,7 @@ def _clean_posts(posts: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str,
         ),
         reverse=True,
     )
-    return clean[: max(1, min(int(limit or 50), 100))]
+    return [_public_post(post) for post in clean[: max(1, min(int(limit or 50), 100))]]
 
 
 @router.get("/events/{event_id}/wall")
@@ -351,10 +393,11 @@ def create_event_wall_post(
         "pinned": False,
         "pinned_at": "",
         "pinned_by": "",
+        "reactions_by_user": {},
         "created_at": _now_iso(),
     }
     saved = append_event_wall_post(event_id, post)
-    return {"ok": True, "post": saved}
+    return {"ok": True, "post": _public_post(saved)}
 
 
 @router.patch("/events/{event_id}/wall/{post_id}/pin")
@@ -388,7 +431,61 @@ def update_event_wall_pin(
         target["pinned_by"] = ""
 
     save_store()
-    return {"ok": True, "post": dict(target)}
+    return {"ok": True, "post": _public_post(dict(target))}
+
+
+@router.patch("/events/{event_id}/wall/{post_id}/reaction")
+def update_event_wall_reaction(
+    event_id: int,
+    post_id: str,
+    payload: EventWallReactionUpdate,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if not _event_exists(event_id):
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    reaction = _norm(payload.reaction)
+    if reaction not in _ALLOWED_REACTIONS:
+        raise HTTPException(status_code=400, detail="Unsupported reaction")
+
+    role = _norm(user.get("role"))
+    if role not in {"vendor", "organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Vendor, organizer, or admin account required")
+
+    email = _norm(user.get("email") or user.get("sub"))
+    if not email:
+        raise HTTPException(status_code=401, detail="Unable to identify user")
+
+    wall = get_event_wall(event_id)
+    posts = wall.get("posts") if isinstance(wall.get("posts"), list) else []
+    target: Optional[Dict[str, Any]] = next(
+        (post for post in posts if str(post.get("id") or "") == str(post_id)),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Wall post not found")
+
+    reactions_by_user = target.get("reactions_by_user")
+    if not isinstance(reactions_by_user, dict):
+        reactions_by_user = {}
+
+    current = reactions_by_user.get(email)
+    current_list = [str(item).strip().lower() for item in current] if isinstance(current, list) else []
+
+    if reaction in current_list:
+        current_list = [item for item in current_list if item != reaction]
+    else:
+        current_list.append(reaction)
+
+    if current_list:
+        reactions_by_user[email] = sorted(set(current_list))
+    else:
+        reactions_by_user.pop(email, None)
+
+    target["reactions_by_user"] = reactions_by_user
+    target["updated_at"] = _now_iso()
+    updated = _update_wall_post(event_id, post_id, target)
+    return {"ok": True, "post": _public_post(updated)}
 
 
 @router.delete("/events/{event_id}/wall/{post_id}")
