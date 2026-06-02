@@ -871,6 +871,7 @@ def get_connect_status(user: dict = Depends(get_current_user)):
         }
 
 
+
 @router.post("/connect/account")
 def create_connect_account(user: dict = Depends(get_current_user)):
     stripe_sdk = _require_stripe()
@@ -878,10 +879,19 @@ def create_connect_account(user: dict = Depends(get_current_user)):
     if role not in {"organizer", "admin"}:
         raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
 
-   existing = ""
-
-# Force fresh live Stripe Connect account creation during production migration.
-# Old test-mode account IDs should not be reused.
+    existing = _get_connect_account_id(user)
+    if existing:
+        try:
+            account = stripe_sdk.Account.retrieve(existing)
+            return {
+                "ok": True,
+                "account_id": existing,
+                "accountId": existing,
+                "connected": True,
+                **_stripe_connect_account_status(account),
+            }
+        except Exception as exc:
+            print("⚠️ Stored Stripe Connect account is invalid for current Stripe mode; creating fresh account:", str(exc))
 
     try:
         account = stripe_sdk.Account.create(
@@ -922,13 +932,42 @@ def create_connect_onboarding_link(
     user: dict = Depends(get_current_user),
 ):
     stripe_sdk = _require_stripe()
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
 
     account_id = str(payload.account_id or "").strip() or _get_connect_account_id(user)
-    if not account_id:
-        raise HTTPException(status_code=400, detail="Missing Stripe Connect account ID")
 
-    if payload.account_id:
-        _save_connect_account_id(user, account_id)
+    def create_fresh_account() -> str:
+        account = stripe_sdk.Account.create(
+            type="express",
+            email=str(user.get("email") or "").strip() or None,
+            business_type="company",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+            metadata={
+                "vendcore_user_id": str(user.get("id") or ""),
+                "vendcore_email": str(user.get("email") or ""),
+                "vendcore_role": role,
+            },
+        )
+        fresh_id = str(_stripe_get(account, "id", "") or "").strip()
+        if not fresh_id:
+            raise HTTPException(status_code=500, detail="Stripe did not return an account ID")
+        _save_connect_account_id(user, fresh_id)
+        return fresh_id
+
+    if account_id:
+        try:
+            stripe_sdk.Account.retrieve(account_id)
+            _save_connect_account_id(user, account_id)
+        except Exception as exc:
+            print("⚠️ Stripe Connect account invalid during onboarding; creating fresh account:", str(exc))
+            account_id = create_fresh_account()
+    else:
+        account_id = create_fresh_account()
 
     try:
         link = stripe_sdk.AccountLink.create(
@@ -938,9 +977,17 @@ def create_connect_onboarding_link(
             type="account_onboarding",
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe onboarding failed: {exc}")
+        message = str(exc)
+        print("🔥 Stripe onboarding failed:", message)
+        raise HTTPException(status_code=400, detail=f"Stripe onboarding failed: {message}")
 
-    return {"ok": True, "url": link.url, "onboarding_url": link.url, "account_id": account_id}
+    return {
+        "ok": True,
+        "url": link.url,
+        "onboarding_url": link.url,
+        "account_id": account_id,
+        "accountId": account_id,
+    }
 
 
 @router.post("/webhook")
