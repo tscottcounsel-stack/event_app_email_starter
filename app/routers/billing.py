@@ -878,20 +878,10 @@ def create_connect_account(user: dict = Depends(get_current_user)):
     if role not in {"organizer", "admin"}:
         raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
 
-    existing = _get_connect_account_id(user)
-    if existing:
-        try:
-            account = stripe_sdk.Account.retrieve(existing)
-            return {
-                "ok": True,
-                "account_id": existing,
-                "accountId": existing,
-                "connected": True,
-                **_stripe_connect_account_status(account),
-            }
-        except Exception:
-            # Continue and create a fresh Express account if the stored ID no longer exists.
-            pass
+   existing = ""
+
+# Force fresh live Stripe Connect account creation during production migration.
+# Old test-mode account IDs should not be reused.
 
     try:
         account = stripe_sdk.Account.create(
