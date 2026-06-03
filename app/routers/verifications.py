@@ -26,8 +26,8 @@ DEFAULT_VERIFICATION_DURATION_DAYS = 365
 DEFAULT_VERIFICATION_FEES = {"vendor": 25, "organizer": 49}
 
 REQUIRED_DOCS = {
-    "vendor": ["business_license", "government_id"],
-    "organizer": ["business_license", "government_id"],
+    "vendor": ["business_license"],
+    "organizer": ["business_license"],
 }
 
 DOC_LABELS = {
