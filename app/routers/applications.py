@@ -2494,3 +2494,25 @@ def debug_applications():
         "count": len(_APPLICATIONS),
         "applications": _APPLICATIONS,
     }
+
+@router.delete("/admin/debug/applications/{app_id}")
+def admin_debug_delete_application(app_id: str):
+    """Temporary cleanup route for removing a corrupted in-memory application record.
+
+    Remove this route after the bad record is deleted.
+    """
+    removed = _delete_application_record(app_id)
+    if removed:
+        _save_store()
+    return {
+        "ok": True,
+        "deleted": bool(removed),
+        "app_id": str(app_id),
+        "remaining_count": len(_applications_store()),
+    }
+
+
+@router.post("/admin/debug/applications/{app_id}/delete")
+def admin_debug_delete_application_post(app_id: str):
+    """POST twin for hosts/tools that make DELETE inconvenient."""
+    return admin_debug_delete_application(app_id)
