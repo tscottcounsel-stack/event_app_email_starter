@@ -644,13 +644,8 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
     _set_profile_state(row, data)
     db.commit()
 
-    price_id = _verification_price_id(role)
-    raise HTTPException(
-        status_code=400,
-        detail=f"DEBUG PRICE ID: {price_id}"
-    )
+    price_id = "price_1Te5Rm6aMTKJugV5qV9Z7p24"
     
-
     metadata = {
         "payment_type": "verification_fee",
         "verification": "true",
