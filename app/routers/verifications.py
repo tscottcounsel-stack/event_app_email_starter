@@ -645,6 +645,14 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
     db.commit()
 
     price_id = _verification_price_id(role)
+    print("🔥 VERIFICATION CHECKOUT PRICE DEBUG:", {
+        "role": role,
+        "price_id": price_id,
+        "STRIPE_PRICE_VERIFICATION_VENDOR": os.getenv("STRIPE_PRICE_VERIFICATION_VENDOR"),
+        "STRIPE_PRICE_VERIFICATION": os.getenv("STRIPE_PRICE_VERIFICATION"),
+        "STRIPE_VERIFICATION_PRICE_ID": os.getenv("STRIPE_VERIFICATION_PRICE_ID"),
+})
+
     metadata = {
         "payment_type": "verification_fee",
         "verification": "true",
