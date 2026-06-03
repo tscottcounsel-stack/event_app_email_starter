@@ -1814,6 +1814,32 @@ def create_vendor_application(
         "document_requests": [],
     }
 
+# Preserve human-readable booth labels only.
+# Never persist generated internal booth canvas IDs.
+def _clean_booth_value(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value.startswith("booth_"):
+        return None
+
+    return value
+
+requested_booth_id = _clean_booth_value(
+    payload.get("requested_booth_id")
+)
+
+booth_id = _clean_booth_value(
+    payload.get("booth_id")
+)
+
+if requested_booth_id is not None:
+    payload["requested_booth_id"] = requested_booth_id
+
+if booth_id is not None:
+    payload["booth_id"] = booth_id
     booth_price = payload.get("booth_price")
     if booth_price is not None:
         cents = _price_to_cents(booth_price)
