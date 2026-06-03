@@ -201,6 +201,97 @@ def _normalize_id(value: Any) -> Optional[str]:
     return text or None
 
 
+def _looks_like_generated_booth_id(value: Any) -> bool:
+    text = _as_str(value)
+    return bool(re.match(r"^booth_[a-f0-9]+_", text, flags=re.IGNORECASE))
+
+
+def _first_booth_value(payload: Dict[str, Any]) -> str:
+    """Pick the safest human-facing booth value from a request payload.
+
+    Frontend booth canvas objects have internal ids like
+    booth_46d7f10807bed_19e8b1d55a0. Those should never become the saved
+    application booth. Human labels such as A3, Booth 6, or Table 12 are valid.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in (
+        "booth_label",
+        "boothLabel",
+        "booth_number",
+        "boothNumber",
+        "booth_name",
+        "boothName",
+        "requested_booth_label",
+        "requestedBoothLabel",
+        "requested_booth_id",
+        "requestedBoothId",
+        "booth_id",
+        "boothId",
+        "selected_booth_label",
+        "selectedBoothLabel",
+        "selected_booth_id",
+        "selectedBoothId",
+    ):
+        value = _as_str(payload.get(key))
+        if not value:
+            continue
+        if _looks_like_generated_booth_id(value):
+            continue
+        return value
+
+    return ""
+
+
+def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Persist booth fields from payload without allowing generated canvas ids."""
+    booth_value = _first_booth_value(payload)
+
+    if booth_value:
+        app["booth_id"] = booth_value
+        app["requested_booth_id"] = booth_value
+        app["booth_label"] = booth_value
+        app["booth_number"] = booth_value
+
+    booth_category = _as_str(
+        payload.get("booth_category")
+        or payload.get("requested_booth_category")
+        or payload.get("boothCategory")
+        or payload.get("requestedBoothCategory")
+        or payload.get("category")
+    )
+    if booth_category:
+        app["booth_category"] = booth_category
+        app["requested_booth_category"] = booth_category
+
+    booth_price = payload.get("booth_price")
+    if booth_price is None:
+        booth_price = payload.get("boothPrice")
+    if booth_price is None:
+        booth_price = payload.get("total_due")
+    if booth_price is None:
+        booth_price = payload.get("totalDue")
+    if booth_price is None:
+        booth_price = payload.get("amount_due")
+    if booth_price is None:
+        booth_price = payload.get("amountDue")
+
+    if booth_price is not None:
+        cents = _price_to_cents(booth_price)
+        if cents:
+            app["booth_price_cents"] = cents
+            app["amount_cents"] = cents
+            app["resolved_price_cents"] = cents
+            app["booth_price"] = round(cents / 100, 2)
+
+    if booth_value and not booth_category:
+        _persist_booth_category(app)
+
+    return booth_value
+
+
+
 def _normalize_string_list(value: Any) -> List[str]:
     if isinstance(value, list):
         return [_as_str(item) for item in value if _as_str(item)]
@@ -1529,22 +1620,9 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
             detail="This application is locked for booth/category edits. You can still update requirement checkboxes and document uploads while it is submitted or approved.",
         )
 
-    booth_id = _as_str(payload.get("booth_id"))
-    booth_category = _as_str(
-        payload.get("booth_category")
-        or payload.get("requested_booth_category")
-        or payload.get("category")
-    )
-    if booth_id:
-        app["requested_booth_id"] = booth_id
-        app["booth_id"] = booth_id
-
-    if booth_category:
-        app["booth_category"] = booth_category
-        app["requested_booth_category"] = booth_category
-
-    if booth_id and not booth_category:
-        _persist_booth_category(app)
+    # Booth selection can arrive as booth_id, requested_booth_id, booth_label,
+    # booth_number, or camelCase variants. Keep the human-facing label only.
+    booth_id = _apply_booth_payload(app, payload)
 
     if "checked" in payload and isinstance(payload.get("checked"), dict):
         app["checked"] = payload["checked"]
@@ -1783,14 +1861,29 @@ def create_vendor_application(
             elif vendor_category and not isinstance(app.get("vendor_categories"), list):
                 app["vendor_categories"] = [vendor_category]
 
+            # IMPORTANT: get-or-create may be called after the booth click.
+            # If a draft already exists, do not return it before applying the
+            # incoming booth selection payload.
+            _apply_booth_payload(app, payload)
+
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
                 app["booth_price"] = round(app["resolved_price_cents"] / 100, 2)
             _merge_vendor_doc_vault(app)
+            app["updated_at"] = _now_iso()
             _save_store()
             return {"ok": True, "application": _serialize_application(app)}
 
     new_id = str(int(time.time() * 1000))
+    booth_value = _first_booth_value(payload)
+    booth_category_value = _as_str(
+        payload.get("booth_category")
+        or payload.get("requested_booth_category")
+        or payload.get("boothCategory")
+        or payload.get("requestedBoothCategory")
+        or payload.get("category")
+    )
+
     app = {
         "id": new_id,
         "event_id": int(event_id) if str(event_id).isdigit() else event_id,
@@ -1804,10 +1897,12 @@ def create_vendor_application(
         "notes": payload.get("notes") or "",
         "documents": _normalize_documents_payload(payload.get("documents")) if isinstance(payload.get("documents"), dict) else (_normalize_documents_payload(payload.get("docs")) if isinstance(payload.get("docs"), dict) else {}),
         "docs": _normalize_documents_payload(payload.get("docs")) if isinstance(payload.get("docs"), dict) else (_normalize_documents_payload(payload.get("documents")) if isinstance(payload.get("documents"), dict) else {}),
-        "requested_booth_id": payload.get("booth_id") or None,
-        "booth_id": payload.get("booth_id") or None,
-        "booth_category": payload.get("booth_category") or payload.get("requested_booth_category") or None,
-        "requested_booth_category": payload.get("booth_category") or payload.get("requested_booth_category") or None,
+        "requested_booth_id": booth_value or None,
+        "booth_id": booth_value or None,
+        "booth_label": booth_value or None,
+        "booth_number": booth_value or None,
+        "booth_category": booth_category_value or None,
+        "requested_booth_category": booth_category_value or None,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
         "archived": False,
