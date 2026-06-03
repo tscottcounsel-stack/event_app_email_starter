@@ -2516,3 +2516,31 @@ def admin_debug_delete_application(app_id: str):
 def admin_debug_delete_application_post(app_id: str):
     """POST twin for hosts/tools that make DELETE inconvenient."""
     return admin_debug_delete_application(app_id)
+
+@router.get("/admin/debug/applications/{app_id}/raw")
+async def admin_debug_raw_application(
+    app_id: str,
+    request: Request,
+):
+    require_admin(request)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT row_to_json(a)
+                FROM applications a
+                WHERE id = %s
+                """,
+                (str(app_id),),
+            )
+
+            row = cur.fetchone()
+
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    return {
+        "ok": True,
+        "raw": row[0],
+    }
