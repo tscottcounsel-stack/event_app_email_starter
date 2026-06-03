@@ -1654,11 +1654,8 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
 
     app = _get_application_or_404(app_id)
 
-    if (
-        _current_status(app) in {"", "draft"}
-        and not _normalize_id(app.get("booth_id"))
-        and not _normalize_id(app.get("requested_booth_id"))
-):
+    if _current_status(app) != "approved":
+        raise HTTPException(status_code=400, detail="Payment is only available after organizer approval.")
 
     amount_cents = _get_amount_cents_from_app(app)
 
