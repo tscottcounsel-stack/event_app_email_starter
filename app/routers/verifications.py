@@ -644,8 +644,13 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
     _set_profile_state(row, data)
     db.commit()
 
-    price_id = "price_1Te5Rm6aMTKJugV5qV9Z7p24"
-    
+    price_id = _verification_price_id(role)
+    if not price_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Stripe verification price is not configured. Set STRIPE_PRICE_VERIFICATION_VENDOR or STRIPE_PRICE_VERIFICATION_ORGANIZER.",
+        )
+
     metadata = {
         "payment_type": "verification_fee",
         "verification": "true",
@@ -663,30 +668,14 @@ def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(g
         "metadata": metadata,
     }
 
-    if price_id:
-        # Annual verification billing: use a recurring Stripe Price created in Stripe.
-        # This keeps verification separate from premium subscriptions because the
-        # metadata still identifies the checkout as payment_type=verification_fee.
-        session_kwargs.update({
-            "mode": "subscription",
-            "line_items": [{"price": price_id, "quantity": 1}],
-            "subscription_data": {"metadata": metadata},
-        })
-    else:
-        # Legacy fallback for local/dev environments without Stripe recurring price env vars.
-        # Production should set STRIPE_PRICE_VERIFICATION_VENDOR to the $25/year Price ID.
-        session_kwargs.update({
-            "mode": "payment",
-            "line_items": [{
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {"name": f"VendCore {role.title()} Verification Fee"},
-                    "unit_amount": int(fee_amount * 100),
-                },
-                "quantity": 1,
-            }],
-            "payment_intent_data": {"metadata": metadata},
-        })
+    # Annual verification billing: use a recurring Stripe Price created in Stripe.
+    # This keeps verification separate from premium subscriptions because the
+    # metadata still identifies the checkout as payment_type=verification_fee.
+    session_kwargs.update({
+        "mode": "subscription",
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "subscription_data": {"metadata": metadata},
+    })
 
     try:
         session = stripe_sdk.checkout.Session.create(**session_kwargs)
