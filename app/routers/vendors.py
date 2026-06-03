@@ -72,6 +72,7 @@ def set_vendor_premium(
 
     email = (payload.get("email") or "").strip().lower()
     featured = bool(payload.get("featured", True))
+    promoted = bool(payload.get("promoted", featured))
 
     if not email:
         raise HTTPException(status_code=400, detail="Vendor email required")
@@ -81,23 +82,35 @@ def set_vendor_premium(
     vendor["email"] = email
     vendor["vendor_id"] = vendor.get("vendor_id") or email
     vendor["featured"] = featured
-    vendor["promoted"] = bool(payload.get("promoted", vendor.get("promoted", featured)))
+    vendor["promoted"] = promoted
 
-    if featured:
+    if featured or promoted:
         vendor["visibility_tier"] = "premium"
         vendor["visibilityTier"] = "premium"
         vendor["subscription_plan"] = vendor.get("subscription_plan") or vendor.get("subscriptionPlan") or vendor.get("plan") or "premium"
         vendor["subscription_status"] = vendor.get("subscription_status") or vendor.get("subscriptionStatus") or "active"
+    else:
+        # IMPORTANT: this is the path the admin "Remove Premium" button needs.
+        # Clear every public/persistent premium signal so old test accounts do
+        # not keep showing premium badges from stale profile/store flags.
+        vendor["visibility_tier"] = "standard"
+        vendor["visibilityTier"] = "standard"
+        vendor["subscription_plan"] = "free"
+        vendor["subscriptionPlan"] = "free"
+        vendor["plan"] = "free"
+        vendor["subscription_status"] = "inactive"
+        vendor["subscriptionStatus"] = "inactive"
 
-    upsert_vendor(email, vendor)
-    _upsert_profile_row(db, email=email, role="vendor", data=vendor)
+    updated = upsert_vendor(email, vendor)
+    _upsert_profile_row(db, email=email, role="vendor", data=updated)
     save_store()
 
     return {
         "ok": True,
         "email": email,
         "featured": featured,
-        "vendor": _vendor_public_payload(email, vendor),
+        "promoted": promoted,
+        "vendor": _vendor_public_payload(email, updated),
     }
 
 
@@ -368,9 +381,24 @@ def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, A
     incoming_subscription_plan = _safe_str(data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan"))
     incoming_subscription_status = _safe_str(data.get("subscription_status") or data.get("subscriptionStatus"))
 
-    row.visibility_tier = incoming_visibility_tier or row.visibility_tier
-    row.subscription_plan = incoming_subscription_plan or row.subscription_plan
-    row.subscription_status = incoming_subscription_status or row.subscription_status
+    # Allow admin tools to CLEAR stale premium/subscription values.
+    # The old `incoming or row.old` behavior made "Remove Premium" impossible
+    # because empty/standard/inactive values were ignored and old premium flags
+    # stayed in Postgres.
+    if any(key in data for key in ("visibility_tier", "visibilityTier")):
+        row.visibility_tier = incoming_visibility_tier or None
+    else:
+        row.visibility_tier = row.visibility_tier
+
+    if any(key in data for key in ("subscription_plan", "subscriptionPlan", "plan")):
+        row.subscription_plan = incoming_subscription_plan or None
+    else:
+        row.subscription_plan = row.subscription_plan
+
+    if any(key in data for key in ("subscription_status", "subscriptionStatus")):
+        row.subscription_status = incoming_subscription_status or None
+    else:
+        row.subscription_status = row.subscription_status
 
     if "featured" in data:
         row.featured = bool(data.get("featured"))
