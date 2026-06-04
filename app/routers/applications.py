@@ -244,6 +244,98 @@ def _first_booth_value(payload: Dict[str, Any]) -> str:
     return ""
 
 
+def _first_raw_booth_selection_value(payload: Dict[str, Any]) -> str:
+    """Return any saved booth-selection signal, including internal canvas ids.
+
+    This is used only for validation/completion. Display-facing booth fields
+    should continue using _first_booth_value so generated canvas ids are not
+    shown to vendors as the booth name.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in (
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
+        "selected_booth_id",
+        "selectedBoothId",
+        "booth_canvas_id",
+        "boothCanvasId",
+        "booth_label",
+        "boothLabel",
+        "booth_number",
+        "boothNumber",
+        "booth_name",
+        "boothName",
+    ):
+        value = _as_str(payload.get(key))
+        if value:
+            return value
+
+    booth = payload.get("booth")
+    if isinstance(booth, dict):
+        value = _as_str(
+            booth.get("id")
+            or booth.get("booth_id")
+            or booth.get("boothId")
+            or booth.get("label")
+            or booth.get("name")
+        )
+        if value:
+            return value
+
+    selected_booth = payload.get("selected_booth") or payload.get("selectedBooth")
+    if isinstance(selected_booth, dict):
+        value = _as_str(
+            selected_booth.get("id")
+            or selected_booth.get("booth_id")
+            or selected_booth.get("boothId")
+            or selected_booth.get("label")
+            or selected_booth.get("name")
+        )
+        if value:
+            return value
+
+    return ""
+
+
+def _has_booth_selection(app: Dict[str, Any]) -> bool:
+    """True when the application has any real booth/map/category selection.
+
+    The UI can currently save the selected booth as:
+    - human booth_id / requested_booth_id
+    - internal selected_booth_id / booth_canvas_id
+    - selected booth category when a booth is category-driven
+
+    Older submit/completion checks only accepted booth_id/requested_booth_id,
+    which caused the app to show a booth and price but still block submission.
+    """
+    if not isinstance(app, dict):
+        return False
+
+    if _first_raw_booth_selection_value(app):
+        return True
+
+    category = _as_str(
+        app.get("booth_category")
+        or app.get("requested_booth_category")
+        or app.get("selected_booth_category")
+        or app.get("selectedBoothCategory")
+        or app.get("category")
+    )
+    if _is_useful_category(category):
+        return True
+
+    # A saved booth price by itself is not ideal for display, but it proves a
+    # booth click/save happened and prevents false "select a booth" blocking.
+    if _price_to_cents(app.get("booth_price")) or _price_to_cents(app.get("booth_price_cents")):
+        return True
+
+    return False
+
+
 def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
     """Persist booth fields from payload without allowing generated canvas ids."""
     booth_value = _first_booth_value(payload)
@@ -253,6 +345,16 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         app["requested_booth_id"] = booth_value
         app["booth_label"] = booth_value
         app["booth_number"] = booth_value
+
+    internal_booth_id = _as_str(
+        payload.get("selected_booth_id")
+        or payload.get("selectedBoothId")
+        or payload.get("booth_canvas_id")
+        or payload.get("boothCanvasId")
+    )
+    if internal_booth_id:
+        app["selected_booth_id"] = internal_booth_id
+        app["booth_canvas_id"] = internal_booth_id
 
     booth_category = _as_str(
         payload.get("booth_category")
@@ -461,6 +563,8 @@ def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
     keys = [
         "booth_id",
         "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
         "assigned_booth_id",
         "assignedBoothId",
         "booth_number",
@@ -471,6 +575,8 @@ def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
         "boothName",
         "selected_booth_id",
         "selectedBoothId",
+        "booth_canvas_id",
+        "boothCanvasId",
     ]
     for key in keys:
         raw = app.get(key)
@@ -928,6 +1034,7 @@ def _resolve_selected_booth_category(
         app.get("booth_category"),
         app.get("requested_booth_category"),
         app.get("selected_booth_category"),
+        app.get("selectedBoothCategory"),
         app.get("category"),
     ]
     for candidate in direct_candidates:
@@ -939,7 +1046,14 @@ def _resolve_selected_booth_category(
     if _is_useful_category(derived):
         return str(derived)
 
-    selected_booth_id = _normalize_id(app.get("booth_id") or app.get("requested_booth_id") or "")
+    selected_booth_id = _normalize_id(
+        app.get("booth_id")
+        or app.get("requested_booth_id")
+        or app.get("selected_booth_id")
+        or app.get("selectedBoothId")
+        or app.get("booth_canvas_id")
+        or ""
+    )
     if selected_booth_id:
         for item in booth_categories:
             if not isinstance(item, dict):
@@ -1205,7 +1319,7 @@ def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
         if len(docs_map.get(key) or []) > 0:
             uploaded_document_count += 1
 
-    booth_selected = bool(_normalize_id(app.get("booth_id") or app.get("requested_booth_id")))
+    booth_selected = _has_booth_selection(app)
 
     total_items = len(compliance_items) + len(document_items) + 1
     completed_items = completed_compliance_count + uploaded_document_count + (1 if booth_selected else 0)
@@ -1748,9 +1862,26 @@ def vendor_submit_application(app_id: str) -> Dict[str, Any]:
     if status not in {"", "draft"}:
         raise HTTPException(status_code=400, detail="Application already submitted.")
 
-    booth_id = _normalize_id(app.get("booth_id") or app.get("requested_booth_id"))
-    if not booth_id:
+    if not _has_booth_selection(app):
         raise HTTPException(status_code=400, detail="You must select a booth before submitting.")
+
+    # If only an internal map id/category was saved, make sure the application
+    # still has a human-safe requested_booth_id for downstream organizer views.
+    if not _normalize_id(app.get("booth_id") or app.get("requested_booth_id")):
+        fallback_booth = _first_booth_value(app)
+        if not fallback_booth:
+            fallback_booth = _as_str(
+                app.get("booth_category")
+                or app.get("requested_booth_category")
+                or app.get("category")
+                or app.get("selected_booth_id")
+                or app.get("booth_canvas_id")
+            )
+        if fallback_booth:
+            app["booth_id"] = fallback_booth
+            app["requested_booth_id"] = fallback_booth
+            app.setdefault("booth_label", fallback_booth)
+            app.setdefault("booth_number", fallback_booth)
 
     _persist_booth_category(app)
 
@@ -1955,6 +2086,8 @@ def create_vendor_application(
         "booth_number": booth_value or None,
         "booth_category": booth_category_value or None,
         "requested_booth_category": booth_category_value or None,
+        "selected_booth_id": _as_str(payload.get("selected_booth_id") or payload.get("selectedBoothId") or payload.get("booth_canvas_id") or payload.get("boothCanvasId")) or None,
+        "booth_canvas_id": _as_str(payload.get("booth_canvas_id") or payload.get("boothCanvasId") or payload.get("selected_booth_id") or payload.get("selectedBoothId")) or None,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
         "archived": False,
