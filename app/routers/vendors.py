@@ -72,53 +72,64 @@ def set_vendor_premium(
 
     email = (payload.get("email") or "").strip().lower()
     featured = bool(payload.get("featured", True))
-    promoted = bool(payload.get("promoted", featured))
 
     if not email:
         raise HTTPException(status_code=400, detail="Vendor email required")
 
-    vendor = _load_vendor_from_db(db, email) or _VENDORS.get(email) or {"email": email, "vendor_id": email}
+    vendor = _load_vendor_from_db(db, email) or _VENDORS.get(email)
 
-    vendor["email"] = email
-    vendor["vendor_id"] = vendor.get("vendor_id") or email
-    vendor["featured"] = featured
-    vendor["promoted"] = promoted
+    if not isinstance(vendor, dict):
+        raise HTTPException(status_code=404, detail="Vendor not found")
 
-    if featured or promoted:
-        vendor["visibility_tier"] = "premium"
-        vendor["visibilityTier"] = "premium"
-        vendor["subscription_plan"] = vendor.get("subscription_plan") or vendor.get("subscriptionPlan") or vendor.get("plan") or "premium"
-        vendor["subscription_status"] = vendor.get("subscription_status") or vendor.get("subscriptionStatus") or "active"
-    else:
-        # IMPORTANT: this is the path the admin "Remove Premium" button needs.
-        # Clear every public/persistent premium signal so old test accounts do
-        # not keep showing premium badges from stale profile/store flags.
+    # HARD RESET PREMIUM FLAGS
+    if not featured:
+        vendor["featured"] = False
+        vendor["promoted"] = False
+        vendor["premium"] = False
+        vendor["is_premium"] = False
+
         vendor["visibility_tier"] = "standard"
         vendor["visibilityTier"] = "standard"
+
         vendor["subscription_plan"] = "free"
         vendor["subscriptionPlan"] = "free"
         vendor["plan"] = "free"
+
         vendor["subscription_status"] = "inactive"
         vendor["subscriptionStatus"] = "inactive"
 
+    else:
+        vendor["featured"] = True
+        vendor["promoted"] = True
+        vendor["premium"] = True
+        vendor["is_premium"] = True
+
+        vendor["visibility_tier"] = "premium"
+        vendor["visibilityTier"] = "premium"
+
+        vendor["subscription_plan"] = "premium"
+        vendor["subscriptionPlan"] = "premium"
+        vendor["plan"] = "premium"
+
+        vendor["subscription_status"] = "active"
+        vendor["subscriptionStatus"] = "active"
+
     updated = upsert_vendor(email, vendor)
-    _upsert_profile_row(db, email=email, role="vendor", data=updated)
+
+    _upsert_profile_row(
+        db,
+        email=email,
+        role="vendor",
+        data=updated,
+    )
+
     save_store()
 
     return {
         "ok": True,
         "email": email,
         "featured": featured,
-        "promoted": promoted,
-        "vendor": _vendor_public_payload(email, updated),
     }
-
-
-def _require_admin(user: Dict[str, Any]) -> None:
-    role = _safe_str(user.get("role")).lower()
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
 
 @router.get("/admin/force-verify-vendor")
 def force_verify_vendor_help():
