@@ -870,17 +870,18 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
     """Resolve the booth price for an application.
 
-    Checkout must use the booth price saved by the map click first. The event
-    default/category fallback can be stale ($100) and should not override a
-    saved selected-booth price ($1).
+    Checkout must use the current saved booth price, not an old Stripe checkout
+    amount. A previous checkout_session_id can point to a stale $100 Stripe
+    session even after the selected booth was corrected to $1.
     """
 
     status = _as_str(app.get("status")).lower()
     payment_status = _as_str(app.get("payment_status")).lower()
 
-    # Once a Stripe checkout is created or a payment is completed, preserve that
-    # locked amount so paid sessions do not drift if the map changes later.
-    if status in {"paid"} or payment_status in {"paid"} or app.get("checkout_session_id"):
+    # Only preserve locked checkout/paid amounts after the application is paid.
+    # Do NOT treat checkout_session_id alone as locked; unpaid checkout sessions
+    # can be stale and should be replaced.
+    if status in {"paid"} or payment_status in {"paid"}:
         for key in (
             "checkout_amount_cents",
             "checkoutAmountCents",
@@ -895,9 +896,7 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
             if cents:
                 return cents
 
-    # For draft/submitted/approved applications, the saved booth-selection price
-    # is the source of truth. This prevents Stripe from falling back to old event
-    # default pricing such as $100 when the selected booth saved as $1.
+    # For draft/submitted/approved applications, saved booth/map values win.
     for key in (
         "booth_price_cents",
         "boothPriceCents",
@@ -1948,6 +1947,22 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     if _current_status(app) != "approved":
         raise HTTPException(status_code=400, detail="Payment is only available after organizer approval.")
 
+    # Clear any unpaid/stale Stripe checkout state before calculating amount.
+    # This forces a new Checkout Session and prevents an old $100 session from
+    # being reused after the selected booth was corrected to $1.
+    if _as_str(app.get("payment_status")).lower() != "paid":
+        for key in (
+            "checkout_session_id",
+            "checkout_created_at",
+            "checkout_amount_cents",
+            "checkoutAmountCents",
+            "checkout_platform_fee_cents",
+            "checkout_platform_fee_percent",
+            "checkout_organizer_payout_cents",
+            "checkout_organizer_stripe_account_id",
+        ):
+            app.pop(key, None)
+
     amount_cents = _get_amount_cents_from_app(app)
 
     secret_key = _as_str(os.getenv("STRIPE_SECRET_KEY"))
@@ -1990,6 +2005,10 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
     if organizer_stripe_account_id:
         payment_intent_data["application_fee_amount"] = platform_fee_cents
         payment_intent_data["transfer_data"] = {"destination": organizer_stripe_account_id}
+
+    # Recalculate immediately before creating Stripe Checkout so the live
+    # session uses the latest saved booth amount.
+    amount_cents = _get_amount_cents_from_app(app)
 
     session = stripe.checkout.Session.create(
         mode="payment",
