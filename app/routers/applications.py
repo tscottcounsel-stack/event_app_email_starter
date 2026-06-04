@@ -870,52 +870,71 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
     """Resolve the booth price for an application.
 
-    Important: event/map booth pricing must win over old application fallback
-    amounts. Several older draft applications have stale default values such as
-    10000 cents / $100 saved on the application, while the actual booth on the
-    map may be $1. Looking at the stale app fields first causes the vendor
-    application summary and Stripe checkout to show the wrong amount.
-
-    Truly locked/paid/checkout prices still win, but ordinary draft fallback
-    fields are only used if the booth cannot be resolved from the event diagram.
+    Checkout must use the booth price saved by the map click first. The event
+    default/category fallback can be stale ($100) and should not override a
+    saved selected-booth price ($1).
     """
 
-    # Keep truly locked prices authoritative after approval/payment/checkout.
+    status = _as_str(app.get("status")).lower()
+    payment_status = _as_str(app.get("payment_status")).lower()
+
+    # Once a Stripe checkout is created or a payment is completed, preserve that
+    # locked amount so paid sessions do not drift if the map changes later.
+    if status in {"paid"} or payment_status in {"paid"} or app.get("checkout_session_id"):
+        for key in (
+            "checkout_amount_cents",
+            "checkoutAmountCents",
+            "locked_price_cents",
+            "lockedPriceCents",
+            "approved_price_cents",
+            "approvedPriceCents",
+            "paid_amount_cents",
+            "paidAmountCents",
+        ):
+            cents = _price_to_cents(app.get(key))
+            if cents:
+                return cents
+
+    # For draft/submitted/approved applications, the saved booth-selection price
+    # is the source of truth. This prevents Stripe from falling back to old event
+    # default pricing such as $100 when the selected booth saved as $1.
     for key in (
-        "locked_price_cents",
-        "lockedPriceCents",
-        "approved_price_cents",
-        "approvedPriceCents",
-        "checkout_amount_cents",
-        "checkoutAmountCents",
-        "paid_amount_cents",
-        "paidAmountCents",
+        "booth_price_cents",
+        "boothPriceCents",
+        "amount_cents",
+        "amountCents",
+        "resolved_price_cents",
+        "resolvedPriceCents",
+        "price_cents",
+        "priceCents",
+        "reserved_booth_price_cents",
+        "reservedBoothPriceCents",
     ):
         cents = _price_to_cents(app.get(key))
         if cents:
             return cents
 
-    # The live event diagram/map is the source of truth for selected booth price.
+    # Dollar fields are valid if cents were not stored.
+    for key in (
+        "booth_price",
+        "boothPrice",
+        "amount_due",
+        "amountDue",
+        "total_due",
+        "totalDue",
+        "total_price",
+        "totalPrice",
+        "price",
+        "amount",
+    ):
+        cents = _price_to_cents(app.get(key))
+        if cents:
+            return cents
+
+    # Last resort only: resolve from current event diagram/map/defaults.
     event_cents = _find_event_booth_price_cents(app)
     if event_cents:
         return event_cents
-
-    # Only fall back to saved application values if the booth cannot be found.
-    for key in (
-        "price_cents",
-        "priceCents",
-        "amount_cents",
-        "amountCents",
-        "booth_price_cents",
-        "boothPriceCents",
-        "reserved_booth_price_cents",
-        "reservedBoothPriceCents",
-        "resolved_price_cents",
-        "resolvedPriceCents",
-    ):
-        cents = _price_to_cents(app.get(key))
-        if cents:
-            return cents
 
     return None
 
@@ -923,9 +942,11 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
 def _persist_resolved_booth_price(app: Dict[str, Any]) -> Optional[int]:
     cents = _find_booth_price_cents_for_app(app)
     if cents:
-        app["resolved_price_cents"] = cents
-        app["amount_cents"] = cents
-        app.setdefault("price_cents", cents)
+        app["resolved_price_cents"] = int(cents)
+        app["amount_cents"] = int(cents)
+        app["price_cents"] = int(cents)
+        app["booth_price_cents"] = int(cents)
+        app["booth_price"] = round(int(cents) / 100, 2)
     return cents
 
 
@@ -1384,13 +1405,22 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_amount_cents_from_app(app: Dict[str, Any]) -> int:
-    cents = _persist_resolved_booth_price(app)
+    # Stripe checkout must not use stale event fallback values.
+    # Read saved app price fields directly first, then persist the result.
+    cents = _find_booth_price_cents_for_app(app)
     if not cents:
         raise HTTPException(
             status_code=400,
             detail="Could not determine booth price for this application.",
         )
-    return int(cents)
+
+    cents = int(cents)
+    app["resolved_price_cents"] = cents
+    app["amount_cents"] = cents
+    app["price_cents"] = cents
+    app["booth_price_cents"] = cents
+    app["booth_price"] = round(cents / 100, 2)
+    return cents
 
 
 def _payment_exists_for_application(app_id: str) -> bool:
@@ -1951,6 +1981,9 @@ def vendor_pay_now(app_id: str) -> Dict[str, Any]:
         "platform_fee_cents": str(platform_fee_cents),
         "organizer_payout_cents": str(organizer_payout_cents),
         "organizer_stripe_account_id": organizer_stripe_account_id,
+        "selected_booth_price_cents": str(amount_cents),
+        "booth_id": str(app.get("booth_id") or app.get("requested_booth_id") or app.get("selected_booth_id") or ""),
+        "booth_category": str(app.get("booth_category") or app.get("requested_booth_category") or ""),
     }
 
     payment_intent_data: Dict[str, Any] = {"metadata": payment_metadata}
