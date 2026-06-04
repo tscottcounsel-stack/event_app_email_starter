@@ -670,52 +670,77 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
         or app.get("booth")
     )
 
+    selected_category = _as_str(
+        app.get("booth_category")
+        or app.get("requested_booth_category")
+        or app.get("selected_booth_category")
+        or app.get("vendor_category")
+        or app.get("category")
+    ).lower()
+
     event = _get_event_for_app(app)
     diagram = _get_diagram_for_event(app)
 
-    if booth_id:
-        for booth in _extract_booths_from_diagram(diagram):
-            booth_match_id = _normalize_id(
-                booth.get("id")
-                or booth.get("booth_id")
-                or booth.get("boothId")
-            )
-            if booth_match_id != booth_id:
-                continue
-
+    def booth_price(booth: Dict[str, Any]) -> Optional[int]:
+        meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+        for source in (booth, meta):
             for key in (
                 "price_cents",
                 "priceCents",
                 "amount_cents",
                 "amountCents",
+                "booth_price_cents",
+                "boothPriceCents",
                 "price",
                 "amount",
+                "booth_price",
+                "boothPrice",
             ):
-                cents = _price_to_cents(booth.get(key))
+                cents = _price_to_cents(source.get(key))
                 if cents:
                     return cents
+        return None
 
-        if isinstance(event, dict):
-            for booth in _extract_booths_from_event(event):
-                booth_match_id = _normalize_id(
-                    booth.get("id")
-                    or booth.get("booth_id")
-                    or booth.get("boothId")
-                )
-                if booth_match_id != booth_id:
-                    continue
+    def booth_matches(booth: Dict[str, Any]) -> bool:
+        if booth_id:
+            candidates = _booth_match_values(booth)
+            if booth_id.lower() in candidates:
+                return True
 
-                for key in (
-                    "price_cents",
-                    "priceCents",
-                    "amount_cents",
-                    "amountCents",
-                    "price",
-                    "amount",
-                ):
-                    cents = _price_to_cents(booth.get(key))
-                    if cents:
-                        return cents
+        if selected_category:
+            meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+            category = _as_str(
+                booth.get("category")
+                or booth.get("booth_category")
+                or booth.get("category_name")
+                or booth.get("categoryName")
+                or booth.get("category_label")
+                or booth.get("categoryLabel")
+                or booth.get("vendor_category")
+                or booth.get("vendorCategory")
+                or meta.get("category")
+                or meta.get("booth_category")
+                or meta.get("categoryName")
+            ).lower()
+            if category and category == selected_category:
+                return True
+
+        return False
+
+    diagram_booths = _extract_booths_from_diagram(diagram)
+    event_booths = _extract_booths_from_event(event) if isinstance(event, dict) else []
+
+    for booth in diagram_booths:
+        if booth_matches(booth):
+            cents = booth_price(booth)
+            if cents:
+                return cents
+
+    for booth in event_booths:
+        if booth_matches(booth):
+            cents = booth_price(booth)
+            if cents:
+                return cents
 
     if isinstance(event, dict):
         for root_key in ("payment_settings", "paymentSettings"):
@@ -737,27 +762,54 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
 
 
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
+    """Resolve the booth price for an application.
+
+    Important: event/map booth pricing must win over old application fallback
+    amounts. Several older draft applications have stale default values such as
+    10000 cents / $100 saved on the application, while the actual booth on the
+    map may be $1. Looking at the stale app fields first causes the vendor
+    application summary and Stripe checkout to show the wrong amount.
+
+    Truly locked/paid/checkout prices still win, but ordinary draft fallback
+    fields are only used if the booth cannot be resolved from the event diagram.
+    """
+
+    # Keep truly locked prices authoritative after approval/payment/checkout.
     for key in (
         "locked_price_cents",
         "lockedPriceCents",
-        "price_cents",
-        "priceCents",
-        "amount_cents",
-        "amountCents",
         "approved_price_cents",
         "approvedPriceCents",
-        "booth_price_cents",
-        "boothPriceCents",
-        "reserved_booth_price_cents",
-        "reservedBoothPriceCents",
+        "checkout_amount_cents",
+        "checkoutAmountCents",
+        "paid_amount_cents",
+        "paidAmountCents",
     ):
         cents = _price_to_cents(app.get(key))
         if cents:
             return cents
 
+    # The live event diagram/map is the source of truth for selected booth price.
     event_cents = _find_event_booth_price_cents(app)
     if event_cents:
         return event_cents
+
+    # Only fall back to saved application values if the booth cannot be found.
+    for key in (
+        "price_cents",
+        "priceCents",
+        "amount_cents",
+        "amountCents",
+        "booth_price_cents",
+        "boothPriceCents",
+        "reserved_booth_price_cents",
+        "reservedBoothPriceCents",
+        "resolved_price_cents",
+        "resolvedPriceCents",
+    ):
+        cents = _price_to_cents(app.get(key))
+        if cents:
+            return cents
 
     return None
 
