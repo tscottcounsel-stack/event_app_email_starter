@@ -127,7 +127,57 @@ def force_verify_vendor_help():
         "detail": "Use POST with JSON body {\"email\": \"vendor@example.com\"}. This admin route updates the stored vendor verification display fields.",
     }
 
+@router.post("/admin/unverify-vendor")
+def unverify_vendor(
+    payload: dict,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _require_admin(user)
 
+    email = _safe_str(payload.get("email")).lower()
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Vendor email required")
+
+    vendor = _load_vendor_from_db(db, email) or _VENDORS.get(email)
+
+    if not isinstance(vendor, dict):
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    vendor["verified"] = False
+    vendor["verification_status"] = "unverified"
+    vendor["public_verification_status"] = "not_verified"
+    vendor["public_verification_label"] = "Verification available"
+    vendor["review_status"] = "pending"
+
+    # Clear premium state too
+    vendor["featured"] = False
+    vendor["promoted"] = False
+    vendor["visibility_tier"] = "standard"
+    vendor["visibilityTier"] = "standard"
+    vendor["subscription_plan"] = "free"
+    vendor["subscriptionPlan"] = "free"
+    vendor["plan"] = "free"
+    vendor["subscription_status"] = "inactive"
+    vendor["subscriptionStatus"] = "inactive"
+
+    updated = upsert_vendor(email, vendor)
+
+    _upsert_profile_row(
+        db,
+        email=email,
+        role="vendor",
+        data=updated,
+    )
+
+    save_store()
+
+    return {
+        "ok": True,
+        "email": email,
+        "vendor": _vendor_public_payload(email, updated),
+    }
 @router.post("/admin/force-verify-vendor")
 def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     _require_admin(user)
