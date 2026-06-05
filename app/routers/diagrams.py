@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# VENDCORE_DIAGRAM_STORE_SYNC_FIX_2026_06_05
+
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -10,6 +12,7 @@ from app.db import get_db
 from app.models.diagram import Diagram
 from app.models.event import Event
 from app.routers.applications import _APPLICATIONS
+from app.store import _DIAGRAMS, save_store
 
 router = APIRouter(tags=["Diagrams"])
 
@@ -200,6 +203,15 @@ def _save_diagram(db: Session, event_id: int, payload: Dict[str, Any]) -> Dict[s
     db.commit()
     db.refresh(slot)
 
+    # Keep the legacy runtime store in sync for any old helpers still reading it.
+    # Postgres remains the source of truth, but this prevents empty _DIAGRAMS
+    # from breaking older application flows during the transition.
+    try:
+        _DIAGRAMS[int(eid)] = {"diagram": slot.diagram, "version": int(slot.version or 0)}
+        save_store()
+    except Exception:
+        pass
+
     return {
         "diagram": slot.diagram,
         "version": int(slot.version or 0),
@@ -212,6 +224,10 @@ def get_event_diagram_public(event_id: int, db: Session = Depends(get_db)):
     get_event_or_404(db, event_id)
     _expire_reservations_for_event(event_id)
     slot = ensure_slot(db, event_id)
+    try:
+        _DIAGRAMS[int(event_id)] = {"diagram": slot.diagram or {"elements": [], "meta": {}}, "version": int(slot.version or 0)}
+    except Exception:
+        pass
     return {
         "diagram": slot.diagram or {"elements": [], "meta": {}},
         "version": int(slot.version or 0),

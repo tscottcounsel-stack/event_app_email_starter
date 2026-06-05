@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# VENDCORE_POSTGRES_SOURCE_FIX_2026_06_05
+
 import os
 import re
 import time
@@ -56,6 +58,117 @@ except Exception:
 _APPLICATIONS = store._APPLICATIONS
 _EVENTS = store._EVENTS
 _PAYMENTS = store._PAYMENTS
+
+
+def _db_session_or_none():
+    """Open a short-lived SQLAlchemy session when available.
+
+    The application router still stores application records in the file/runtime
+    store, but events and diagrams are now saved in Postgres. These helpers let
+    the application serializer resolve booth/category/price from the same
+    Postgres rows the map endpoint serves, instead of the empty _DIAGRAMS store.
+    """
+    try:
+        from app.db import SessionLocal  # type: ignore
+    except Exception:
+        return None
+    try:
+        return SessionLocal()
+    except Exception:
+        return None
+
+
+def _event_id_from_app(app: Dict[str, Any]) -> Optional[int]:
+    raw = (
+        app.get("event_id")
+        or app.get("eventId")
+        or app.get("event")
+        or app.get("eventID")
+    )
+    text = _normalize_id(raw)
+    if not text:
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
+def _row_to_event_dict(row: Any) -> Dict[str, Any]:
+    if row is None:
+        return {}
+    payload: Dict[str, Any] = {}
+    for key in (
+        "id", "title", "description", "venue_name", "street_address", "city",
+        "state", "zip_code", "category", "organizer_email", "owner_email",
+        "organizer_id", "owner_id", "created_by", "published", "archived",
+        "requirements_published", "layout_published", "stripe_connect_account_id",
+        "stripe_account_id", "organizer_stripe_account_id",
+    ):
+        if hasattr(row, key):
+            value = getattr(row, key)
+            if value is not None:
+                payload[key] = value
+    # Optional JSON-ish columns used by some deployments.
+    for key in ("requirements", "data", "settings", "metadata", "extra", "payment_settings", "paymentSettings"):
+        if hasattr(row, key):
+            value = getattr(row, key)
+            if isinstance(value, dict):
+                payload[key] = value
+    return payload
+
+
+def _get_event_from_postgres(event_id: Any) -> Optional[Dict[str, Any]]:
+    try:
+        eid = int(event_id)
+    except Exception:
+        return None
+    db = _db_session_or_none()
+    if db is None:
+        return None
+    try:
+        from app.models.event import Event  # type: ignore
+        row = db.query(Event).filter(Event.id == int(eid)).first()
+        payload = _row_to_event_dict(row)
+        return payload or None
+    except Exception:
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _get_diagram_from_postgres(event_id: Any) -> Optional[Dict[str, Any]]:
+    try:
+        eid = int(event_id)
+    except Exception:
+        return None
+    db = _db_session_or_none()
+    if db is None:
+        return None
+    try:
+        from app.models.diagram import Diagram  # type: ignore
+        row = (
+            db.query(Diagram)
+            .filter(Diagram.event_id == int(eid))
+            .order_by(Diagram.id.desc())
+            .first()
+        )
+        if not row:
+            return None
+        diagram = getattr(row, "diagram", None)
+        if isinstance(diagram, dict):
+            return {"diagram": diagram, "version": int(getattr(row, "version", 0) or 0)}
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 try:
     from app.routers.verifications import get_vendor_doc_vault  # type: ignore
@@ -515,8 +628,15 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         internal_booth_id = _as_str(booth_obj.get("id") or booth_obj.get("booth_id") or booth_obj.get("boothId"))
 
     booth_changed = False
-    if booth_value and booth_value != previous_booth:
-        booth_changed = True
+    current_human_booth = _as_str(
+        app.get("booth_id")
+        or app.get("requested_booth_id")
+        or app.get("booth_label")
+        or app.get("booth_number")
+    )
+    if booth_value:
+        if booth_value != current_human_booth:
+            booth_changed = True
         app["booth_id"] = booth_value
         app["requested_booth_id"] = booth_value
         app["booth_label"] = booth_value
@@ -726,6 +846,12 @@ def _get_event_for_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not event_key:
         return None
 
+    # Postgres is the source of truth for events. Fall back to the legacy store
+    # only for old deployments that have not migrated yet.
+    postgres_event = _get_event_from_postgres(event_key)
+    if isinstance(postgres_event, dict) and postgres_event:
+        return postgres_event
+
     events = _events_store()
     event = events.get(event_key)
     if event is None and event_key.isdigit():
@@ -743,6 +869,12 @@ def _get_diagram_for_event(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     event_key = _normalize_id(event_id)
     if not event_key:
         return None
+
+    # Postgres is the source of truth for diagrams. The old _DIAGRAMS store can
+    # be empty on Railway restarts and must not be the first lookup.
+    postgres_diagram = _get_diagram_from_postgres(event_key)
+    if isinstance(postgres_diagram, dict) and postgres_diagram:
+        return postgres_diagram
 
     diagrams = getattr(store, "_DIAGRAMS", {})
     diagram = diagrams.get(event_key)
@@ -1331,15 +1463,39 @@ def _merge_requirement_roots(*roots: Dict[str, Any]) -> Dict[str, Any]:
 def _store_requirement_payload_for_event(event_id: Any) -> Dict[str, Any]:
     requirements_store = getattr(store, "_REQUIREMENTS", {})
     event_key = _normalize_id(event_id)
-    if not event_key or not isinstance(requirements_store, dict):
+    if not event_key:
         return {}
-    candidates = [event_key]
-    if event_key.isdigit():
-        candidates.append(int(event_key))
-    for key in candidates:
-        value = requirements_store.get(key)
-        if isinstance(value, dict):
-            return value
+
+    if isinstance(requirements_store, dict):
+        candidates = [event_key]
+        if event_key.isdigit():
+            candidates.append(int(event_key))
+        for key in candidates:
+            value = requirements_store.get(key)
+            if isinstance(value, dict):
+                return value
+
+    # Fallback for deployments that have requirements embedded in a SQL event
+    # JSON/data/settings column. Event model in the current app does not require
+    # those columns, so this is intentionally best-effort.
+    pg_event = _get_event_from_postgres(event_key)
+    if isinstance(pg_event, dict):
+        for key in (
+            "requirements",
+            "global",
+            "globalRequirements",
+            "global_requirements",
+            "allVendorRequirements",
+            "all_vendor_requirements",
+            "appliesToAllVendors",
+            "applies_to_all_vendors",
+            "categories",
+            "categoryRequirements",
+            "category_requirements",
+        ):
+            value = pg_event.get(key)
+            if isinstance(value, dict):
+                return {key: value} if key != "requirements" else value
     return {}
 
 
