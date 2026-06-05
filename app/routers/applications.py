@@ -478,33 +478,15 @@ def _first_raw_booth_selection_value(payload: Dict[str, Any]) -> str:
 
 
 def _has_booth_selection(app: Dict[str, Any]) -> bool:
-    """True when the application has any real booth/map/category selection.
+    """True only when the application has a real booth/map selection.
 
-    The UI can currently save the selected booth as:
-    - human booth_id / requested_booth_id
-    - internal selected_booth_id / booth_canvas_id
-    - selected booth category when a booth is category-driven
-
-    Older submit/completion checks only accepted booth_id/requested_booth_id,
-    which caused the app to show a booth and price but still block submission.
+    Do NOT treat category alone as a selected booth. That was causing
+    "No booth selected" apps to look complete and keep the stale $100 fallback.
     """
     if not isinstance(app, dict):
         return False
 
-    if _first_raw_booth_selection_value(app):
-        return True
-
-    category = _as_str(
-        app.get("booth_category")
-        or app.get("requested_booth_category")
-        or app.get("selected_booth_category")
-        or app.get("selectedBoothCategory")
-        or app.get("category")
-    )
-    if _is_useful_category(category):
-        return True
-
-    return False
+    return bool(_first_raw_booth_selection_value(app))
 
 
 def _selected_booth_object(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -518,33 +500,46 @@ def _selected_booth_object(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _price_from_selected_booth_payload(payload: Dict[str, Any]) -> Optional[int]:
-    """Read the price from the newly selected booth object/payload first."""
+    """Read price from the newly selected booth object/payload first.
+
+    Cents fields must stay cents. A Booth 6 payload with booth_price_cents=100
+    means $1.00, not $100.00.
+    """
     booth_obj = _selected_booth_object(payload)
     meta = booth_obj.get("meta") if isinstance(booth_obj.get("meta"), dict) else {}
+
+    cent_keys = (
+        "price_cents",
+        "priceCents",
+        "amount_cents",
+        "amountCents",
+        "booth_price_cents",
+        "boothPriceCents",
+        "selected_booth_price_cents",
+        "selectedBoothPriceCents",
+    )
+    dollar_keys = (
+        "price",
+        "amount",
+        "booth_price",
+        "boothPrice",
+        "selected_booth_price",
+        "selectedBoothPrice",
+        "total_due",
+        "totalDue",
+        "amount_due",
+        "amountDue",
+    )
+
     for source in (booth_obj, meta, payload):
         if not isinstance(source, dict):
             continue
-        for key in (
-            "price_cents",
-            "priceCents",
-            "amount_cents",
-            "amountCents",
-            "booth_price_cents",
-            "boothPriceCents",
-            "selected_booth_price_cents",
-            "selectedBoothPriceCents",
-            "price",
-            "amount",
-            "booth_price",
-            "boothPrice",
-            "selected_booth_price",
-            "selectedBoothPrice",
-            "total_due",
-            "totalDue",
-            "amount_due",
-            "amountDue",
-        ):
-            cents = _price_to_cents(source.get(key))
+        for key in cent_keys:
+            cents = _price_to_cents(source.get(key), assume_cents=True)
+            if cents:
+                return cents
+        for key in dollar_keys:
+            cents = _price_to_cents(source.get(key), assume_cents=False)
             if cents:
                 return cents
     return None
@@ -934,13 +929,25 @@ def _app_booth_candidates(app: Dict[str, Any]) -> set[str]:
     return values
 
 
-def _price_to_cents(value: Any) -> Optional[int]:
+def _price_to_cents(value: Any, *, assume_cents: bool = False) -> Optional[int]:
+    """Convert a value to cents.
+
+    IMPORTANT:
+    - fields named *_cents are already cents (100 == $1.00)
+    - dollar fields are dollars (1 == $1.00)
+    Older code treated an integer 100 from booth_price_cents as $100.00.
+    That is the source of the repeated $1 -> $100 regression.
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if value >= 1000 else value * 100 if value > 0 else None
+        if value <= 0:
+            return None
+        return int(value) if assume_cents else int(round(value * 100))
     if isinstance(value, float):
-        return int(round(value * 100)) if value > 0 else None
+        if value <= 0:
+            return None
+        return int(round(value)) if assume_cents else int(round(value * 100))
     if isinstance(value, str):
         text = value.strip().replace("$", "").replace(",", "")
         if not text:
@@ -949,17 +956,23 @@ def _price_to_cents(value: Any) -> Optional[int]:
             number = float(text)
         except Exception:
             return None
-        return int(round(number * 100)) if number > 0 else None
+        if number <= 0:
+            return None
+        return int(round(number)) if assume_cents else int(round(number * 100))
     if isinstance(value, dict):
         for key in (
             "price_cents",
             "priceCents",
             "amount_cents",
             "amountCents",
-            "price",
-            "amount",
+            "booth_price_cents",
+            "boothPriceCents",
         ):
-            cents = _price_to_cents(value.get(key))
+            cents = _price_to_cents(value.get(key), assume_cents=True)
+            if cents:
+                return cents
+        for key in ("price", "amount", "booth_price", "boothPrice"):
+            cents = _price_to_cents(value.get(key), assume_cents=False)
             if cents:
                 return cents
     return None
@@ -1144,20 +1157,22 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
 
     def booth_price(booth: Dict[str, Any]) -> Optional[int]:
         meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+        cent_keys = (
+            "price_cents",
+            "priceCents",
+            "amount_cents",
+            "amountCents",
+            "booth_price_cents",
+            "boothPriceCents",
+        )
+        dollar_keys = ("price", "amount", "booth_price", "boothPrice")
         for source in (booth, meta):
-            for key in (
-                "price_cents",
-                "priceCents",
-                "amount_cents",
-                "amountCents",
-                "booth_price_cents",
-                "boothPriceCents",
-                "price",
-                "amount",
-                "booth_price",
-                "boothPrice",
-            ):
-                cents = _price_to_cents(source.get(key))
+            for key in cent_keys:
+                cents = _price_to_cents(source.get(key), assume_cents=True)
+                if cents:
+                    return cents
+            for key in dollar_keys:
+                cents = _price_to_cents(source.get(key), assume_cents=False)
                 if cents:
                     return cents
         return None
@@ -2388,13 +2403,23 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
         app["documents"] = normalized_docs
         app["docs"] = normalized_docs
 
-    booth_price = payload.get("booth_price")
-    if booth_price is not None:
-        cents = _price_to_cents(booth_price)
-        if cents:
-            app["booth_price_cents"] = cents
-            app["amount_cents"] = cents
-            app["resolved_price_cents"] = cents
+    explicit_cents = None
+    for key in ("booth_price_cents", "selected_booth_price_cents", "price_cents", "amount_cents", "resolved_price_cents", "total_cents"):
+        if key in payload:
+            explicit_cents = _price_to_cents(payload.get(key), assume_cents=True)
+            if explicit_cents:
+                break
+    if not explicit_cents and "booth_price" in payload:
+        explicit_cents = _price_to_cents(payload.get("booth_price"), assume_cents=False)
+    if explicit_cents:
+        app["booth_price_cents"] = explicit_cents
+        app["amount_cents"] = explicit_cents
+        app["resolved_price_cents"] = explicit_cents
+        app["price_cents"] = explicit_cents
+        app["total_cents"] = explicit_cents
+        app["booth_price"] = round(explicit_cents / 100, 2)
+        app["amount_due"] = round(explicit_cents / 100, 2)
+        app["total_price"] = round(explicit_cents / 100, 2)
 
     vendor_name = _as_str(payload.get("vendor_name"))
     vendor_email = _as_str(payload.get("vendor_email"))
@@ -2698,13 +2723,23 @@ def create_vendor_application(
         "document_requests": [],
     }
 
-    booth_price = payload.get("booth_price")
-    if booth_price is not None:
-        cents = _price_to_cents(booth_price)
-        if cents:
-            app["booth_price_cents"] = cents
-            app["amount_cents"] = cents
-            app["resolved_price_cents"] = cents
+    explicit_cents = None
+    for key in ("booth_price_cents", "selected_booth_price_cents", "price_cents", "amount_cents", "resolved_price_cents", "total_cents"):
+        if key in payload:
+            explicit_cents = _price_to_cents(payload.get(key), assume_cents=True)
+            if explicit_cents:
+                break
+    if not explicit_cents and "booth_price" in payload:
+        explicit_cents = _price_to_cents(payload.get("booth_price"), assume_cents=False)
+    if explicit_cents:
+        app["booth_price_cents"] = explicit_cents
+        app["amount_cents"] = explicit_cents
+        app["resolved_price_cents"] = explicit_cents
+        app["price_cents"] = explicit_cents
+        app["total_cents"] = explicit_cents
+        app["booth_price"] = round(explicit_cents / 100, 2)
+        app["amount_due"] = round(explicit_cents / 100, 2)
+        app["total_price"] = round(explicit_cents / 100, 2)
             app["booth_price"] = round(cents / 100, 2)
 
     _persist_booth_category(app)
