@@ -1207,68 +1207,62 @@ def _extract_booths_from_diagram(diagram: Optional[Dict[str, Any]]) -> List[Dict
 
 
 def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
-    booth_id = _normalize_id(
-        app.get("booth_id")
-        or app.get("boothId")
-        or app.get("requested_booth_id")
-        or app.get("requestedBoothId")
-        or app.get("selected_booth_id")
-        or app.get("selectedBoothId")
-        or app.get("booth")
-    )
-    if not booth_id:
+    """Resolve booth category from the exact booth selection.
+
+    Important regression guard:
+    human booth labels ("Booth 6", "A2") and generated canvas ids
+    ("booth_46d7...") are both valid lookup signals, but they must not be
+    collapsed into one value. Older logic compared the human label only against
+    booth.id, so category resolution failed and downstream requirement/price
+    logic fell back to General/$100.
+    """
+    if not isinstance(app, dict):
+        return None
+
+    human_candidates = _human_booth_candidates_from_app(app)
+    internal_candidates = _internal_booth_candidates_from_app(app)
+
+    if not human_candidates and not internal_candidates:
         return None
 
     diagram = _get_diagram_for_event(app)
-    booths = _extract_booths_from_diagram(diagram)
-
-    for booth in booths:
-        booth_match_id = _normalize_id(
-            booth.get("id")
-            or booth.get("booth_id")
-            or booth.get("boothId")
-        )
-        if booth_match_id != booth_id:
-            continue
-
-        meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
-        category = _as_str(
-            booth.get("category")
-            or booth.get("booth_category")
-            or booth.get("category_name")
-            or booth.get("categoryName")
-            or booth.get("category_label")
-            or booth.get("categoryLabel")
-            or booth.get("vendor_category")
-            or booth.get("vendorCategory")
-            or booth.get("vendor_type")
-            or booth.get("vendorType")
-            or meta.get("category")
-            or meta.get("booth_category")
-            or meta.get("categoryName")
-        )
-        if _is_useful_category(category):
-            return category
-
     event = _get_event_for_app(app)
+    booths = _extract_booths_from_diagram(diagram)
     if isinstance(event, dict):
-        for booth in _extract_booths_from_event(event):
-            booth_match_id = _normalize_id(
-                booth.get("id")
-                or booth.get("booth_id")
-                or booth.get("boothId")
-            )
-            if booth_match_id != booth_id:
-                continue
+        booths.extend(_extract_booths_from_event(event))
 
-            category = _as_str(
-                booth.get("category")
-                or booth.get("booth_category")
-                or booth.get("category_name")
-                or booth.get("categoryName")
-            )
-            if category:
-                return category
+    def category_from_booth(booth: Dict[str, Any]) -> str:
+        category = _booth_category_from_record_for_save(booth)
+        return category if _is_useful_category(category) else ""
+
+    # Human-facing labels/numbers win first. This keeps Booth 6 from matching
+    # the wrong booth solely because another booth shares a category/default.
+    if human_candidates:
+        for booth in booths:
+            if not isinstance(booth, dict):
+                continue
+            booth_values = _booth_match_values(booth)
+            if human_candidates.intersection(booth_values):
+                category = category_from_booth(booth)
+                if category:
+                    return category
+
+        # A human booth was selected, but the map did not contain a matching
+        # label. Do not fall through to loose/category-only matching here; that
+        # is how the app drifted back to General or another booth category.
+        return None
+
+    # Generated canvas ids are valid only as an internal lookup fallback when no
+    # human label is available. They should never replace booth_id for display.
+    if internal_candidates:
+        for booth in booths:
+            if not isinstance(booth, dict):
+                continue
+            booth_values = _booth_match_values(booth)
+            if internal_candidates.intersection(booth_values):
+                category = category_from_booth(booth)
+                if category:
+                    return category
 
     return None
 
