@@ -455,6 +455,150 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+# ---------------- Requirements public payload helpers ----------------
+
+def _req_as_list(value: Any) -> list[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        out: list[Dict[str, Any]] = []
+        for key, raw in value.items():
+            if isinstance(raw, dict):
+                out.append({"id": str(key), **raw})
+            elif raw:
+                out.append({"id": str(key), "text": str(raw)})
+        return out
+    return []
+
+
+def _req_bucket(raw: Any) -> Dict[str, list[Dict[str, Any]]]:
+    if not isinstance(raw, dict):
+        return {"compliance": [], "documents": []}
+    compliance: list[Dict[str, Any]] = []
+    documents: list[Dict[str, Any]] = []
+    for key in ("compliance", "compliance_items", "complianceItems", "items", "requirements"):
+        compliance.extend(_req_as_list(raw.get(key)))
+    for key in ("documents", "docs", "document_requirements", "documentRequirements", "required_documents", "requiredDocuments"):
+        documents.extend(_req_as_list(raw.get(key)))
+    return {"compliance": _dedupe_req_items(compliance), "documents": _dedupe_req_items(documents)}
+
+
+def _dedupe_req_items(items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[Dict[str, Any]] = []
+    for item in items:
+        key = str(item.get("id") or item.get("key") or item.get("name") or item.get("title") or item.get("label") or item.get("text") or "").strip().lower()
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        out.append(item)
+    return out
+
+
+def _merge_req_bucket(target: Dict[str, list[Dict[str, Any]]], raw: Any) -> None:
+    bucket = _req_bucket(raw)
+    target.setdefault("compliance", [])
+    target.setdefault("documents", [])
+    target["compliance"].extend(bucket.get("compliance") or [])
+    target["documents"].extend(bucket.get("documents") or [])
+    target["compliance"] = _dedupe_req_items(target["compliance"])
+    target["documents"] = _dedupe_req_items(target["documents"])
+
+
+def _requirements_payload_for_event(event_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
+    """Return requirements in the vendor-facing shape.
+
+    Event-wide requirements are intentionally pulled from every legacy key we
+    have used so the vendor page does not show 0 global items when the organizer
+    actually saved all-vendor requirements.
+    """
+    sources: list[Dict[str, Any]] = []
+
+    for key in (event_id, str(event_id)):
+        value = _REQUIREMENTS.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+
+    store_event = _EVENTS.get(event_id) or _EVENTS.get(str(event_id))
+    if isinstance(store_event, dict):
+        if isinstance(store_event.get("requirements"), dict):
+            sources.append(store_event.get("requirements") or {})
+        for key in (
+            "global",
+            "globalRequirements",
+            "global_requirements",
+            "allVendorRequirements",
+            "all_vendor_requirements",
+            "appliesToAllVendors",
+            "applies_to_all_vendors",
+            "categories",
+            "categoryRequirements",
+            "category_requirements",
+        ):
+            if isinstance(store_event.get(key), (dict, list)):
+                sources.append({key: store_event.get(key)})
+
+    # Some deployments keep requirement JSON in the SQL event row data fields.
+    if db is not None:
+        try:
+            row = db.query(Event).filter(Event.id == int(event_id)).first()
+            if row:
+                for attr in ("requirements", "data", "settings", "metadata", "extra"):
+                    value = getattr(row, attr, None)
+                    if isinstance(value, dict):
+                        sources.append(value)
+        except Exception:
+            pass
+
+    global_bucket: Dict[str, list[Dict[str, Any]]] = {"compliance": [], "documents": []}
+    categories: Dict[str, Dict[str, list[Dict[str, Any]]]] = {}
+
+    for source in sources:
+        root = source.get("requirements") if isinstance(source.get("requirements"), dict) else source
+        if not isinstance(root, dict):
+            continue
+
+        for key in (
+            "global",
+            "globalRequirements",
+            "global_requirements",
+            "eventWide",
+            "event_wide",
+            "eventWideRequirements",
+            "event_wide_requirements",
+            "allVendors",
+            "all_vendors",
+            "allVendorRequirements",
+            "all_vendor_requirements",
+            "appliesToAllVendors",
+            "applies_to_all_vendors",
+            "appliesToAll",
+            "applies_to_all",
+        ):
+            _merge_req_bucket(global_bucket, root.get(key))
+
+        # Root-level compliance/documents are event-wide requirements.
+        _merge_req_bucket(global_bucket, root)
+
+        category_source = root.get("categories") or root.get("categoryRequirements") or root.get("category_requirements") or {}
+        if isinstance(category_source, dict):
+            for category_name, raw_bucket in category_source.items():
+                name = str(category_name or "").strip()
+                if not name:
+                    continue
+                target = categories.setdefault(name, {"compliance": [], "documents": []})
+                _merge_req_bucket(target, raw_bucket)
+
+    return {
+        "requirements": {
+            "global": global_bucket,
+            "categories": categories,
+        },
+        "version": 1,
+    }
+
+
 def _is_bad_event_title(value: Any) -> bool:
     text = str(value or "").strip()
     return not text or text.lower() in {"untitled", "untitled event", "none", "null"}
@@ -1400,6 +1544,17 @@ def admin_mark_payout_paid(payment_id: int):
         "message": "Payout marked as paid",
         "payment": dict(payment),
     }
+
+
+
+@router.get("/events/{event_id}/requirements")
+def get_public_event_requirements(event_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return _requirements_payload_for_event(int(event_id), db=db)
+
+
+@router.get("/organizer/events/{event_id}/requirements")
+def get_organizer_event_requirements(event_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return _requirements_payload_for_event(int(event_id), db=db)
 
 
 @router.get("/public/events")

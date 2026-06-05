@@ -206,17 +206,79 @@ def _looks_like_generated_booth_id(value: Any) -> bool:
     return bool(re.match(r"^booth_[a-f0-9]+_", text, flags=re.IGNORECASE))
 
 
+def _human_booth_value_from_object(value: Any) -> str:
+    """Return a vendor-facing booth label from a booth object.
+
+    The map can send both old/stale app fields and the newly selected booth
+    object in the same request. Object label/number/name values represent the
+    actual click the vendor just made, so they must beat stale requested_booth_id.
+    """
+    if not isinstance(value, dict):
+        return ""
+
+    meta = value.get("meta") if isinstance(value.get("meta"), dict) else {}
+    for source in (value, meta):
+        for key in (
+            "label",
+            "booth_label",
+            "boothLabel",
+            "number",
+            "booth_number",
+            "boothNumber",
+            "name",
+            "booth_name",
+            "boothName",
+            "code",
+        ):
+            text = _as_str(source.get(key))
+            if text and not _looks_like_generated_booth_id(text):
+                return text
+
+    # Use the object id only when it is already human-readable. Generated canvas
+    # ids are saved separately as selected_booth_id / booth_canvas_id.
+    for key in ("id", "booth_id", "boothId", "value"):
+        text = _as_str(value.get(key))
+        if text and not _looks_like_generated_booth_id(text):
+            return text
+
+    return ""
+
+
 def _first_booth_value(payload: Dict[str, Any]) -> str:
     """Pick the safest human-facing booth value from a request payload.
 
-    Frontend booth canvas objects have internal ids like
-    booth_46d7f10807bed_19e8b1d55a0. Those should never become the saved
-    application booth. Human labels such as A3, Booth 6, or Table 12 are valid.
+    Important: when a vendor clicks a new booth, the request can still carry old
+    application fields like requested_booth_id=A2. Prefer the newly selected
+    booth object/label first so Booth 6 cannot snap back to A2.
     """
     if not isinstance(payload, dict):
         return ""
 
     for key in (
+        "selected_booth",
+        "selectedBooth",
+        "primary_booth",
+        "primaryBooth",
+        "requested_booth",
+        "requestedBooth",
+        "booth",
+    ):
+        text = _human_booth_value_from_object(payload.get(key))
+        if text:
+            return text
+
+    # New/current selection labels win over old saved requested_booth_id.
+    for key in (
+        "selected_booth_label",
+        "selectedBoothLabel",
+        "selected_booth_number",
+        "selectedBoothNumber",
+        "selected_booth_name",
+        "selectedBoothName",
+        "primary_booth_label",
+        "primaryBoothLabel",
+        "primary_booth_number",
+        "primaryBoothNumber",
         "booth_label",
         "boothLabel",
         "booth_number",
@@ -225,12 +287,14 @@ def _first_booth_value(payload: Dict[str, Any]) -> str:
         "boothName",
         "requested_booth_label",
         "requestedBoothLabel",
+        "requested_booth_number",
+        "requestedBoothNumber",
+        "requested_booth_name",
+        "requestedBoothName",
         "requested_booth_id",
         "requestedBoothId",
         "booth_id",
         "boothId",
-        "selected_booth_label",
-        "selectedBoothLabel",
         "selected_booth_id",
         "selectedBoothId",
     ):
@@ -242,7 +306,6 @@ def _first_booth_value(payload: Dict[str, Any]) -> str:
         return value
 
     return ""
-
 
 def _first_raw_booth_selection_value(payload: Dict[str, Any]) -> str:
     """Return any saved booth-selection signal, including internal canvas ids.
@@ -331,15 +394,115 @@ def _has_booth_selection(app: Dict[str, Any]) -> bool:
     return False
 
 
-def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
-    """Persist booth fields from payload without allowing generated canvas ids."""
-    booth_value = _first_booth_value(payload)
+def _selected_booth_object(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("selected_booth", "selectedBooth", "primary_booth", "primaryBooth", "requested_booth", "requestedBooth", "booth"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
 
-    if booth_value:
-        app["booth_id"] = booth_value
-        app["requested_booth_id"] = booth_value
-        app["booth_label"] = booth_value
-        app["booth_number"] = booth_value
+
+def _price_from_selected_booth_payload(payload: Dict[str, Any]) -> Optional[int]:
+    """Read the price from the newly selected booth object/payload first."""
+    booth_obj = _selected_booth_object(payload)
+    meta = booth_obj.get("meta") if isinstance(booth_obj.get("meta"), dict) else {}
+    for source in (booth_obj, meta, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "price_cents",
+            "priceCents",
+            "amount_cents",
+            "amountCents",
+            "booth_price_cents",
+            "boothPriceCents",
+            "selected_booth_price_cents",
+            "selectedBoothPriceCents",
+            "price",
+            "amount",
+            "booth_price",
+            "boothPrice",
+            "selected_booth_price",
+            "selectedBoothPrice",
+            "total_due",
+            "totalDue",
+            "amount_due",
+            "amountDue",
+        ):
+            cents = _price_to_cents(source.get(key))
+            if cents:
+                return cents
+    return None
+
+
+def _category_from_selected_booth_payload(payload: Dict[str, Any]) -> str:
+    booth_obj = _selected_booth_object(payload)
+    meta = booth_obj.get("meta") if isinstance(booth_obj.get("meta"), dict) else {}
+    for source in (booth_obj, meta, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "category",
+            "booth_category",
+            "boothCategory",
+            "requested_booth_category",
+            "requestedBoothCategory",
+            "category_name",
+            "categoryName",
+            "category_label",
+            "categoryLabel",
+            "vendor_category",
+            "vendorCategory",
+        ):
+            text = _as_str(source.get(key))
+            if _is_useful_category(text):
+                return text
+    return ""
+
+
+def _clear_stale_price_fields(app: Dict[str, Any]) -> None:
+    for key in (
+        "checkout_amount_cents",
+        "locked_price_cents",
+        "approved_price_cents",
+        "booth_price_cents",
+        "amount_cents",
+        "resolved_price_cents",
+        "price_cents",
+        "total_cents",
+        "booth_price",
+        "amount_due",
+        "total_price",
+        "checkout_url",
+        "checkoutUrl",
+        "payment_url",
+        "session_url",
+        "sessionUrl",
+        "checkout_session_id",
+    ):
+        app.pop(key, None)
+
+
+def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Persist booth fields from payload without allowing stale booth/price.
+
+    This is the save path that prevents the exact regression Troy saw:
+    the map request for Booth 6 should not preserve an older A2/$150 record.
+    """
+    if not isinstance(app, dict):
+        return ""
+
+    booth_value = _first_booth_value(payload)
+    previous_booth = _as_str(
+        app.get("booth_id")
+        or app.get("requested_booth_id")
+        or app.get("booth_label")
+        or app.get("booth_number")
+        or app.get("selected_booth_id")
+        or app.get("booth_canvas_id")
+    )
 
     internal_booth_id = _as_str(
         payload.get("selected_booth_id")
@@ -347,46 +510,51 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         or payload.get("booth_canvas_id")
         or payload.get("boothCanvasId")
     )
+    if not internal_booth_id:
+        booth_obj = _selected_booth_object(payload)
+        internal_booth_id = _as_str(booth_obj.get("id") or booth_obj.get("booth_id") or booth_obj.get("boothId"))
+
+    booth_changed = False
+    if booth_value and booth_value != previous_booth:
+        booth_changed = True
+        app["booth_id"] = booth_value
+        app["requested_booth_id"] = booth_value
+        app["booth_label"] = booth_value
+        app["booth_number"] = booth_value
+
     if internal_booth_id:
+        if internal_booth_id != _as_str(app.get("selected_booth_id") or app.get("booth_canvas_id")):
+            booth_changed = True
         app["selected_booth_id"] = internal_booth_id
         app["booth_canvas_id"] = internal_booth_id
 
-    booth_category = _as_str(
-        payload.get("booth_category")
-        or payload.get("requested_booth_category")
-        or payload.get("boothCategory")
-        or payload.get("requestedBoothCategory")
-        or payload.get("category")
-    )
+    if booth_changed:
+        _clear_stale_price_fields(app)
+
+    booth_category = _category_from_selected_booth_payload(payload)
     if booth_category:
         app["booth_category"] = booth_category
         app["requested_booth_category"] = booth_category
 
-    booth_price = payload.get("booth_price")
-    if booth_price is None:
-        booth_price = payload.get("boothPrice")
-    if booth_price is None:
-        booth_price = payload.get("total_due")
-    if booth_price is None:
-        booth_price = payload.get("totalDue")
-    if booth_price is None:
-        booth_price = payload.get("amount_due")
-    if booth_price is None:
-        booth_price = payload.get("amountDue")
+    explicit_cents = _price_from_selected_booth_payload(payload)
+    if explicit_cents:
+        app["booth_price_cents"] = int(explicit_cents)
+        app["amount_cents"] = int(explicit_cents)
+        app["resolved_price_cents"] = int(explicit_cents)
+        app["price_cents"] = int(explicit_cents)
+        app["total_cents"] = int(explicit_cents)
+        app["booth_price"] = round(int(explicit_cents) / 100, 2)
+        app["amount_due"] = round(int(explicit_cents) / 100, 2)
+        app["total_price"] = round(int(explicit_cents) / 100, 2)
+    elif booth_changed:
+        # Resolve from the live diagram after the new booth/category is saved.
+        _persist_booth_category(app)
+        _persist_resolved_booth_price(app)
 
-    if booth_price is not None:
-        cents = _price_to_cents(booth_price)
-        if cents:
-            app["booth_price_cents"] = cents
-            app["amount_cents"] = cents
-            app["resolved_price_cents"] = cents
-            app["booth_price"] = round(cents / 100, 2)
-
-    if booth_value and not booth_category:
+    if (booth_value or internal_booth_id) and not booth_category:
         _persist_booth_category(app)
 
     return booth_value
-
 
 
 def _normalize_string_list(value: Any) -> List[str]:
@@ -1096,16 +1264,118 @@ def _normalize_bucket(raw: Any) -> Dict[str, List[Dict[str, Any]]]:
     }
 
 
+def _merge_requirement_roots(*roots: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge requirement payloads saved in old and new shapes."""
+    merged: Dict[str, Any] = {"global": {"compliance": [], "documents": []}, "categories": {}}
+
+    def add_bucket(target: Dict[str, Any], raw: Any) -> None:
+        bucket = _normalize_bucket(raw if isinstance(raw, dict) else {})
+        target.setdefault("compliance", [])
+        target.setdefault("documents", [])
+        target["compliance"].extend(bucket.get("compliance") or [])
+        target["documents"].extend(bucket.get("documents") or [])
+
+    for raw_root in roots:
+        if not isinstance(raw_root, dict):
+            continue
+        root = raw_root.get("requirements") if isinstance(raw_root.get("requirements"), dict) else raw_root
+        if not isinstance(root, dict):
+            continue
+
+        global_target = merged["global"]
+        for key in (
+            "global",
+            "globalRequirements",
+            "global_requirements",
+            "eventWide",
+            "event_wide",
+            "eventWideRequirements",
+            "event_wide_requirements",
+            "allVendors",
+            "all_vendors",
+            "allVendorRequirements",
+            "all_vendor_requirements",
+            "appliesToAllVendors",
+            "applies_to_all_vendors",
+            "appliesToAll",
+            "applies_to_all",
+        ):
+            add_bucket(global_target, root.get(key))
+
+        # Root-level compliance/documents are also event-wide requirements, but
+        # category maps are not.
+        add_bucket(global_target, root)
+
+        category_source = (
+            root.get("categories")
+            or root.get("categoryRequirements")
+            or root.get("category_requirements")
+            or {}
+        )
+        if isinstance(category_source, dict):
+            for category_name, bucket_raw in category_source.items():
+                category_key = _as_str(category_name)
+                if not category_key:
+                    continue
+                target = merged["categories"].setdefault(category_key, {"compliance": [], "documents": []})
+                add_bucket(target, bucket_raw)
+
+    merged["global"]["compliance"] = _dedupe_requirement_items(merged["global"].get("compliance") or [])
+    merged["global"]["documents"] = _dedupe_requirement_items(merged["global"].get("documents") or [])
+    for bucket in merged["categories"].values():
+        bucket["compliance"] = _dedupe_requirement_items(bucket.get("compliance") or [])
+        bucket["documents"] = _dedupe_requirement_items(bucket.get("documents") or [])
+    return merged
+
+
+def _store_requirement_payload_for_event(event_id: Any) -> Dict[str, Any]:
+    requirements_store = getattr(store, "_REQUIREMENTS", {})
+    event_key = _normalize_id(event_id)
+    if not event_key or not isinstance(requirements_store, dict):
+        return {}
+    candidates = [event_key]
+    if event_key.isdigit():
+        candidates.append(int(event_key))
+    for key in candidates:
+        value = requirements_store.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def _extract_requirement_root(event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(event, dict):
         return {}
-    raw = event.get("requirements")
-    if isinstance(raw, dict) and isinstance(raw.get("requirements"), dict):
-        return raw.get("requirements") or {}
-    if isinstance(raw, dict):
-        return raw
-    return {}
 
+    event_id = event.get("id") or event.get("event_id") or event.get("eventId")
+    roots: List[Dict[str, Any]] = []
+
+    store_req = _store_requirement_payload_for_event(event_id)
+    if isinstance(store_req, dict) and store_req:
+        roots.append(store_req)
+
+    raw = event.get("requirements")
+    if isinstance(raw, dict):
+        roots.append(raw)
+
+    for key in (
+        "global",
+        "globalRequirements",
+        "global_requirements",
+        "eventWideRequirements",
+        "event_wide_requirements",
+        "allVendorRequirements",
+        "all_vendor_requirements",
+        "appliesToAllVendors",
+        "applies_to_all_vendors",
+        "categories",
+        "categoryRequirements",
+        "category_requirements",
+    ):
+        if isinstance(event.get(key), (dict, list)):
+            roots.append({key: event.get(key)})
+
+    return _merge_requirement_roots(*roots)
 
 def _extract_requirement_categories(req_root: Dict[str, Any]) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
     source = req_root.get("categories") or req_root.get("categoryRequirements") or {}
@@ -1415,7 +1685,7 @@ def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
     req_root = _extract_requirement_root(event)
 
     booth_categories = _pick_first_list(req_root, ["booth_categories", "boothCategories"])
-    global_bucket = _normalize_bucket(req_root.get("global") or req_root.get("globalRequirements") or req_root)
+    global_bucket = _normalize_bucket(req_root.get("global") or req_root.get("globalRequirements") or {})
     categories_map = _extract_requirement_categories(req_root)
 
     selected_category = _resolve_selected_booth_category(app, booth_categories, categories_map)
