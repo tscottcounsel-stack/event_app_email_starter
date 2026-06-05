@@ -328,11 +328,6 @@ def _has_booth_selection(app: Dict[str, Any]) -> bool:
     if _is_useful_category(category):
         return True
 
-    # A saved booth price by itself is not ideal for display, but it proves a
-    # booth click/save happened and prevents false "select a booth" blocking.
-    if _price_to_cents(app.get("booth_price")) or _price_to_cents(app.get("booth_price_cents")):
-        return True
-
     return False
 
 
@@ -406,7 +401,50 @@ def _normalize_string_list(value: Any) -> List[str]:
 def _is_useful_category(value: Any) -> bool:
     text = _as_str(value)
     normalized = text.lower()
-    return bool(text and normalized not in {"uncategorized", "other", "booth"})
+    return bool(text and normalized not in {"uncategorized", "other", "booth", "general", "default"})
+
+
+def _vendor_profile_category_fallback(app: Dict[str, Any]) -> str:
+    """Return the vendor's saved profile category when the application is missing it.
+
+    Draft applications can be created by a generic get-or-create call before the
+    booth/map payload arrives. In that case app.vendor_category is often blank,
+    and older code fell back to General. That made Food vendors lose their two
+    category requirements and pushed the app back to the stale $100 default.
+    """
+    candidates = [
+        _as_str(app.get("vendor_email")).lower(),
+        _as_str(app.get("email")).lower(),
+        _as_str(app.get("vendor_id")).lower(),
+        _as_str(app.get("vendorId")).lower(),
+    ]
+
+    vendors = getattr(store, "_VENDORS", {})
+    if not isinstance(vendors, dict):
+        return ""
+
+    for key in candidates:
+        if not key:
+            continue
+        profile = vendors.get(key)
+        if not isinstance(profile, dict):
+            continue
+
+        direct = _as_str(
+            profile.get("vendor_category")
+            or profile.get("category")
+            or profile.get("business_category")
+            or profile.get("business_type")
+        )
+        if _is_useful_category(direct):
+            return direct
+
+        for field in ("vendor_categories", "categories", "business_categories"):
+            for category in _normalize_string_list(profile.get(field)):
+                if _is_useful_category(category):
+                    return category
+
+    return ""
 
 
 def _app_vendor_category_fallback(app: Dict[str, Any]) -> str:
@@ -418,6 +456,13 @@ def _app_vendor_category_fallback(app: Dict[str, Any]) -> str:
     for category in categories:
         if _is_useful_category(category):
             return category
+
+    profile_category = _vendor_profile_category_fallback(app)
+    if _is_useful_category(profile_category):
+        app["vendor_category"] = profile_category
+        if not isinstance(app.get("vendor_categories"), list) or not app.get("vendor_categories"):
+            app["vendor_categories"] = [profile_category]
+        return profile_category
 
     return ""
 
@@ -753,13 +798,23 @@ def _find_event_booth_category(app: Dict[str, Any]) -> Optional[str]:
 
 
 def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
+    """Persist a real category without inventing General.
+
+    General was the source of the regression: it counted as a selected booth,
+    skipped real category requirements, and let the default $100 price win.
+    """
     category = _find_event_booth_category(app)
+
+    if not _is_useful_category(category):
+        existing = _as_str(app.get("booth_category") or app.get("requested_booth_category"))
+        if _is_useful_category(existing):
+            category = existing
 
     if not _is_useful_category(category):
         category = _app_vendor_category_fallback(app)
 
     if not _is_useful_category(category):
-        category = "General"
+        return None
 
     app["booth_category"] = category
     app["requested_booth_category"] = category
@@ -867,20 +922,44 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _app_has_precise_booth_reference(app: Dict[str, Any]) -> bool:
+    for key in (
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
+        "assigned_booth_id",
+        "assignedBoothId",
+        "booth_number",
+        "boothNumber",
+        "booth_label",
+        "boothLabel",
+        "booth_name",
+        "boothName",
+        "selected_booth_id",
+        "selectedBoothId",
+        "booth_canvas_id",
+        "boothCanvasId",
+    ):
+        if _as_str(app.get(key)):
+            return True
+    return False
+
+
 def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
-    """Resolve the booth price for an application.
+    """Resolve booth price without letting stale $100 defaults beat the map.
 
-    Checkout must use the current saved booth price, not an old Stripe checkout
-    amount. A previous checkout_session_id can point to a stale $100 Stripe
-    session even after the selected booth was corrected to $1.
+    Rules:
+    - Paid/locked apps preserve the paid amount.
+    - If a real booth id/label/canvas id exists, the current event diagram/map
+      price wins over old saved serializer values.
+    - If only a vendor/category is known, category map price may be used.
+    - Saved $100 amount_due/total_price is a last resort only, not a source of
+      truth for draft/submitted/approved apps.
     """
-
     status = _as_str(app.get("status")).lower()
     payment_status = _as_str(app.get("payment_status")).lower()
 
-    # Only preserve locked checkout/paid amounts after the application is paid.
-    # Do NOT treat checkout_session_id alone as locked; unpaid checkout sessions
-    # can be stale and should be replaced.
     if status in {"paid"} or payment_status in {"paid"}:
         for key in (
             "checkout_amount_cents",
@@ -891,49 +970,74 @@ def _find_booth_price_cents_for_app(app: Dict[str, Any]) -> Optional[int]:
             "approvedPriceCents",
             "paid_amount_cents",
             "paidAmountCents",
+            "amount_cents",
+            "amountCents",
         ):
             cents = _price_to_cents(app.get(key))
             if cents:
                 return cents
 
-    # For draft/submitted/approved applications, saved booth/map values win.
+    has_precise_booth = _app_has_precise_booth_reference(app)
+    useful_category = _is_useful_category(
+        app.get("booth_category")
+        or app.get("requested_booth_category")
+        or app.get("vendor_category")
+        or app.get("category")
+    )
+
+    if has_precise_booth or useful_category:
+        event_cents = _find_event_booth_price_cents(app)
+        if event_cents:
+            return event_cents
+
+    # Use explicit booth-specific saved cents only after the live map/category
+    # lookup fails. Do not use generic amount_cents first; that field is where
+    # the stale $100 value was repeatedly reintroduced.
     for key in (
         "booth_price_cents",
         "boothPriceCents",
-        "amount_cents",
-        "amountCents",
-        "resolved_price_cents",
-        "resolvedPriceCents",
-        "price_cents",
-        "priceCents",
         "reserved_booth_price_cents",
         "reservedBoothPriceCents",
+        "selected_booth_price_cents",
+        "selectedBoothPriceCents",
     ):
         cents = _price_to_cents(app.get(key))
         if cents:
             return cents
 
-    # Dollar fields are valid if cents were not stored.
     for key in (
         "booth_price",
         "boothPrice",
-        "amount_due",
-        "amountDue",
-        "total_due",
-        "totalDue",
-        "total_price",
-        "totalPrice",
-        "price",
-        "amount",
+        "selected_booth_price",
+        "selectedBoothPrice",
+        "reserved_booth_price",
+        "reservedBoothPrice",
     ):
         cents = _price_to_cents(app.get(key))
         if cents:
             return cents
 
-    # Last resort only: resolve from current event diagram/map/defaults.
-    event_cents = _find_event_booth_price_cents(app)
-    if event_cents:
-        return event_cents
+    # Generic amount fields are valid only if there is a real booth/category.
+    if has_precise_booth or useful_category:
+        for key in (
+            "resolved_price_cents",
+            "resolvedPriceCents",
+            "price_cents",
+            "priceCents",
+            "amount_cents",
+            "amountCents",
+            "amount_due",
+            "amountDue",
+            "total_due",
+            "totalDue",
+            "total_price",
+            "totalPrice",
+            "price",
+            "amount",
+        ):
+            cents = _price_to_cents(app.get(key))
+            if cents:
+                return cents
 
     return None
 
@@ -1089,7 +1193,7 @@ def _resolve_selected_booth_category(
         return category_keys[0]
 
     fallback = _app_vendor_category_fallback(app)
-    return fallback if _is_useful_category(fallback) else "General"
+    return fallback if _is_useful_category(fallback) else ""
 
 
 def _resolve_category_bucket(
@@ -1371,14 +1475,37 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
     if category:
         enriched["booth_category"] = category
         enriched["requested_booth_category"] = category
+    else:
+        # Never present fabricated General as the selected category.
+        if not _is_useful_category(enriched.get("booth_category")):
+            enriched["booth_category"] = None
+        if not _is_useful_category(enriched.get("requested_booth_category")):
+            enriched["requested_booth_category"] = None
+
     if cents:
         enriched["resolved_price_cents"] = cents
         enriched["amount_cents"] = cents
         enriched["total_cents"] = cents
-        enriched["booth_price_cents"] = enriched.get("booth_price_cents") or cents
+        enriched["price_cents"] = cents
+        enriched["booth_price_cents"] = cents
         enriched["booth_price"] = booth_price
         enriched["amount_due"] = booth_price
         enriched["total_price"] = booth_price
+    else:
+        # Avoid showing the old $100 fallback when no live booth/category price
+        # can be resolved. Payment will stay locked until the booth is selected.
+        for key in (
+            "resolved_price_cents",
+            "amount_cents",
+            "total_cents",
+            "price_cents",
+            "booth_price_cents",
+            "booth_price",
+            "amount_due",
+            "total_price",
+        ):
+            if key in enriched:
+                enriched[key] = None
 
     if isinstance(enriched.get("documents"), dict):
         enriched["documents"] = _normalize_documents_payload(enriched.get("documents"))
@@ -1859,8 +1986,7 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     elif vendor_category and not isinstance(app.get("vendor_categories"), list):
         app["vendor_categories"] = [vendor_category]
 
-    if app.get("booth_id"):
-        _persist_booth_category(app)
+    _persist_booth_category(app)
 
     _merge_vendor_doc_vault(app)
 
@@ -2155,8 +2281,7 @@ def create_vendor_application(
             app["resolved_price_cents"] = cents
             app["booth_price"] = round(cents / 100, 2)
 
-    if app.get("booth_id"):
-        _persist_booth_category(app)
+    _persist_booth_category(app)
 
     _merge_vendor_doc_vault(app)
 
@@ -2848,6 +2973,47 @@ def admin_debug_delete_application(app_id: str):
 def admin_debug_delete_application_post(app_id: str):
     """POST twin for hosts/tools that make DELETE inconvenient."""
     return admin_debug_delete_application(app_id)
+
+
+@router.post("/admin/debug/applications/{app_id}/repair")
+def admin_debug_repair_application(app_id: str, payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    """Repair a corrupted draft application without deleting it.
+
+    Accepts optional booth/category/price fields and then recomputes category,
+    price, and requirements from the same serializer used by the vendor pages.
+    """
+    app = _get_application_or_404(app_id)
+
+    if isinstance(payload, dict) and payload:
+        _apply_booth_payload(app, payload)
+
+        vendor_category = _first_vendor_category(payload)
+        vendor_categories = _normalize_string_list(payload.get("vendor_categories"))
+        if vendor_category:
+            app["vendor_category"] = vendor_category
+        if vendor_categories:
+            app["vendor_categories"] = vendor_categories
+        elif vendor_category:
+            app["vendor_categories"] = [vendor_category]
+
+    _persist_booth_category(app)
+    cents = _persist_resolved_booth_price(app)
+    if cents:
+        app["booth_price"] = round(int(cents) / 100, 2)
+
+    status = _compute_requirement_status(app)
+    app["booth_selected"] = status["booth_selected"]
+    app["compliance_complete"] = status["compliance_complete"]
+    app["documents_complete"] = status["documents_complete"]
+    app["requirements_complete"] = status["requirements_complete"]
+    app["progress_percent"] = status["progress_percent"]
+    app["requirements_total_items"] = status["requirements_total_items"]
+    app["requirements_completed_items"] = status["requirements_completed_items"]
+    app["requirements_category"] = status["requirements_category"]
+    app["updated_at"] = _now_iso()
+
+    _save_store()
+    return {"ok": True, "application": _serialize_application(app)}
 
 @router.get("/admin/debug/applications/{app_id}/raw")
 def admin_debug_raw_application(app_id: str) -> Dict[str, Any]:
