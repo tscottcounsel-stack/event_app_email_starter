@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# VENDCORE_REQUIREMENTS_SAVE_FIX_2026_06_05
+
 import hashlib
 import logging
 import os
@@ -1545,6 +1547,112 @@ def admin_mark_payout_paid(payment_id: int):
         "payment": dict(payment),
     }
 
+
+
+def _normalize_saved_requirements_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize organizer requirements into the canonical store shape.
+
+    The frontend saves { requirements: { global, categories }, version }. Older
+    screens may send global/categoryRequirements at the root. Keep all-vendor
+    requirements in requirements.global so vendor pages never see an empty
+    event-wide bucket after save.
+    """
+    raw = payload if isinstance(payload, dict) else {}
+    root = raw.get("requirements") if isinstance(raw.get("requirements"), dict) else raw
+    if not isinstance(root, dict):
+        root = {}
+
+    global_bucket = _req_bucket(
+        root.get("global")
+        or root.get("globalRequirements")
+        or root.get("global_requirements")
+        or root.get("eventWide")
+        or root.get("event_wide")
+        or root.get("eventWideRequirements")
+        or root.get("event_wide_requirements")
+        or root.get("allVendors")
+        or root.get("all_vendors")
+        or root.get("allVendorRequirements")
+        or root.get("all_vendor_requirements")
+        or root.get("appliesToAllVendors")
+        or root.get("applies_to_all_vendors")
+        or {}
+    )
+
+    # Root-level compliance/documents also mean event-wide requirements.
+    _merge_req_bucket(global_bucket, root)
+
+    category_source = root.get("categories") or root.get("categoryRequirements") or root.get("category_requirements") or {}
+    categories: Dict[str, Dict[str, list[Dict[str, Any]]]] = {}
+    if isinstance(category_source, dict):
+        for name, bucket in category_source.items():
+            clean_name = str(name or "").strip()
+            if not clean_name:
+                continue
+            categories[clean_name] = _req_bucket(bucket)
+
+    version = raw.get("version") or root.get("version") or 1
+    try:
+        version = int(version or 1)
+    except Exception:
+        version = 1
+
+    return {
+        "requirements": {
+            "global": global_bucket,
+            "categories": categories,
+        },
+        "version": version,
+        "updated_at": utc_now_iso(),
+    }
+
+
+def _save_requirements_for_event(event_id: int, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    ev = _get_event_row_or_404(db, int(event_id))
+    normalized = _normalize_saved_requirements_payload(payload)
+
+    # File/runtime store remains the requirements store for now, but this route
+    # is the single writer. Applications and public/vendor pages read the same
+    # normalized shape after this save.
+    _REQUIREMENTS[int(event_id)] = normalized
+
+    store_event = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
+    store_event = {**store_event, "id": int(event_id), "requirements": normalized}
+    _EVENTS[int(event_id)] = store_event
+
+    ev.requirements_published = True
+    db.add(ev)
+    db.commit()
+    save_store()
+
+    return _requirements_payload_for_event(int(event_id), db=db)
+
+
+@router.put("/organizer/events/{event_id}/requirements")
+def put_organizer_event_requirements(
+    event_id: int,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return _save_requirements_for_event(int(event_id), payload, db)
+
+
+@router.post("/organizer/events/{event_id}/requirements")
+def post_organizer_event_requirements(
+    event_id: int,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return _save_requirements_for_event(int(event_id), payload, db)
+
+
+@router.put("/events/{event_id}/requirements")
+def put_public_event_requirements(
+    event_id: int,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return _save_requirements_for_event(int(event_id), payload, db)
 
 
 @router.get("/events/{event_id}/requirements")
