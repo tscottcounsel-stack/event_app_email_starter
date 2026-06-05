@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# VENDCORE_BOOTH_SAVE_INTERNAL_ID_FIX_2026_06_05
+# VENDCORE_BOOTH_PRICE_MATCH_BY_LABEL_FIX_2026_06_05
 
 import os
 import re
@@ -995,6 +995,16 @@ def _get_diagram_for_event(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return diagram if isinstance(diagram, dict) else None
 
 
+def _normalize_booth_lookup_value(value: Any) -> str:
+    text = _as_str(value).lower()
+    if not text:
+        return ""
+    text = text.replace("#", " ")
+    text = re.sub(r"\bbooth\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _booth_match_values(booth: Dict[str, Any]) -> set[str]:
     values: set[str] = set()
     keys = [
@@ -1007,9 +1017,63 @@ def _booth_match_values(booth: Dict[str, Any]) -> set[str]:
         "code",
         "slug",
     ]
-    for key in keys:
-        raw = booth.get(key)
-        text = _as_str(raw).lower()
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for source in (booth, meta):
+        for key in keys:
+            raw = source.get(key)
+            text = _as_str(raw).lower()
+            if text:
+                values.add(text)
+            normalized = _normalize_booth_lookup_value(raw)
+            if normalized:
+                values.add(normalized)
+    return values
+
+
+def _human_booth_candidates_from_app(app: Dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in (
+        "booth_label",
+        "boothLabel",
+        "booth_number",
+        "boothNumber",
+        "booth_name",
+        "boothName",
+        "booth_id",
+        "boothId",
+        "requested_booth_id",
+        "requestedBoothId",
+    ):
+        raw = app.get(key)
+        text = _as_str(raw)
+        if not text or _looks_like_generated_booth_id(text):
+            continue
+        values.add(text.lower())
+        normalized = _normalize_booth_lookup_value(text)
+        if normalized:
+            values.add(normalized)
+    booth = app.get("selected_booth") or app.get("selectedBooth") or app.get("booth")
+    if isinstance(booth, dict):
+        text = _human_booth_value_from_object(booth)
+        if text:
+            values.add(text.lower())
+            normalized = _normalize_booth_lookup_value(text)
+            if normalized:
+                values.add(normalized)
+    return values
+
+
+def _internal_booth_candidates_from_app(app: Dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in (
+        "selected_booth_id",
+        "selectedBoothId",
+        "booth_canvas_id",
+        "boothCanvasId",
+        "assigned_booth_id",
+        "assignedBoothId",
+    ):
+        text = _as_str(app.get(key)).lower()
         if text:
             values.add(text)
     return values
@@ -1233,16 +1297,14 @@ def _persist_booth_category(app: Dict[str, Any]) -> Optional[str]:
     return category
 
 def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
-    booth_id = _normalize_id(
-        app.get("booth_id")
-        or app.get("boothId")
-        or app.get("requested_booth_id")
-        or app.get("requestedBoothId")
-        or app.get("selected_booth_id")
-        or app.get("selectedBoothId")
-        or app.get("booth")
-    )
+    """Resolve price from the exact selected booth, not the booth category.
 
+    Regression guard: Booth 6 and A2 can both be category=Other. A category
+    fallback caused Booth 6 to inherit A2's $150 price. Human-facing booth
+    label/number must win first; stale generated canvas ids are only used when
+    no human label exists. Category defaults are only safe when no booth was
+    selected at all.
+    """
     selected_category = _as_str(
         app.get("booth_category")
         or app.get("requested_booth_category")
@@ -1274,46 +1336,59 @@ def _find_event_booth_price_cents(app: Dict[str, Any]) -> Optional[int]:
                     return cents
         return None
 
-    def booth_matches(booth: Dict[str, Any]) -> bool:
-        if booth_id:
-            candidates = _booth_match_values(booth)
-            if booth_id.lower() in candidates:
-                return True
-
-        if selected_category:
-            meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
-            category = _as_str(
-                booth.get("category")
-                or booth.get("booth_category")
-                or booth.get("category_name")
-                or booth.get("categoryName")
-                or booth.get("category_label")
-                or booth.get("categoryLabel")
-                or booth.get("vendor_category")
-                or booth.get("vendorCategory")
-                or meta.get("category")
-                or meta.get("booth_category")
-                or meta.get("categoryName")
-            ).lower()
-            if category and category == selected_category:
-                return True
-
-        return False
+    def booth_category(booth: Dict[str, Any]) -> str:
+        meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+        return _as_str(
+            booth.get("category")
+            or booth.get("booth_category")
+            or booth.get("category_name")
+            or booth.get("categoryName")
+            or booth.get("category_label")
+            or booth.get("categoryLabel")
+            or booth.get("vendor_category")
+            or booth.get("vendorCategory")
+            or meta.get("category")
+            or meta.get("booth_category")
+            or meta.get("categoryName")
+        ).lower()
 
     diagram_booths = _extract_booths_from_diagram(diagram)
     event_booths = _extract_booths_from_event(event) if isinstance(event, dict) else []
+    all_booths = diagram_booths + event_booths
 
-    for booth in diagram_booths:
-        if booth_matches(booth):
-            cents = booth_price(booth)
-            if cents:
-                return cents
+    human_candidates = _human_booth_candidates_from_app(app)
+    internal_candidates = _internal_booth_candidates_from_app(app)
 
-    for booth in event_booths:
-        if booth_matches(booth):
-            cents = booth_price(booth)
-            if cents:
-                return cents
+    # 1) Exact human label/number match. "Booth 6" also matches "6".
+    if human_candidates:
+        for booth in all_booths:
+            if human_candidates & _booth_match_values(booth):
+                cents = booth_price(booth)
+                if cents:
+                    return cents
+
+        # A human booth was selected but no exact map match was found. Do NOT
+        # fall through to category matching, because that is how Booth 6 became
+        # A2/$150. Let explicit saved payload cents win instead.
+        return None
+
+    # 2) Internal generated canvas id only when no human label is available.
+    if internal_candidates:
+        for booth in all_booths:
+            if internal_candidates & _booth_match_values(booth):
+                cents = booth_price(booth)
+                if cents:
+                    return cents
+        return None
+
+    # 3) Category fallback only for category-only flows with no booth selected.
+    if selected_category:
+        for booth in all_booths:
+            category = booth_category(booth)
+            if category and category == selected_category:
+                cents = booth_price(booth)
+                if cents:
+                    return cents
 
     if isinstance(event, dict):
         for root_key in ("payment_settings", "paymentSettings"):
