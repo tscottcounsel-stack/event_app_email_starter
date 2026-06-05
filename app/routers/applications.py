@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# VENDCORE_POSTGRES_SOURCE_FIX_2026_06_05
+# VENDCORE_BOOTH_SAVE_INTERNAL_ID_FIX_2026_06_05
 
 import os
 import re
@@ -598,24 +598,127 @@ def _clear_stale_price_fields(app: Dict[str, Any]) -> None:
         app.pop(key, None)
 
 
-def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
-    """Persist booth fields from payload without allowing stale booth/price.
+def _lookup_booth_record_for_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Find the selected booth in the live event diagram using any safe signal.
 
-    This is the save path that prevents the exact regression Troy saw:
-    the map request for Booth 6 should not preserve an older A2/$150 record.
+    The vendor map sends both a human label (for display) and a generated canvas
+    id (for exact map lookup). Earlier code discarded generated ids too early,
+    so category survived but booth_id/price were lost and the app fell back to
+    $100. Generated ids are valid for lookup; they are only invalid for display.
+    """
+    if not isinstance(app, dict):
+        return {}
+
+    candidates: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = _as_str(value).lower()
+        if text:
+            candidates.add(text)
+
+    for source in (payload, app):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "selected_booth_id", "selectedBoothId", "booth_canvas_id", "boothCanvasId",
+            "booth_id", "boothId", "requested_booth_id", "requestedBoothId",
+            "booth_label", "boothLabel", "booth_number", "boothNumber",
+            "booth_name", "boothName", "selected_booth_label", "selectedBoothLabel",
+            "selected_booth_number", "selectedBoothNumber", "selected_booth_name",
+            "selectedBoothName",
+        ):
+            add(source.get(key))
+
+    for key in ("selected_booth", "selectedBooth", "primary_booth", "primaryBooth", "requested_booth", "requestedBooth", "booth"):
+        booth_obj = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(booth_obj, dict):
+            meta = booth_obj.get("meta") if isinstance(booth_obj.get("meta"), dict) else {}
+            for source in (booth_obj, meta):
+                for field in ("id", "booth_id", "boothId", "label", "number", "name", "code", "booth_label", "booth_number", "booth_name"):
+                    add(source.get(field))
+
+    if not candidates:
+        return {}
+
+    diagram_booths = _extract_booths_from_diagram(_get_diagram_for_event(app))
+    event = _get_event_for_app(app)
+    event_booths = _extract_booths_from_event(event) if isinstance(event, dict) else []
+
+    for booth in [*diagram_booths, *event_booths]:
+        if not isinstance(booth, dict):
+            continue
+        booth_values = _booth_match_values(booth)
+        if candidates.intersection(booth_values):
+            return booth
+
+    return {}
+
+
+def _booth_human_label_from_record(booth: Dict[str, Any]) -> str:
+    if not isinstance(booth, dict):
+        return ""
+    return _human_booth_value_from_object(booth)
+
+
+def _booth_category_from_record_for_save(booth: Dict[str, Any]) -> str:
+    if not isinstance(booth, dict):
+        return ""
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for source in (booth, meta):
+        for key in (
+            "category", "booth_category", "boothCategory", "category_name",
+            "categoryName", "category_label", "categoryLabel",
+            "vendor_category", "vendorCategory",
+        ):
+            text = _as_str(source.get(key))
+            if _is_useful_category(text):
+                return text
+    return ""
+
+
+def _booth_price_cents_from_record_for_save(booth: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(booth, dict):
+        return None
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for source in (booth, meta):
+        for key in (
+            "price_cents", "priceCents", "amount_cents", "amountCents",
+            "booth_price_cents", "boothPriceCents", "price", "amount",
+            "booth_price", "boothPrice",
+        ):
+            cents = _price_to_cents(source.get(key))
+            if cents:
+                return cents
+    return None
+
+
+def _persist_price_cents(app: Dict[str, Any], cents: int) -> None:
+    cents = int(cents)
+    app["booth_price_cents"] = cents
+    app["amount_cents"] = cents
+    app["resolved_price_cents"] = cents
+    app["price_cents"] = cents
+    app["total_cents"] = cents
+    app["booth_price"] = round(cents / 100, 2)
+    app["amount_due"] = round(cents / 100, 2)
+    app["total_price"] = round(cents / 100, 2)
+
+
+def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Persist the current vendor booth request exactly once and completely.
+
+    Generated canvas ids are kept for lookup only. Human-facing booth fields are
+    resolved from the selected booth record so Booth 6 remains Booth 6 instead
+    of disappearing or falling back to $100.
     """
     if not isinstance(app, dict):
         return ""
 
+    selected_booth_record = _lookup_booth_record_for_payload(app, payload)
+
     booth_value = _first_booth_value(payload)
-    previous_booth = _as_str(
-        app.get("booth_id")
-        or app.get("requested_booth_id")
-        or app.get("booth_label")
-        or app.get("booth_number")
-        or app.get("selected_booth_id")
-        or app.get("booth_canvas_id")
-    )
+    if not booth_value and selected_booth_record:
+        booth_value = _booth_human_label_from_record(selected_booth_record)
 
     internal_booth_id = _as_str(
         payload.get("selected_booth_id")
@@ -626,6 +729,14 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
     if not internal_booth_id:
         booth_obj = _selected_booth_object(payload)
         internal_booth_id = _as_str(booth_obj.get("id") or booth_obj.get("booth_id") or booth_obj.get("boothId"))
+    if not internal_booth_id and selected_booth_record:
+        internal_booth_id = _as_str(selected_booth_record.get("id") or selected_booth_record.get("booth_id") or selected_booth_record.get("boothId"))
+
+    # Last resort: never let a real booth request become "No booth selected".
+    # If we cannot resolve the label, store the raw id as requested_booth_id so
+    # the app remains linkable and price/category resolution can still work.
+    if not booth_value and internal_booth_id:
+        booth_value = internal_booth_id
 
     booth_changed = False
     current_human_booth = _as_str(
@@ -634,6 +745,7 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         or app.get("booth_label")
         or app.get("booth_number")
     )
+
     if booth_value:
         if booth_value != current_human_booth:
             booth_changed = True
@@ -641,6 +753,7 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         app["requested_booth_id"] = booth_value
         app["booth_label"] = booth_value
         app["booth_number"] = booth_value
+        app["booth_name"] = booth_value
 
     if internal_booth_id:
         if internal_booth_id != _as_str(app.get("selected_booth_id") or app.get("booth_canvas_id")):
@@ -652,22 +765,21 @@ def _apply_booth_payload(app: Dict[str, Any], payload: Dict[str, Any]) -> str:
         _clear_stale_price_fields(app)
 
     booth_category = _category_from_selected_booth_payload(payload)
+    if not booth_category and selected_booth_record:
+        booth_category = _booth_category_from_record_for_save(selected_booth_record)
     if booth_category:
         app["booth_category"] = booth_category
         app["requested_booth_category"] = booth_category
+        app["selected_booth_category"] = booth_category
+        app["category"] = booth_category
 
     explicit_cents = _price_from_selected_booth_payload(payload)
+    if not explicit_cents and selected_booth_record:
+        explicit_cents = _booth_price_cents_from_record_for_save(selected_booth_record)
+
     if explicit_cents:
-        app["booth_price_cents"] = int(explicit_cents)
-        app["amount_cents"] = int(explicit_cents)
-        app["resolved_price_cents"] = int(explicit_cents)
-        app["price_cents"] = int(explicit_cents)
-        app["total_cents"] = int(explicit_cents)
-        app["booth_price"] = round(int(explicit_cents) / 100, 2)
-        app["amount_due"] = round(int(explicit_cents) / 100, 2)
-        app["total_price"] = round(int(explicit_cents) / 100, 2)
+        _persist_price_cents(app, int(explicit_cents))
     elif booth_changed:
-        # Resolve from the live diagram after the new booth/category is saved.
         _persist_booth_category(app)
         _persist_resolved_booth_price(app)
 
@@ -689,7 +801,7 @@ def _normalize_string_list(value: Any) -> List[str]:
 def _is_useful_category(value: Any) -> bool:
     text = _as_str(value)
     normalized = text.lower()
-    return bool(text and normalized not in {"uncategorized", "other", "booth", "general", "default"})
+    return bool(text and normalized not in {"uncategorized", "booth", "general", "default"})
 
 
 def _vendor_profile_category_fallback(app: Dict[str, Any]) -> str:
