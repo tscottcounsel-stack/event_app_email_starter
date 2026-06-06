@@ -507,6 +507,41 @@ def _merge_req_bucket(target: Dict[str, list[Dict[str, Any]]], raw: Any) -> None
     target["compliance"] = _dedupe_req_items(target["compliance"])
     target["documents"] = _dedupe_req_items(target["documents"])
 
+def _event_wide_baseline_bucket() -> Dict[str, list[Dict[str, Any]]]:
+    """Baseline requirements that apply to every vendor.
+
+    The organizer requirements page uses these as the default global rules.
+    Keeping the same fallback here prevents the public/vendor endpoint from
+    returning an empty global bucket when the legacy runtime store has been
+    reset or the save payload arrives in an older shape.
+    """
+    return {
+        "compliance": [
+            {
+                "id": "event_rules",
+                "text": "Vendors must follow all event rules and staff instructions",
+                "required": True,
+            },
+            {
+                "id": "setup_teardown",
+                "text": "Vendors must comply with setup and teardown timing",
+                "required": True,
+            },
+        ],
+        "documents": [],
+    }
+
+
+def _ensure_event_wide_baseline(global_bucket: Dict[str, list[Dict[str, Any]]]) -> Dict[str, list[Dict[str, Any]]]:
+    bucket = {
+        "compliance": _dedupe_req_items(list((global_bucket or {}).get("compliance") or [])),
+        "documents": _dedupe_req_items(list((global_bucket or {}).get("documents") or [])),
+    }
+    if not bucket["compliance"] and not bucket["documents"]:
+        return _event_wide_baseline_bucket()
+    return bucket
+
+
 
 def _requirements_payload_for_event(event_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
     """Return requirements in the vendor-facing shape.
@@ -591,6 +626,8 @@ def _requirements_payload_for_event(event_id: int, db: Optional[Session] = None)
                     continue
                 target = categories.setdefault(name, {"compliance": [], "documents": []})
                 _merge_req_bucket(target, raw_bucket)
+
+    global_bucket = _ensure_event_wide_baseline(global_bucket)
 
     return {
         "requirements": {
@@ -1597,6 +1634,8 @@ def _normalize_saved_requirements_payload(payload: Dict[str, Any]) -> Dict[str, 
     except Exception:
         version = 1
 
+    global_bucket = _ensure_event_wide_baseline(global_bucket)
+
     return {
         "requirements": {
             "global": global_bucket,
@@ -1614,11 +1653,23 @@ def _save_requirements_for_event(event_id: int, payload: Dict[str, Any], db: Ses
     # File/runtime store remains the requirements store for now, but this route
     # is the single writer. Applications and public/vendor pages read the same
     # normalized shape after this save.
+    # Store under both int and string keys because legacy routes have used both
+    # forms over time. This prevents public/vendor reads from seeing an empty
+    # requirement set immediately after an organizer save.
     _REQUIREMENTS[int(event_id)] = normalized
+    _REQUIREMENTS[str(int(event_id))] = normalized
 
     store_event = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
-    store_event = {**store_event, "id": int(event_id), "requirements": normalized}
+    store_event = {
+        **store_event,
+        "id": int(event_id),
+        "requirements": normalized,
+        "global": normalized.get("requirements", {}).get("global", {}),
+        "categories": normalized.get("requirements", {}).get("categories", {}),
+        "requirements_published": True,
+    }
     _EVENTS[int(event_id)] = store_event
+    _EVENTS[str(int(event_id))] = store_event
 
     ev.requirements_published = True
     db.add(ev)
