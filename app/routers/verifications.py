@@ -1,21 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException
 
-from app.db import get_db
-from app.models.profile import Profile
-from app.routers.auth import get_current_user
-
-try:
-    import stripe
-except Exception:
-    stripe = None
+from app.store import _VERIFICATIONS, save_store
 
 router = APIRouter(tags=["Verifications"])
 
@@ -23,21 +13,6 @@ VALID_ROLES = {"vendor", "organizer"}
 VALID_REVIEW_STATUSES = {"verified", "rejected"}
 EXPIRING_SOON_DAYS = 30
 DEFAULT_VERIFICATION_DURATION_DAYS = 365
-DEFAULT_VERIFICATION_FEES = {"vendor": 25, "organizer": 49}
-
-REQUIRED_DOCS = {
-    "vendor": ["business_license"],
-    "organizer": ["business_license"],
-}
-
-DOC_LABELS = {
-    "business_license": "Business License / Registration",
-    "government_id": "Government-issued ID",
-    "certificate_of_insurance": "Certificate of Insurance",
-    "w9_document": "W-9",
-    "business_registration": "Business Registration",
-    "sales_tax_permit": "Sales Tax Permit",
-}
 
 
 def _now() -> datetime:
@@ -49,32 +24,23 @@ def _now_iso() -> str:
 
 
 def _safe_str(value: Any) -> str:
-    return "" if value is None else str(value).strip()
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _safe_lower(value: Any) -> str:
     return _safe_str(value).lower()
 
 
-def _role(value: Any) -> str:
-    role = _safe_lower(value)
-    if role not in VALID_ROLES:
-        raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
-    return role
-
-
-def _require_admin(user: dict = Depends(get_current_user)) -> dict:
-    if _safe_lower(user.get("role")) != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
-
-
 def _parse_datetime(value: Any) -> Optional[datetime]:
     raw = _safe_str(value)
     if not raw:
         return None
+
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
@@ -82,922 +48,235 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         return None
 
 
+def _next_verification_id() -> int:
+    ids: List[int] = []
+    for key in _VERIFICATIONS.keys():
+        try:
+            ids.append(int(key))
+        except Exception:
+            continue
+    return max(ids, default=0) + 1
+
+
 def _normalize_documents(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
+
     docs: List[Dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
-        doc_type = _safe_lower(item.get("type") or item.get("document_type") or item.get("category"))
-        label = _safe_str(item.get("label") or item.get("name") or DOC_LABELS.get(doc_type, doc_type or "Document"))
+
         doc = {
-            "name": _safe_str(item.get("name") or label),
-            "label": label,
-            "type": doc_type,
+            "name": _safe_str(item.get("name") or item.get("label") or item.get("type")),
+            "label": _safe_str(item.get("label") or item.get("name") or item.get("type")),
+            "type": _safe_str(item.get("type") or item.get("document_type") or item.get("category")),
             "url": _safe_str(item.get("url") or item.get("file_url") or item.get("fileUrl")),
-            "expiration_date": _safe_str(item.get("expiration_date") or item.get("expirationDate") or item.get("expires_at") or item.get("expiresAt")),
+            "expiration_date": _safe_str(
+                item.get("expiration_date")
+                or item.get("expirationDate")
+                or item.get("expires_at")
+                or item.get("expiresAt")
+            ),
             "uploaded_at": _safe_str(item.get("uploaded_at") or item.get("uploadedAt") or _now_iso()),
         }
+
         if doc["name"] or doc["url"] or doc["type"]:
             docs.append(doc)
+
     return docs
 
 
-def _document_status_summary(role: str, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
-    required = REQUIRED_DOCS.get(role, [])
-    now = _now()
-    found_types = set()
-    missing_expiration_docs: List[str] = []
-    expired_docs: List[Dict[str, Any]] = []
-    expiring_soon_docs: List[Dict[str, Any]] = []
-    active_docs: List[Dict[str, Any]] = []
-
-    for doc in documents:
-        doc_type = _safe_lower(doc.get("type"))
-        if doc_type:
-            found_types.add(doc_type)
-        label = _safe_str(doc.get("label") or doc.get("name") or DOC_LABELS.get(doc_type, doc_type or "Document"))
-        expiration = _parse_datetime(doc.get("expiration_date"))
-        item = {**doc, "label": label, "expiration_date": expiration.isoformat() if expiration else None}
-        if not expiration:
-            missing_expiration_docs.append(doc_type or label)
-        elif expiration < now:
-            expired_docs.append(item)
-        elif expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
-            expiring_soon_docs.append(item)
-        else:
-            active_docs.append(item)
-
-    missing_docs = [doc_type for doc_type in required if doc_type not in found_types]
-    return {
-        "required_docs": required,
-        "missing_docs": missing_docs,
-        "missing_expiration_docs": missing_expiration_docs,
-        "expired_docs": expired_docs,
-        "expiring_soon_docs": expiring_soon_docs,
-        "active_docs": active_docs,
-        "all_required_present": not missing_docs,
-        "all_required_unexpired": not missing_docs and not expired_docs and not missing_expiration_docs,
-    }
-
-
-def _compliance_lifecycle_status(doc_status: Dict[str, Any], expiration: Optional[datetime]) -> str:
-    """Return the compliance status that is allowed to override stale verified flags."""
-    now = _now()
-    if doc_status.get("missing_docs"):
-        return "needs_review"
-    if doc_status.get("missing_expiration_docs"):
-        return "needs_review"
-    if doc_status.get("expired_docs"):
-        return "expired"
-    if doc_status.get("expiring_soon_docs"):
-        return "expiring_soon"
-    if expiration:
-        if expiration < now:
-            return "expired"
-        if expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
-            return "expiring_soon"
-    return "current"
-
-
-def _verification_authority(*, row: Profile, data: Dict[str, Any], doc_status: Dict[str, Any], expiration: Optional[datetime], payment_paid: bool) -> Dict[str, Any]:
-    """Canonical verification truth for badges, public pages, and admin display.
-
-    A stale profile flag is not enough. Public trust requires approval plus
-    current required docs. Expiring/expired/missing docs remove the verified badge.
-    """
-    public_status_raw = _safe_lower(row.public_verification_status or data.get("public_verification_status") or data.get("publicVerificationStatus"))
-    status_raw = _safe_lower(row.verification_status or data.get("verification_status") or data.get("verificationStatus") or data.get("status"))
-    review_raw = _safe_lower(row.review_status or data.get("review_status") or data.get("reviewStatus"))
-    lifecycle = _compliance_lifecycle_status(doc_status, expiration)
-
-    deleted = (
-        status_raw in {"deleted", "dismissed"}
-        or review_raw in {"deleted", "dismissed"}
-        or public_status_raw in {"deleted", "dismissed"}
-        or bool(data.get("deleted_at") or data.get("dismissed_at"))
-    )
-    rejected = status_raw == "rejected" or review_raw == "rejected"
-    pending = status_raw in {"pending", "submitted", "under_review"} or review_raw in {"pending", "submitted", "under_review"}
-    approved = review_raw in {"approved", "verified"} or status_raw in {"approved", "verified", "complete"} or row.verified is True or data.get("verified") is True or data.get("is_verified") is True
-
-    if deleted:
-        return {"verified": False, "status": "deleted", "review": "deleted", "public_status": "deleted", "public_label": "Deleted", "lifecycle_status": "deleted"}
-    if rejected:
-        return {"verified": False, "status": "rejected", "review": "rejected", "public_status": "not_verified", "public_label": "Not verified", "lifecycle_status": "rejected"}
-    if lifecycle in {"expired", "expiring_soon", "needs_review"}:
-        label = "Expired" if lifecycle == "expired" else ("Renewal due" if lifecycle == "expiring_soon" else "Compliance review needed")
-        public_status = "expired" if lifecycle == "expired" else "renewal_pending"
-        return {"verified": False, "status": lifecycle, "review": lifecycle, "public_status": public_status, "public_label": label, "lifecycle_status": lifecycle}
-    if approved and payment_paid:
-        return {"verified": True, "status": "verified", "review": "approved", "public_status": "verified", "public_label": row.public_verification_label or data.get("public_verification_label") or "Verified", "lifecycle_status": "current"}
-    if pending or payment_paid:
-        return {"verified": False, "status": "pending", "review": "pending", "public_status": "renewal_pending", "public_label": "Renewal pending", "lifecycle_status": "pending"}
-    return {"verified": False, "status": "not_started", "review": "not_started", "public_status": "not_verified", "public_label": "Not verified", "lifecycle_status": "not_started"}
-
-
-def _earliest_expiration(documents: List[Dict[str, Any]]) -> Optional[datetime]:
-    expirations = [_parse_datetime(doc.get("expiration_date")) for doc in documents if isinstance(doc, dict)]
-    expirations = [dt for dt in expirations if dt]
-    return min(expirations) if expirations else None
-
-
-def _verification_fee_amount(role: str) -> int:
-    env_name = "STRIPE_VERIFICATION_FEE_ORGANIZER" if role == "organizer" else "STRIPE_VERIFICATION_FEE_VENDOR"
-    raw = (os.getenv(env_name) or "").strip()
-    try:
-        return int(round(float(raw))) if raw else int(DEFAULT_VERIFICATION_FEES.get(role, 25))
-    except Exception:
-        return int(DEFAULT_VERIFICATION_FEES.get(role, 25))
-
-
-
-
-def _verification_price_id(role: str) -> str:
-    """Return a recurring Stripe Price ID for annual verification checkout.
-
-    Preferred Railway env vars:
-    - vendor: STRIPE_PRICE_VERIFICATION_VENDOR
-    - organizer: STRIPE_PRICE_VERIFICATION_ORGANIZER
-
-    Backward/alternate names are supported so production can be configured
-    without another code change. If no recurring price is configured, checkout
-    falls back to the legacy one-time price_data flow.
-    """
-    normalized_role = _safe_lower(role)
-    if normalized_role == "organizer":
-        candidates = [
-            "STRIPE_PRICE_VERIFICATION_ORGANIZER",
-            "STRIPE_ORGANIZER_VERIFICATION_PRICE_ID",
-            "STRIPE_VERIFICATION_ORGANIZER_PRICE_ID",
-            "STRIPE_PRICE_ORGANIZER_VERIFICATION",
-        ]
-    else:
-        candidates = [
-            "STRIPE_PRICE_VERIFICATION_VENDOR",
-            "STRIPE_VENDOR_VERIFICATION_PRICE_ID",
-            "STRIPE_VERIFICATION_VENDOR_PRICE_ID",
-            "STRIPE_PRICE_VENDOR_VERIFICATION",
-        ]
-
-    candidates.extend([
-        "STRIPE_PRICE_VERIFICATION",
-        "STRIPE_VERIFICATION_PRICE_ID",
-    ])
-
-    for name in candidates:
-        value = _safe_str(os.getenv(name))
-        if value:
-            return value
-    return ""
-
-def _require_stripe() -> Any:
-    if stripe is None:
-        raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
-    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-    if not secret:
-        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY is not set")
-    stripe.api_key = secret
-    return stripe
-
-
-def _checkout_session_value(session: Any, key: str, default: Any = None) -> Any:
-    if isinstance(session, dict):
-        return session.get(key, default)
-    return getattr(session, key, default)
-
-
-def _checkout_metadata(session: Any) -> Dict[str, Any]:
-    metadata = _checkout_session_value(session, "metadata", {})
-    if isinstance(metadata, dict):
-        return metadata
-    try:
-        return dict(metadata or {})
-    except Exception:
-        return {}
-
-
-def _get_profile(db: Session, email: str, role: str) -> Optional[Profile]:
-    email = _safe_lower(email)
-    role = _safe_lower(role)
-    return (
-        db.query(Profile)
-        .filter(func.lower(Profile.email) == email, Profile.role == role)
-        .one_or_none()
-    )
-
-
-def _get_or_create_profile(db: Session, email: str, role: str) -> Profile:
-    email = _safe_lower(email)
-    role = _role(role)
-    row = _get_profile(db, email, role)
-    if row is None:
-        row = Profile(email=email, role=role)
-        row.data = {"email": email, "role": role}
-        row.categories = []
-        db.add(row)
-        db.flush()
-    return row
-
-
-def _profile_data(row: Profile) -> Dict[str, Any]:
-    data = dict(row.data or {})
-    data.setdefault("email", _safe_lower(row.email))
-    data.setdefault("role", _safe_lower(row.role))
-    return data
-
-
-def _set_profile_state(row: Profile, data: Dict[str, Any]) -> None:
-    existing = dict(row.data or {})
-    merged = {**existing, **dict(data or {})}
-    email = _safe_lower(merged.get("email") or row.email)
-    role = _safe_lower(merged.get("role") or row.role)
-    merged["email"] = email
-    merged["role"] = role
-
-    name = _safe_str(
-        merged.get("business_name")
-        or merged.get("businessName")
-        or merged.get("organizationName")
-        or merged.get("name")
-        or row.business_name
-    )
-    display_name = _safe_str(merged.get("contact_name") or merged.get("contactName") or merged.get("display_name") or row.display_name or name)
-    categories = merged.get("categories") or merged.get("vendor_categories") or row.categories or []
-    if not isinstance(categories, list):
-        categories = [str(categories)] if categories else []
-
-    row.email = email
-    row.role = role
-    row.business_name = name or row.business_name
-    row.display_name = display_name or row.display_name
-    row.city = _safe_str(merged.get("city") or row.city)
-    row.state = _safe_str(merged.get("state") or row.state)
-    row.categories = categories
-    row.data = merged
-
-    merged_public_status = _safe_lower(merged.get("public_verification_status") or merged.get("publicVerificationStatus") or row.public_verification_status)
-    merged_verification_status = _safe_lower(merged.get("verification_status") or merged.get("verificationStatus") or row.verification_status)
-    merged_review_status = _safe_lower(merged.get("review_status") or merged.get("reviewStatus") or row.review_status)
-
-    # Verification is intentionally derived from explicit status fields.
-    # Do not preserve row.verified when a fresh submission says pending/rejected;
-    # that was causing newly submitted accounts to appear verified in admin.
-    explicit_unverified = (
-        merged.get("verified") is False
-        or merged.get("is_verified") is False
-        or merged_verification_status in {"pending", "submitted", "under_review", "rejected", "not_started", "unverified"}
-        or merged_review_status in {"pending", "submitted", "under_review", "rejected", "not_started"}
-        or merged_public_status in {"renewal_pending", "not_verified", "unverified"}
-    )
-    # Only explicit approval flags should make a profile verified.
-    # Do not re-verify old/test accounts from stale JSON status strings.
-    explicit_verified = (
-        merged.get("verified") is True
-        or merged.get("is_verified") is True
-    )
-
-    row.verified = bool(explicit_verified and not explicit_unverified)
-    row.verification_status = merged_verification_status or ("verified" if row.verified else None)
-    row.public_verification_status = merged_public_status or ("verified" if row.verified else None)
-    row.public_verification_label = _safe_str(merged.get("public_verification_label") or ("Verified" if row.verified else row.public_verification_label)) or None
-    row.review_status = _safe_lower(merged.get("review_status") or merged.get("reviewStatus") or ("approved" if row.verified else row.review_status)) or None
-    row.visibility_tier = _safe_lower(merged.get("visibility_tier") or merged.get("visibilityTier") or row.visibility_tier) or None
-    row.subscription_plan = _safe_lower(merged.get("subscription_plan") or merged.get("subscriptionPlan") or merged.get("plan") or row.subscription_plan) or None
-    row.subscription_status = _safe_lower(merged.get("subscription_status") or merged.get("subscriptionStatus") or row.subscription_status) or None
-    # Preserve premium/admin placement only when explicitly supplied.
-    # Verification payment/submission must never create premium placement.
-    if "featured" in data:
-        row.featured = bool(data.get("featured"))
-    if "promoted" in data:
-        row.promoted = bool(data.get("promoted"))
-
-
-def _profile_public(row: Profile) -> Dict[str, Any]:
-    data = _profile_data(row)
-    documents = data.get("documents") if isinstance(data.get("documents"), list) else []
-    has_documents = len(documents) > 0
-    has_submitted = has_documents or bool(data.get("submitted_at"))
-    payment_paid = bool(data.get("fee_paid") or _safe_lower(data.get("payment_status")) == "paid" or _safe_lower(data.get("verification_payment_status")) == "paid")
-    has_review_record = bool(data.get("reviewed_at") or data.get("last_verified_at") or data.get("expires_at") or data.get("expiration_date"))
-    has_verification_evidence = has_documents or has_submitted or payment_paid or has_review_record
-    doc_status = _document_status_summary(_safe_lower(row.role), documents)
-    expires_at = data.get("expires_at") or data.get("expiration_date")
-    expiration = _parse_datetime(expires_at) or _earliest_expiration(documents)
-
-    authority = _verification_authority(
-        row=row,
-        data=data,
-        doc_status=doc_status,
-        expiration=expiration,
-        payment_paid=payment_paid,
-    )
-    verified = bool(authority["verified"])
-    status = authority["status"]
-    review = authority["review"]
-    public_status = authority["public_status"]
-    public_label = authority["public_label"]
-    lifecycle_status = authority["lifecycle_status"]
-
-    return {
-        **data,
-        "id": row.id,
-        "profile_id": row.id,
-        "user_id": row.id,
-        "email": _safe_lower(row.email),
-        "role": _safe_lower(row.role),
-        "name": row.business_name or row.display_name or data.get("business_name") or data.get("businessName") or data.get("organizationName") or data.get("email"),
-        "business_name": row.business_name or data.get("business_name") or data.get("businessName") or data.get("organizationName"),
-        "company_name": row.business_name or data.get("business_name") or data.get("businessName") or data.get("organizationName"),
-        "verified": verified,
-        "is_verified": verified,
-        "status": status,
-        "verification_status": status,
-        "review_status": review,
-        "public_verification_status": public_status,
-        "public_verification_label": public_label,
-        "payment_status": "paid" if payment_paid else "unpaid",
-        "fee_paid": payment_paid,
-        "fee_amount": data.get("fee_amount") or _verification_fee_amount(_safe_lower(row.role)),
-        "documents": documents,
-        "document_status": doc_status,
-        "lifecycle_status": lifecycle_status,
-        "submitted_at": data.get("submitted_at"),
-        "created_at": data.get("created_at") or (row.created_at.isoformat() if row.created_at else None),
-        "reviewed_at": data.get("reviewed_at") or data.get("last_verified_at"),
-        "reviewed_by": data.get("reviewed_by"),
-        "notes": data.get("notes") or "",
-        "expires_at": expiration.isoformat() if expiration else data.get("expires_at"),
-        "expiration_date": expiration.isoformat() if expiration else data.get("expiration_date"),
-        "last_verified_at": data.get("last_verified_at"),
-        "subscription_plan": row.subscription_plan or data.get("subscription_plan") or data.get("plan"),
-        "subscription_status": row.subscription_status or data.get("subscription_status"),
-        "visibility_tier": row.visibility_tier or data.get("visibility_tier"),
-        "featured": bool(row.featured),
-        "promoted": bool(row.promoted),
-    }
-
-def _is_pending_queue_row(row: Profile) -> bool:
-    public = _profile_public(row)
-    if public.get("verified") is True or public.get("public_verification_status") == "verified":
-        return False
-    status = _safe_lower(public.get("status") or public.get("verification_status"))
-    review = _safe_lower(public.get("review_status"))
-    payment_status = _safe_lower(public.get("payment_status"))
-    docs = public.get("documents") if isinstance(public.get("documents"), list) else []
-    return bool(
-        docs
-        or status in {"pending", "submitted", "renewal_pending", "needs_renewal", "expired", "expiring_soon"}
-        or review in {"pending", "renewal_pending"}
-    )
-
-
-def mark_verification_paid(*, email: str, role: str, stripe_session_id: str = "", stripe_payment_intent_id: str = "", amount_paid: Any = None) -> Optional[Dict[str, Any]]:
-    # Used by billing/webhook flows. Persist payment state to Profile.data, not JSON.
-    from app.db import SessionLocal
-    if SessionLocal is None:
-        return None
-    db = SessionLocal()
-    try:
-        normalized_email = _safe_lower(email)
-        normalized_role = _role(role)
-        row = _get_or_create_profile(db, normalized_email, normalized_role)
-        data = _profile_data(row)
-        # Verification fee payment is NOT approval.
-        # A paid submission must remain pending until an admin explicitly approves it.
-        current_status = _safe_lower(
-            data.get("verification_status")
-            or data.get("status")
-            or row.verification_status
-            or row.public_verification_status
-        )
-        already_reviewed = current_status in {"verified", "approved"}
-
-        data.update({
-            "payment_status": "paid",
-            "verification_payment_status": "paid",
-            "fee_paid": True,
-            "paid_at": _now_iso(),
-            "fee_amount": data.get("fee_amount") or _verification_fee_amount(normalized_role),
-        })
-
-        if not already_reviewed:
-            data.update({
-                "verified": False,
-                "is_verified": False,
-                "status": "pending",
-                "verification_status": "pending",
-                "review_status": "pending",
-                "public_verification_status": "renewal_pending",
-                "public_verification_label": "Renewal pending",
-                # Payment alone is not a submitted application. submitted_at is set only after documents are uploaded.
-                "reviewed_at": None,
-                "reviewed_by": None,
-            })
-            row.verified = False
-            row.verification_status = "pending"
-            row.review_status = "pending"
-            row.public_verification_status = "renewal_pending"
-            row.public_verification_label = "Renewal pending"
-        if stripe_session_id:
-            data["stripe_checkout_session_id"] = stripe_session_id
-        if stripe_payment_intent_id:
-            data["stripe_payment_intent_id"] = stripe_payment_intent_id
-        if amount_paid not in (None, ""):
-            try:
-                data["amount_paid"] = round(float(amount_paid) / 100, 2)
-            except Exception:
-                data["amount_paid"] = amount_paid
-        _set_profile_state(row, data)
-        db.commit()
-        db.refresh(row)
-        return _profile_public(row)
-    finally:
-        db.close()
+def _record_matches_identity(record: Dict[str, Any], email: str, role: str) -> bool:
+    record_email = _safe_lower(record.get("email"))
+    record_role = _safe_lower(record.get("role"))
+    return bool(record_email and email and record_email == email and record_role == role)
 
 
 def _find_latest_record(email: str, role: str = "") -> Optional[Dict[str, Any]]:
-    # Compatibility helper for existing vendor/organizer modules. Postgres only.
-    from app.db import SessionLocal
-    if SessionLocal is None:
+    normalized_email = _safe_lower(email)
+    normalized_role = _safe_lower(role)
+
+    matches: List[Dict[str, Any]] = []
+    for record in _VERIFICATIONS.values():
+        if not isinstance(record, dict):
+            continue
+        if _safe_lower(record.get("email")) != normalized_email:
+            continue
+        if normalized_role and _safe_lower(record.get("role")) != normalized_role:
+            continue
+        matches.append(record)
+
+    if not matches:
         return None
-    db = SessionLocal()
-    try:
-        normalized_email = _safe_lower(email)
-        normalized_role = _safe_lower(role)
-        query = db.query(Profile).filter(func.lower(Profile.email) == normalized_email)
-        if normalized_role:
-            query = query.filter(Profile.role == normalized_role)
-        row = query.order_by(Profile.updated_at.desc()).first()
-        return _profile_public(row) if row else None
-    finally:
-        db.close()
+
+    matches.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
+    return matches[0]
+
+
+def _compute_lifecycle_status(record: Optional[Dict[str, Any]]) -> str:
+    if not record:
+        return "unverified"
+
+    status = _safe_lower(record.get("status")) or "pending"
+
+    if status != "verified":
+        return status
+
+    expiration = _parse_datetime(record.get("expiration_date"))
+    if not expiration:
+        return "verified"
+
+    now = _now()
+    if expiration < now:
+        return "expired"
+
+    if expiration - now <= timedelta(days=EXPIRING_SOON_DAYS):
+        return "expiring_soon"
+
+    return "verified"
+
+
+def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **record,
+        "verification_status": _compute_lifecycle_status(record),
+    }
 
 
 @router.post("/verification/submit")
-def submit_verification(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    email = _safe_lower(payload.get("email") or user.get("email"))
-    role = _role(payload.get("role") or user.get("role"))
+def submit_verification(payload: Dict[str, Any]):
+    email = _safe_lower(payload.get("email"))
+    role = _safe_lower(payload.get("role"))
+
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
 
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
+
+    existing = None
+    for verification_id, record in _VERIFICATIONS.items():
+        if isinstance(record, dict) and _record_matches_identity(record, email, role):
+            existing = (verification_id, record)
+            break
+
     documents = _normalize_documents(payload.get("documents"))
-    doc_summary = _document_status_summary(role, documents)
-    if doc_summary.get("missing_docs"):
-        labels = [DOC_LABELS.get(item, item) for item in doc_summary["missing_docs"]]
-        raise HTTPException(status_code=400, detail="Missing required document(s): " + ", ".join(labels))
-    if doc_summary.get("missing_expiration_docs"):
-        labels = [DOC_LABELS.get(item, item) for item in doc_summary["missing_expiration_docs"]]
-        raise HTTPException(status_code=400, detail="Expiration date required for: " + ", ".join(labels))
-
-    row = _get_or_create_profile(db, email, role)
-    data = _profile_data(row)
     submitted_at = _now_iso()
-    data.update({
-        "email": email,
-        "role": role,
-        # A fresh submission must be pending, even if this profile had old/stale
-        # verified flags from a prior test account or prior verification cycle.
-        "verified": False,
-        "is_verified": False,
-        "status": "pending",
-        "verification_status": "pending",
-        "review_status": "pending",
-        "public_verification_status": "renewal_pending",
-        "public_verification_label": "Renewal pending",
-        "submitted_at": submitted_at,
-        "reviewed_at": None,
-        "reviewed_by": None,
-        "notes": _safe_str(payload.get("notes") or data.get("notes")),
-        "documents": documents,
-        "payment_status": _safe_str(payload.get("payment_status") or data.get("payment_status") or "unpaid"),
-        "fee_paid": bool(data.get("fee_paid") or _safe_lower(payload.get("payment_status")) == "paid"),
-        "fee_amount": payload.get("fee_amount", data.get("fee_amount", _verification_fee_amount(role))),
-        "expiration_date": payload.get("expiration_date") or data.get("expiration_date"),
-        "updated_at": submitted_at,
-    })
-    row.verified = False
-    row.verification_status = "pending"
-    row.review_status = "pending"
-    row.public_verification_status = "renewal_pending"
-    row.public_verification_label = "Renewal pending"
-    _set_profile_state(row, data)
-    db.commit()
-    db.refresh(row)
-    return {"ok": True, "verification": _profile_public(row)}
 
-
-@router.get("/verification/me")
-def get_my_verification(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    email = _safe_lower(user.get("email"))
-    role = _role(user.get("role"))
-    row = _get_or_create_profile(db, email, role)
-    db.commit()
-    db.refresh(row)
-    public = _profile_public(row)
-    return {
-        "ok": True,
-        "email": email,
-        "role": role,
-        "verification_status": public.get("verification_status"),
-        "expires_at": public.get("expires_at"),
-        "last_verified_at": public.get("last_verified_at"),
-        "expires_in_days": None,
-        "verification": public,
-    }
-
-
-
-
-@router.get("/verification/current")
-def get_current_verification(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    return get_my_verification(user=user, db=db)
-
-
-
-@router.get("/verification/vendor-doc-vault")
-def get_my_vendor_doc_vault(user: dict = Depends(get_current_user)):
-    email = _safe_lower(user.get("email"))
-    role = _safe_lower(user.get("role"))
-    if role != "vendor":
-        raise HTTPException(status_code=403, detail="Vendor doc vault is only available for vendor accounts")
-    return {
-        "ok": True,
-        "documents": get_vendor_doc_vault(email),
-    }
-
-@router.post("/verification/create-checkout")
-def create_verification_checkout(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    stripe_sdk = _require_stripe()
-    email = _safe_lower(user.get("email"))
-    role = _role(user.get("role"))
-    success_url = _safe_str(payload.get("success_url"))
-    cancel_url = _safe_str(payload.get("cancel_url"))
-    if not success_url or not cancel_url:
-        raise HTTPException(status_code=400, detail="Missing success_url or cancel_url")
-
-    row = _get_or_create_profile(db, email, role)
-    data = _profile_data(row)
-    fee_amount = _verification_fee_amount(role)
-    data["fee_amount"] = data.get("fee_amount") or fee_amount
-    _set_profile_state(row, data)
-    db.commit()
-
-    price_id = _verification_price_id(role)
-    if not price_id:
-        raise HTTPException(
-            status_code=500,
-            detail="Stripe verification price is not configured. Set STRIPE_PRICE_VERIFICATION_VENDOR or STRIPE_PRICE_VERIFICATION_ORGANIZER.",
+    if existing:
+        verification_id, record = existing
+        record.update(
+            {
+                "id": int(verification_id),
+                "email": email,
+                "role": role,
+                "status": "pending",
+                "submitted_at": submitted_at,
+                "reviewed_at": None,
+                "reviewed_by": None,
+                "notes": _safe_str(payload.get("notes") or record.get("notes")),
+                "documents": documents,
+                "payment_status": _safe_str(payload.get("payment_status") or record.get("payment_status") or "unpaid"),
+                "fee_amount": payload.get("fee_amount", record.get("fee_amount", 0)),
+                "expiration_date": payload.get("expiration_date") or record.get("expiration_date"),
+            }
         )
+        saved = record
+    else:
+        verification_id = _next_verification_id()
+        saved = {
+            "id": verification_id,
+            "email": email,
+            "role": role,
+            "status": "pending",
+            "submitted_at": submitted_at,
+            "reviewed_at": None,
+            "reviewed_by": None,
+            "notes": _safe_str(payload.get("notes")),
+            "documents": documents,
+            "payment_status": _safe_str(payload.get("payment_status") or "unpaid"),
+            "fee_amount": payload.get("fee_amount", 0),
+            "expiration_date": payload.get("expiration_date"),
+        }
+        _VERIFICATIONS[verification_id] = saved
 
-    metadata = {
-        "payment_type": "verification_fee",
-        "verification": "true",
-        "email": email,
-        "role": role,
-        "renewal": "true" if payload.get("renewal") else "false",
+    save_store()
+
+    return {
+        "ok": True,
+        "verification": _public_record(saved),
     }
-
-    session_kwargs: Dict[str, Any] = {
-        "payment_method_types": ["card"],
-        "success_url": success_url,
-        "cancel_url": cancel_url,
-        "client_reference_id": str(user.get("id") or ""),
-        "customer_email": email or None,
-        "metadata": metadata,
-    }
-
-    # Annual verification billing: use a recurring Stripe Price created in Stripe.
-    # This keeps verification separate from premium subscriptions because the
-    # metadata still identifies the checkout as payment_type=verification_fee.
-    session_kwargs.update({
-        "mode": "subscription",
-        "line_items": [{"price": price_id, "quantity": 1}],
-        "subscription_data": {"metadata": metadata},
-    })
-
-    try:
-        session = stripe_sdk.checkout.Session.create(**session_kwargs)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Stripe verification checkout failed: {exc}")
-
-    data = _profile_data(row)
-    data["stripe_checkout_session_id"] = str(_checkout_session_value(session, "id", "") or "")
-    data["checkout_created_at"] = _now_iso()
-    _set_profile_state(row, data)
-    db.commit()
-    return {"ok": True, "url": _checkout_session_value(session, "url", None), "session_id": _checkout_session_value(session, "id", None), "verification": _profile_public(row)}
-
-
-@router.post("/verification/confirm-payment")
-def confirm_verification_payment(payload: Dict[str, Any], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Confirm a Stripe verification checkout without mixing it with subscriptions.
-
-    New verification sessions are tagged with metadata. This fallback also accepts
-    a paid session when the session id matches the checkout session stored on the
-    current user's Profile row. That keeps older in-flight verification checkouts
-    from failing with "Stripe session is not a verification payment" while still
-    preventing unrelated Stripe sessions from approving verification payments.
-    """
-    stripe_sdk = _require_stripe()
-    session_id = _safe_str(payload.get("session_id"))
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id required")
-
-    try:
-        session = stripe_sdk.checkout.Session.retrieve(session_id)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to retrieve Stripe session: {exc}")
-
-    current_email = _safe_lower(user.get("email"))
-    current_role = _role(user.get("role"))
-    metadata = _checkout_metadata(session)
-    payment_type = _safe_lower(metadata.get("payment_type"))
-    verification_flag = _safe_lower(metadata.get("verification")) == "true"
-    payment_status = _safe_lower(_checkout_session_value(session, "payment_status", ""))
-    session_status = _safe_lower(_checkout_session_value(session, "status", ""))
-
-    row = _get_or_create_profile(db, current_email, current_role)
-    data = _profile_data(row)
-    stored_session_id = _safe_str(data.get("stripe_checkout_session_id") or data.get("last_session_id"))
-    session_matches_profile = bool(stored_session_id and stored_session_id == session_id)
-
-    session_customer_email = _safe_lower(
-        _checkout_session_value(session, "customer_email", "")
-        or ((_checkout_session_value(session, "customer_details", {}) or {}).get("email") if isinstance(_checkout_session_value(session, "customer_details", {}), dict) else "")
-    )
-    email_matches_user = bool(session_customer_email and session_customer_email == current_email)
-
-    is_verification_session = payment_type == "verification_fee" or verification_flag or session_matches_profile
-    if not is_verification_session:
-        raise HTTPException(status_code=400, detail="Stripe session is not a verification payment")
-
-    email = _safe_lower(metadata.get("email") or session_customer_email or current_email)
-    role = _role(metadata.get("role") or current_role)
-    if email != current_email or role != current_role:
-        raise HTTPException(status_code=403, detail="Stripe session does not belong to this account")
-
-    if not (session_matches_profile or email_matches_user or verification_flag or payment_type == "verification_fee"):
-        raise HTTPException(status_code=403, detail="Stripe session does not belong to this account")
-
-    if payment_status != "paid" and session_status != "complete":
-        raise HTTPException(status_code=400, detail="Payment is not marked paid yet")
-
-    record = mark_verification_paid(
-        email=email,
-        role=role,
-        stripe_session_id=session_id,
-        stripe_payment_intent_id=str(_checkout_session_value(session, "payment_intent", "") or ""),
-        amount_paid=_checkout_session_value(session, "amount_total", None),
-    )
-    return {"ok": True, "verification": record}
 
 
 @router.get("/verification/status")
-def get_verification_status(email: str, role: str = "", db: Session = Depends(get_db)):
-    normalized_email = _safe_lower(email)
-    normalized_role = _safe_lower(role)
-    query = db.query(Profile).filter(func.lower(Profile.email) == normalized_email)
-    if normalized_role:
-        query = query.filter(Profile.role == normalized_role)
-    row = query.first()
-    public = _profile_public(row) if row else None
-    return {"ok": True, "email": normalized_email, "role": normalized_role, "verification_status": public.get("verification_status") if public else "unverified", "verification": public}
-
-
-
-
-def _is_admin_queue_record(record: Dict[str, Any]) -> bool:
-    """Only show real verification workflow records in the admin queue.
-
-    The queue must never resurrect deleted/dismissed profiles or empty shells.
-    A profile belongs here only if it has real verification evidence or an
-    explicit active verification workflow status.
-    """
-    email = _safe_lower(record.get("email"))
-    role = _safe_lower(record.get("role"))
-
-    if not email or role not in VALID_ROLES:
-        return False
-
-    if email == "admin@example.com" or email.endswith("@example.com"):
-        return False
-
-    status = _safe_lower(record.get("verification_status") or record.get("status"))
-    review = _safe_lower(record.get("review_status"))
-    public_status = _safe_lower(record.get("public_verification_status"))
-
-    if (
-        record.get("deleted_at")
-        or record.get("dismissed_at")
-        or status in {"dismissed", "deleted"}
-        or review in {"dismissed", "deleted"}
-        or public_status in {"dismissed", "deleted"}
-    ):
-        return False
-
-    docs = record.get("documents") if isinstance(record.get("documents"), list) else []
-    payment_status = _safe_lower(record.get("payment_status"))
-    verification_payment_status = _safe_lower(record.get("verification_payment_status"))
-    has_paid = payment_status == "paid" or verification_payment_status == "paid" or bool(record.get("fee_paid"))
-    has_docs = bool(docs)
-    has_submission = bool(record.get("submitted_at")) or bool(record.get("reviewed_at")) or bool(record.get("last_verified_at"))
-    active_status = status in {"verified", "pending", "submitted", "under_review", "rejected", "expired", "expiring_soon", "needs_renewal", "renewal_pending"}
-    active_review = review in {"approved", "verified", "pending", "submitted", "under_review", "rejected"}
-    active_public = public_status in {"verified", "renewal_pending"}
-
-    # Empty stale shells, including shells recreated after account/profile delete,
-    # should not appear in the admin verification queue.
-    if not (has_docs or has_submission or has_paid or active_status or active_review or active_public or record.get("verified") is True):
-        return False
-
-    return True
+def get_verification_status(email: str, role: str = ""):
+    record = _find_latest_record(email, role)
+    return {
+        "ok": True,
+        "email": _safe_lower(email),
+        "role": _safe_lower(role),
+        "verification_status": _compute_lifecycle_status(record),
+        "verification": _public_record(record) if record else None,
+    }
 
 
 @router.get("/admin/verifications")
-def get_admin_verifications(
-    role: str = "all",
-    status: str = "all",
-    db: Session = Depends(get_db),
-    user: dict = Depends(_require_admin),
-):
-    # Admin page should be a truth view over Profile rows, not only pending queue rows.
-    # Frontend can still filter client-side, and callers can optionally pass role/status.
-    normalized_role = _safe_lower(role)
-    normalized_status = _safe_lower(status)
+def get_admin_verifications():
+    records = [
+        _public_record(record)
+        for record in _VERIFICATIONS.values()
+        if isinstance(record, dict)
+    ]
+    records.sort(key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""), reverse=True)
 
-    query = db.query(Profile).filter(
-        Profile.role.in_(["vendor", "organizer"]),
-        func.lower(Profile.email) != "admin@example.com",
-        ~func.lower(Profile.email).like("%@example.com"),
-    )
-    if normalized_role in VALID_ROLES:
-        query = query.filter(Profile.role == normalized_role)
+    return {
+        "ok": True,
+        "verifications": records,
+        "count": len(records),
+    }
 
-    rows = query.all()
-    records = [_profile_public(row) for row in rows]
-    records = [record for record in records if _is_admin_queue_record(record)]
-
-    if normalized_status and normalized_status != "all":
-        records = [
-            record
-            for record in records
-            if _safe_lower(record.get("verification_status") or record.get("status")) == normalized_status
-            or _safe_lower(record.get("review_status")) == normalized_status
-            or _safe_lower(record.get("public_verification_status")) == normalized_status
-        ]
-
-    records.sort(
-        key=lambda item: _safe_str(item.get("submitted_at") or item.get("created_at") or ""),
-        reverse=True,
-    )
-    return {"ok": True, "verifications": records, "count": len(records)}
 
 @router.post("/admin/verify/{verification_id}")
-def review_verification(verification_id: int, payload: Dict[str, Any], db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
-    row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
-    if row is None:
+def review_verification(verification_id: int, payload: Dict[str, Any]):
+    record = _VERIFICATIONS.get(verification_id)
+
+    if not isinstance(record, dict):
         raise HTTPException(status_code=404, detail="Verification not found")
+
     status = _safe_lower(payload.get("status"))
+
     if status not in VALID_REVIEW_STATUSES:
         raise HTTPException(status_code=400, detail="Status must be verified or rejected")
 
-    data = _profile_data(row)
-    now = _now()
-    reviewed_at = now.isoformat()
-    data["reviewed_at"] = reviewed_at
-    data["reviewed_by"] = _safe_str(payload.get("reviewed_by") or payload.get("reviewedBy") or user.get("email"))
-    data["notes"] = _safe_str(payload.get("notes"))
+    record["status"] = status
+    record["reviewed_at"] = _now_iso()
+    record["reviewed_by"] = _safe_str(payload.get("reviewed_by") or payload.get("reviewedBy"))
+    record["notes"] = _safe_str(payload.get("notes"))
 
     if status == "verified":
-        documents = data.get("documents") if isinstance(data.get("documents"), list) else []
-        expiration = _parse_datetime(payload.get("expires_at") or payload.get("expiration_date") or payload.get("expirationDate")) or _earliest_expiration(documents) or (now + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS))
-        data.update({
-            "verified": True,
-            "is_verified": True,
-            "status": "verified",
-            "verification_status": "verified",
-            "review_status": "approved",
-            "public_verification_status": "verified",
-            "public_verification_label": "Verified",
-            "last_verified_at": reviewed_at,
-            "expires_at": expiration.isoformat(),
-            "expiration_date": expiration.isoformat(),
-            "locked": True,
-        })
-        row.verified = True
-        row.verification_status = "verified"
-        row.review_status = "approved"
-        row.public_verification_status = "verified"
-        row.public_verification_label = "Verified"
-    else:
-        data.update({
-            "verified": False,
-            "is_verified": False,
-            "status": "rejected",
-            "verification_status": "rejected",
-            "review_status": "rejected",
-            "public_verification_status": "not_verified",
-            "public_verification_label": "Not verified",
-            "locked": True,
-        })
-        row.verified = False
-        row.verification_status = "rejected"
-        row.review_status = "rejected"
-        row.public_verification_status = "not_verified"
-        row.public_verification_label = "Not verified"
+        provided_expiration = _safe_str(payload.get("expiration_date") or payload.get("expirationDate"))
+        record["expiration_date"] = provided_expiration or (
+            _now() + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
+        ).isoformat()
 
-    _set_profile_state(row, data)
-    db.commit()
-    db.refresh(row)
-    return {"ok": True, "verification": _profile_public(row)}
+    save_store()
 
-
-@router.post("/admin/unverify/{verification_id}")
-def unverify_account(verification_id: int, payload: Dict[str, Any] = None, db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
-    """Remove public verification while preserving uploaded documents and payment/history.
-
-    This is intentionally different from reject/delete:
-    - docs stay in the Vendor/Organizer Doc Vault for review/history
-    - public verified badge is removed immediately
-    - record returns to pending so an admin can approve again later
-    """
-    payload = payload or {}
-    row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Verification not found")
-
-    data = _profile_data(row)
-    now_iso = _now_iso()
-
-    if data.get("last_verified_at"):
-        data["previous_last_verified_at"] = data.get("last_verified_at")
-    if data.get("expires_at") or data.get("expiration_date"):
-        data["previous_expires_at"] = data.get("expires_at") or data.get("expiration_date")
-
-    data.update({
-        "verified": False,
-        "is_verified": False,
-        "status": "pending",
-        "verification_status": "pending",
-        "review_status": "pending",
-        "public_verification_status": "not_verified",
-        "public_verification_label": "Not verified",
-        "last_verified_at": None,
-        "expires_at": None,
-        "expiration_date": None,
-        "locked": False,
-        "unverified_at": now_iso,
-        "unverified_by": _safe_str(user.get("email")),
-        "notes": _safe_str(payload.get("notes") or data.get("notes") or ""),
-    })
-
-    row.verified = False
-    row.verification_status = "pending"
-    row.review_status = "pending"
-    row.public_verification_status = "not_verified"
-    row.public_verification_label = "Not verified"
-
-    _set_profile_state(row, data)
-    db.commit()
-    db.refresh(row)
-    return {"ok": True, "verification": _profile_public(row)}
+    return {
+        "ok": True,
+        "verification": _public_record(record),
+    }
 
 
 @router.delete("/admin/verifications/{verification_id}")
-def delete_verification(verification_id: int, db: Session = Depends(get_db), user: dict = Depends(_require_admin)):
-    row = db.query(Profile).filter(Profile.id == int(verification_id)).one_or_none()
-    if row is None:
+def delete_verification(verification_id: int):
+    if verification_id not in _VERIFICATIONS:
         raise HTTPException(status_code=404, detail="Verification not found")
 
-    data = _profile_data(row)
-    now_iso = _now_iso()
-    admin_email = _safe_str(user.get("email"))
+    removed = _VERIFICATIONS.pop(verification_id)
+    save_store()
 
-    data.update({
-        "verified": False,
-        "is_verified": False,
-        "status": "deleted",
-        "verification_status": "deleted",
-        "review_status": "deleted",
-        "public_verification_status": "deleted",
-        "public_verification_label": "Deleted",
-        "dismissed_at": now_iso,
-        "deleted_at": now_iso,
-        "dismissed_by": admin_email,
-        "deleted_by": admin_email,
-    })
-
-    row.verified = False
-    row.verification_status = "deleted"
-    row.review_status = "deleted"
-    row.public_verification_status = "deleted"
-    row.public_verification_label = "Deleted"
-    row.data = data
-
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-
-    return {"ok": True, "deleted": _profile_public(row)}
+    return {
+        "ok": True,
+        "deleted": removed,
+    }
