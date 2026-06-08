@@ -389,3 +389,42 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payout_status": payment["payout_status"],
         "payout_sent_at": payment["payout_sent_at"],
     }
+
+@router.get("/profile")
+async def admin_profile(
+email: str,
+role: str = "vendor",
+user: dict = Depends(require_admin),
+):
+load_store()
+store = get_store_snapshot()
+
+```
+role_value = str(role or "").strip().lower()
+email_value = str(email or "").strip().lower()
+
+if role_value == "organizer":
+    profiles = store.get("organizer_profiles", {})
+else:
+    profiles = store.get("vendor_profiles", {})
+
+profile_items = _as_list(profiles)
+
+for profile in profile_items:
+    if not isinstance(profile, dict):
+        continue
+
+    profile_email = str(
+        profile.get("email")
+        or profile.get("user_email")
+        or ""
+    ).strip().lower()
+
+    if profile_email == email_value:
+        return {
+            "ok": True,
+            "profile": profile,
+        }
+
+raise HTTPException(status_code=404, detail="Profile not found.")
+```
