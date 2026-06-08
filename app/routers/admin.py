@@ -1,12 +1,6 @@
 
 from datetime import datetime, timezone
-import os
 from typing import Any, Dict, List
-
-try:
-    import stripe
-except Exception:
-    stripe = None
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -50,145 +44,6 @@ def _as_list(value: Any) -> list:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _safe_float(value: Any) -> float:
-    try:
-        return float(value or 0)
-    except Exception:
-        return 0.0
-
-
-def _require_stripe_or_none() -> Any:
-    if stripe is None:
-        return None
-    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-    if not secret:
-        return None
-    stripe.api_key = secret
-    return stripe
-
-
-def _stripe_amount_to_dollars(value: Any) -> float:
-    try:
-        return round(float(value or 0) / 100.0, 2)
-    except Exception:
-        return 0.0
-
-
-def _sum_stripe_amounts(rows: Any) -> float:
-    total = 0
-    for row in rows or []:
-        try:
-            currency = str(row.get("currency", "usd") if isinstance(row, dict) else getattr(row, "currency", "usd")).lower()
-            if currency == "usd":
-                total += int(row.get("amount", 0) if isinstance(row, dict) else getattr(row, "amount", 0))
-        except Exception:
-            continue
-    return _stripe_amount_to_dollars(total)
-
-
-def _stripe_get(obj: Any, key: str, default: Any = None) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _stripe_balance_snapshot() -> Dict[str, Any]:
-    stripe_sdk = _require_stripe_or_none()
-    if stripe_sdk is None:
-        return {
-            "ok": False,
-            "error": "Stripe is not configured on the backend.",
-            "available": 0.0,
-            "pending": 0.0,
-            "total": 0.0,
-            "currency": "usd",
-        }
-
-    try:
-        balance = stripe_sdk.Balance.retrieve()
-        available_rows = list(_stripe_get(balance, "available", []) or [])
-        pending_rows = list(_stripe_get(balance, "pending", []) or [])
-        available = _sum_stripe_amounts(available_rows)
-        pending = _sum_stripe_amounts(pending_rows)
-        return {
-            "ok": True,
-            "error": "",
-            "available": available,
-            "pending": pending,
-            "incoming": pending,
-            "total": round(available + pending, 2),
-            "currency": "usd",
-            "raw_available": available_rows,
-            "raw_pending": pending_rows,
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "available": 0.0,
-            "pending": 0.0,
-            "incoming": 0.0,
-            "total": 0.0,
-            "currency": "usd",
-        }
-
-
-def _stripe_balance_transactions(limit: int = 100) -> List[Dict[str, Any]]:
-    stripe_sdk = _require_stripe_or_none()
-    if stripe_sdk is None:
-        return []
-
-    try:
-        rows = stripe_sdk.BalanceTransaction.list(limit=limit)
-        data = list(_stripe_get(rows, "data", []) or [])
-    except Exception:
-        return []
-
-    out: List[Dict[str, Any]] = []
-    for row in data:
-        amount = _stripe_amount_to_dollars(_stripe_get(row, "amount", 0))
-        fee = _stripe_amount_to_dollars(_stripe_get(row, "fee", 0))
-        net = _stripe_amount_to_dollars(_stripe_get(row, "net", 0))
-        created = _stripe_get(row, "created", None)
-        available_on = _stripe_get(row, "available_on", None)
-        source = str(_stripe_get(row, "source", "") or "")
-        row_type = str(_stripe_get(row, "type", "") or "")
-        reporting_category = str(_stripe_get(row, "reporting_category", "") or "")
-        currency = str(_stripe_get(row, "currency", "usd") or "usd").lower()
-
-        out.append({
-            "id": str(_stripe_get(row, "id", "") or ""),
-            "stripe_balance_transaction_id": str(_stripe_get(row, "id", "") or ""),
-            "payment_intent_id": source if source.startswith("pi_") else "",
-            "stripe_charge_id": source if source.startswith("ch_") else "",
-            "checkout_session_id": source if source.startswith("cs_") else "",
-            "stripe_session_id": source if source.startswith("cs_") else "",
-            "status": "paid" if amount > 0 else row_type or "stripe",
-            "vendor_name": "Stripe balance transaction",
-            "vendor_email": "",
-            "organizer_name": "VendCore Stripe account",
-            "organizer_email": "",
-            "event_title": reporting_category or row_type or "Stripe transaction",
-            "booth_id": "",
-            "booth_label": "",
-            "amount": amount,
-            "gross_amount": amount,
-            "platform_fee": net,
-            "platform_revenue": net,
-            "stripe_fee": fee,
-            "net_platform_fee": net,
-            "paid_at": datetime.fromtimestamp(int(created), tz=timezone.utc).isoformat() if created else None,
-            "available_on": datetime.fromtimestamp(int(available_on), tz=timezone.utc).isoformat() if available_on else None,
-            "created_at": datetime.fromtimestamp(int(created), tz=timezone.utc).isoformat() if created else None,
-            "stripe_reference": source,
-            "stripe_type": row_type,
-            "reporting_category": reporting_category,
-            "currency": currency,
-            "description": str(_stripe_get(row, "description", "") or ""),
-        })
-    return out
 
 
 @router.get("/dashboard")
@@ -245,10 +100,6 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
         reverse=True,
     )[:5]
 
-    stripe_balance = _stripe_balance_snapshot()
-    stripe_transactions = _stripe_balance_transactions(limit=10)
-    stripe_total_balance = round(_safe_float(stripe_balance.get("total")), 2)
-
     return {
         "stats": {
             "total_vendors": len(vendor_items),
@@ -258,20 +109,13 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
             "approved_awaiting_payment": len(approved_unpaid),
             "paid_applications": len(paid_apps),
             "pending_verifications": len(pending_items),
-            "gross_sales": stripe_total_balance if stripe_balance.get("ok") else round(gross_sales, 2),
-            "platform_revenue": stripe_total_balance if stripe_balance.get("ok") else round(platform_revenue, 2),
+            "gross_sales": round(gross_sales, 2),
+            "platform_revenue": round(platform_revenue, 2),
             "organizer_payouts_owed": round(organizer_payouts, 2),
-            "stripe_balance_available": round(_safe_float(stripe_balance.get("available")), 2),
-            "stripe_balance_pending": round(_safe_float(stripe_balance.get("pending")), 2),
-            "stripe_balance_total": stripe_total_balance,
-        },
-        "stripe": {
-            "balance": stripe_balance,
-            "recent_balance_transactions": stripe_transactions,
         },
         "recent_activity": [],
         "pending_verifications": pending_items[:5],
-        "recent_payments": stripe_transactions[:5] if stripe_transactions else recent_payments,
+        "recent_payments": recent_payments,
     }
 
 
@@ -311,13 +155,13 @@ async def admin_payments(user: dict = Depends(require_admin)):
     store = get_store_snapshot()
 
     payments = store.get("payments", {})
-    local_items = [p for p in _as_list(payments) if isinstance(p, dict)]
+    items = [p for p in _as_list(payments) if isinstance(p, dict)]
 
     paid = []
     pending = []
     failed = []
 
-    for p in local_items:
+    for p in items:
         status = str(p.get("status", "")).lower()
 
         if status in {"paid", "completed", "succeeded"}:
@@ -327,33 +171,17 @@ async def admin_payments(user: dict = Depends(require_admin)):
         elif status in {"failed", "canceled", "cancelled", "refunded"}:
             failed.append(p)
 
-    local_revenue = sum(float(p.get("amount", 0) or 0) for p in paid)
+    revenue = sum(float(p.get("amount", 0) or 0) for p in paid)
 
-    stripe_balance = _stripe_balance_snapshot()
-    stripe_transactions = _stripe_balance_transactions(limit=100)
-
-    # IMPORTANT:
-    # Keep older local/test payment rows available for auditing, but expose the
-    # Stripe-derived data separately as the source of truth for real money.
     return {
         "summary": {
-            "total": len(local_items),
+            "total": len(items),
             "paid": len(paid),
             "pending": len(pending),
             "failed": len(failed),
-            "revenue": round(local_revenue, 2),
-            "stripe_balance_available": round(_safe_float(stripe_balance.get("available")), 2),
-            "stripe_balance_pending": round(_safe_float(stripe_balance.get("pending")), 2),
-            "stripe_balance_total": round(_safe_float(stripe_balance.get("total")), 2),
-            "stripe_transaction_count": len(stripe_transactions),
+            "revenue": round(revenue, 2),
         },
-        "stripe": {
-            "balance": stripe_balance,
-            "balance_transactions": stripe_transactions,
-            "source_of_truth": "stripe_balance_api",
-        },
-        "payments": local_items,
-        "stripe_payments": stripe_transactions,
+        "payments": items,
     }
 
 
@@ -389,42 +217,3 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payout_status": payment["payout_status"],
         "payout_sent_at": payment["payout_sent_at"],
     }
-
-@router.get("/profile")
-async def admin_profile(
-email: str,
-role: str = "vendor",
-user: dict = Depends(require_admin),
-):
-load_store()
-store = get_store_snapshot()
-
-```
-role_value = str(role or "").strip().lower()
-email_value = str(email or "").strip().lower()
-
-if role_value == "organizer":
-    profiles = store.get("organizer_profiles", {})
-else:
-    profiles = store.get("vendor_profiles", {})
-
-profile_items = _as_list(profiles)
-
-for profile in profile_items:
-    if not isinstance(profile, dict):
-        continue
-
-    profile_email = str(
-        profile.get("email")
-        or profile.get("user_email")
-        or ""
-    ).strip().lower()
-
-    if profile_email == email_value:
-        return {
-            "ok": True,
-            "profile": profile,
-        }
-
-raise HTTPException(status_code=404, detail="Profile not found.")
-```
