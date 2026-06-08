@@ -1,6 +1,12 @@
 
 from datetime import datetime, timezone
+import os
 from typing import Any, Dict, List
+
+try:
+    import stripe
+except Exception:
+    stripe = None
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -44,6 +50,145 @@ def _as_list(value: Any) -> list:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except Exception:
+        return 0.0
+
+
+def _require_stripe_or_none() -> Any:
+    if stripe is None:
+        return None
+    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    if not secret:
+        return None
+    stripe.api_key = secret
+    return stripe
+
+
+def _stripe_amount_to_dollars(value: Any) -> float:
+    try:
+        return round(float(value or 0) / 100.0, 2)
+    except Exception:
+        return 0.0
+
+
+def _sum_stripe_amounts(rows: Any) -> float:
+    total = 0
+    for row in rows or []:
+        try:
+            currency = str(row.get("currency", "usd") if isinstance(row, dict) else getattr(row, "currency", "usd")).lower()
+            if currency == "usd":
+                total += int(row.get("amount", 0) if isinstance(row, dict) else getattr(row, "amount", 0))
+        except Exception:
+            continue
+    return _stripe_amount_to_dollars(total)
+
+
+def _stripe_get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _stripe_balance_snapshot() -> Dict[str, Any]:
+    stripe_sdk = _require_stripe_or_none()
+    if stripe_sdk is None:
+        return {
+            "ok": False,
+            "error": "Stripe is not configured on the backend.",
+            "available": 0.0,
+            "pending": 0.0,
+            "total": 0.0,
+            "currency": "usd",
+        }
+
+    try:
+        balance = stripe_sdk.Balance.retrieve()
+        available_rows = list(_stripe_get(balance, "available", []) or [])
+        pending_rows = list(_stripe_get(balance, "pending", []) or [])
+        available = _sum_stripe_amounts(available_rows)
+        pending = _sum_stripe_amounts(pending_rows)
+        return {
+            "ok": True,
+            "error": "",
+            "available": available,
+            "pending": pending,
+            "incoming": pending,
+            "total": round(available + pending, 2),
+            "currency": "usd",
+            "raw_available": available_rows,
+            "raw_pending": pending_rows,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "available": 0.0,
+            "pending": 0.0,
+            "incoming": 0.0,
+            "total": 0.0,
+            "currency": "usd",
+        }
+
+
+def _stripe_balance_transactions(limit: int = 100) -> List[Dict[str, Any]]:
+    stripe_sdk = _require_stripe_or_none()
+    if stripe_sdk is None:
+        return []
+
+    try:
+        rows = stripe_sdk.BalanceTransaction.list(limit=limit)
+        data = list(_stripe_get(rows, "data", []) or [])
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in data:
+        amount = _stripe_amount_to_dollars(_stripe_get(row, "amount", 0))
+        fee = _stripe_amount_to_dollars(_stripe_get(row, "fee", 0))
+        net = _stripe_amount_to_dollars(_stripe_get(row, "net", 0))
+        created = _stripe_get(row, "created", None)
+        available_on = _stripe_get(row, "available_on", None)
+        source = str(_stripe_get(row, "source", "") or "")
+        row_type = str(_stripe_get(row, "type", "") or "")
+        reporting_category = str(_stripe_get(row, "reporting_category", "") or "")
+        currency = str(_stripe_get(row, "currency", "usd") or "usd").lower()
+
+        out.append({
+            "id": str(_stripe_get(row, "id", "") or ""),
+            "stripe_balance_transaction_id": str(_stripe_get(row, "id", "") or ""),
+            "payment_intent_id": source if source.startswith("pi_") else "",
+            "stripe_charge_id": source if source.startswith("ch_") else "",
+            "checkout_session_id": source if source.startswith("cs_") else "",
+            "stripe_session_id": source if source.startswith("cs_") else "",
+            "status": "paid" if amount > 0 else row_type or "stripe",
+            "vendor_name": "Stripe balance transaction",
+            "vendor_email": "",
+            "organizer_name": "VendCore Stripe account",
+            "organizer_email": "",
+            "event_title": reporting_category or row_type or "Stripe transaction",
+            "booth_id": "",
+            "booth_label": "",
+            "amount": amount,
+            "gross_amount": amount,
+            "platform_fee": net,
+            "platform_revenue": net,
+            "stripe_fee": fee,
+            "net_platform_fee": net,
+            "paid_at": datetime.fromtimestamp(int(created), tz=timezone.utc).isoformat() if created else None,
+            "available_on": datetime.fromtimestamp(int(available_on), tz=timezone.utc).isoformat() if available_on else None,
+            "created_at": datetime.fromtimestamp(int(created), tz=timezone.utc).isoformat() if created else None,
+            "stripe_reference": source,
+            "stripe_type": row_type,
+            "reporting_category": reporting_category,
+            "currency": currency,
+            "description": str(_stripe_get(row, "description", "") or ""),
+        })
+    return out
 
 
 @router.get("/dashboard")
@@ -100,6 +245,10 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
         reverse=True,
     )[:5]
 
+    stripe_balance = _stripe_balance_snapshot()
+    stripe_transactions = _stripe_balance_transactions(limit=10)
+    stripe_total_balance = round(_safe_float(stripe_balance.get("total")), 2)
+
     return {
         "stats": {
             "total_vendors": len(vendor_items),
@@ -109,13 +258,20 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
             "approved_awaiting_payment": len(approved_unpaid),
             "paid_applications": len(paid_apps),
             "pending_verifications": len(pending_items),
-            "gross_sales": round(gross_sales, 2),
-            "platform_revenue": round(platform_revenue, 2),
+            "gross_sales": stripe_total_balance if stripe_balance.get("ok") else round(gross_sales, 2),
+            "platform_revenue": stripe_total_balance if stripe_balance.get("ok") else round(platform_revenue, 2),
             "organizer_payouts_owed": round(organizer_payouts, 2),
+            "stripe_balance_available": round(_safe_float(stripe_balance.get("available")), 2),
+            "stripe_balance_pending": round(_safe_float(stripe_balance.get("pending")), 2),
+            "stripe_balance_total": stripe_total_balance,
+        },
+        "stripe": {
+            "balance": stripe_balance,
+            "recent_balance_transactions": stripe_transactions,
         },
         "recent_activity": [],
         "pending_verifications": pending_items[:5],
-        "recent_payments": recent_payments,
+        "recent_payments": stripe_transactions[:5] if stripe_transactions else recent_payments,
     }
 
 
@@ -155,13 +311,13 @@ async def admin_payments(user: dict = Depends(require_admin)):
     store = get_store_snapshot()
 
     payments = store.get("payments", {})
-    items = [p for p in _as_list(payments) if isinstance(p, dict)]
+    local_items = [p for p in _as_list(payments) if isinstance(p, dict)]
 
     paid = []
     pending = []
     failed = []
 
-    for p in items:
+    for p in local_items:
         status = str(p.get("status", "")).lower()
 
         if status in {"paid", "completed", "succeeded"}:
@@ -171,17 +327,33 @@ async def admin_payments(user: dict = Depends(require_admin)):
         elif status in {"failed", "canceled", "cancelled", "refunded"}:
             failed.append(p)
 
-    revenue = sum(float(p.get("amount", 0) or 0) for p in paid)
+    local_revenue = sum(float(p.get("amount", 0) or 0) for p in paid)
 
+    stripe_balance = _stripe_balance_snapshot()
+    stripe_transactions = _stripe_balance_transactions(limit=100)
+
+    # IMPORTANT:
+    # Keep older local/test payment rows available for auditing, but expose the
+    # Stripe-derived data separately as the source of truth for real money.
     return {
         "summary": {
-            "total": len(items),
+            "total": len(local_items),
             "paid": len(paid),
             "pending": len(pending),
             "failed": len(failed),
-            "revenue": round(revenue, 2),
+            "revenue": round(local_revenue, 2),
+            "stripe_balance_available": round(_safe_float(stripe_balance.get("available")), 2),
+            "stripe_balance_pending": round(_safe_float(stripe_balance.get("pending")), 2),
+            "stripe_balance_total": round(_safe_float(stripe_balance.get("total")), 2),
+            "stripe_transaction_count": len(stripe_transactions),
         },
-        "payments": items,
+        "stripe": {
+            "balance": stripe_balance,
+            "balance_transactions": stripe_transactions,
+            "source_of_truth": "stripe_balance_api",
+        },
+        "payments": local_items,
+        "stripe_payments": stripe_transactions,
     }
 
 
@@ -216,4 +388,319 @@ async def mark_payout_paid(payment_id: int, user: dict = Depends(require_admin))
         "payment_id": payment_id,
         "payout_status": payment["payout_status"],
         "payout_sent_at": payment["payout_sent_at"],
+    }
+
+def _profile_to_admin_payload(row: Any, role_value: str, email_value: str) -> Dict[str, Any]:
+    """Normalize a SQLAlchemy Profile row for admin UI consumers."""
+    data = dict(getattr(row, "data", None) or {})
+    data.setdefault("email", str(getattr(row, "email", "") or email_value).strip().lower())
+    data.setdefault("role", str(getattr(row, "role", "") or role_value).strip().lower())
+
+    return {
+        **data,
+        "id": getattr(row, "id", None),
+        "profile_id": getattr(row, "id", None),
+        "email": str(getattr(row, "email", "") or data.get("email") or email_value).strip().lower(),
+        "role": str(getattr(row, "role", "") or data.get("role") or role_value).strip().lower(),
+        "business_name": getattr(row, "business_name", None) or data.get("business_name") or data.get("businessName") or data.get("organizationName"),
+        "display_name": getattr(row, "display_name", None) or data.get("display_name") or data.get("contact_name") or data.get("contactName"),
+        "city": getattr(row, "city", None) or data.get("city"),
+        "state": getattr(row, "state", None) or data.get("state"),
+        "categories": getattr(row, "categories", None) or data.get("categories") or [],
+        "verified": bool(getattr(row, "verified", False) or data.get("verified") is True or data.get("is_verified") is True),
+        "is_verified": bool(getattr(row, "verified", False) or data.get("verified") is True or data.get("is_verified") is True),
+        "verification_status": getattr(row, "verification_status", None) or data.get("verification_status") or data.get("status"),
+        "public_verification_status": getattr(row, "public_verification_status", None) or data.get("public_verification_status"),
+        "public_verification_label": getattr(row, "public_verification_label", None) or data.get("public_verification_label"),
+        "review_status": getattr(row, "review_status", None) or data.get("review_status"),
+        "visibility_tier": getattr(row, "visibility_tier", None) or data.get("visibility_tier"),
+        "subscription_plan": getattr(row, "subscription_plan", None) or data.get("subscription_plan") or data.get("plan"),
+        "subscription_status": getattr(row, "subscription_status", None) or data.get("subscription_status"),
+        "featured": bool(getattr(row, "featured", False) or data.get("featured") is True),
+        "promoted": bool(getattr(row, "promoted", False) or data.get("promoted") is True),
+    }
+
+
+def _find_store_profile(email_value: str, role_value: str) -> Dict[str, Any] | None:
+    load_store()
+    store = get_store_snapshot()
+
+    profile_keys = [
+        "organizer_profiles" if role_value == "organizer" else "vendor_profiles",
+        "profiles",
+    ]
+
+    for key in profile_keys:
+        profile_items = _as_list(store.get(key, {}))
+        for profile in profile_items:
+            if not isinstance(profile, dict):
+                continue
+
+            profile_email = str(
+                profile.get("email")
+                or profile.get("user_email")
+                or profile.get("owner_email")
+                or ""
+            ).strip().lower()
+
+            profile_role = str(profile.get("role") or role_value).strip().lower()
+
+            if profile_email == email_value and (not profile_role or profile_role == role_value):
+                return profile
+
+    return None
+
+
+def _find_db_profile(email_value: str, role_value: str) -> Any | None:
+    try:
+        from sqlalchemy import func
+        from app.db import SessionLocal
+        from app.models.profile import Profile
+    except Exception:
+        return None
+
+    if SessionLocal is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        return (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email_value, Profile.role == role_value)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+    finally:
+        db.close()
+
+
+@router.get("/profile")
+async def admin_profile(
+    email: str,
+    role: str = "vendor",
+    user: dict = Depends(require_admin),
+):
+    role_value = str(role or "vendor").strip().lower()
+    email_value = str(email or "").strip().lower()
+
+    if not email_value:
+        raise HTTPException(status_code=400, detail="Email is required.")
+    if role_value not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Role must be vendor or organizer.")
+
+    db_profile = _find_db_profile(email_value, role_value)
+    if db_profile is not None:
+        profile = _profile_to_admin_payload(db_profile, role_value, email_value)
+        return {
+            "ok": True,
+            "exists": True,
+            "email": email_value,
+            "role": role_value,
+            "profile": profile,
+            **profile,
+        }
+
+    store_profile = _find_store_profile(email_value, role_value)
+    if store_profile is not None:
+        return {
+            "ok": True,
+            "exists": True,
+            "email": email_value,
+            "role": role_value,
+            "profile": store_profile,
+            **store_profile,
+        }
+
+    # Do not return 404 here. The admin verification page uses this route as
+    # enrichment, and older verification records may exist without a public
+    # profile row. Returning a safe empty payload prevents a noisy browser alert.
+    return {
+        "ok": True,
+        "exists": False,
+        "email": email_value,
+        "role": role_value,
+        "profile": None,
+        "message": "Profile not found.",
+    }
+
+
+@router.post("/profile/premium")
+async def admin_profile_premium(
+    payload: Dict[str, Any],
+    user: dict = Depends(require_admin),
+):
+    email_value = str(payload.get("email") or "").strip().lower()
+    role_value = str(payload.get("role") or "vendor").strip().lower()
+    premium = bool(
+        payload.get("featured") is True
+        or payload.get("promoted") is True
+        or str(payload.get("visibility_tier") or "").strip().lower() == "premium"
+    )
+
+    if not email_value:
+        raise HTTPException(status_code=400, detail="Email is required.")
+    if role_value not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Role must be vendor or organizer.")
+
+    updated_profile: Dict[str, Any] | None = None
+
+    try:
+        from sqlalchemy import func
+        from app.db import SessionLocal
+        from app.models.profile import Profile
+
+        if SessionLocal is not None:
+            db = SessionLocal()
+            try:
+                row = (
+                    db.query(Profile)
+                    .filter(func.lower(Profile.email) == email_value, Profile.role == role_value)
+                    .first()
+                )
+                if row is not None:
+                    data = dict(row.data or {})
+                    data.update({
+                        "featured": premium,
+                        "promoted": premium,
+                        "visibility_tier": "premium" if premium else "standard",
+                        "subscription_plan": payload.get("subscription_plan") or ("premium" if premium else "free"),
+                        "subscription_status": payload.get("subscription_status") or ("active" if premium else "inactive"),
+                    })
+                    row.data = data
+                    row.featured = premium
+                    row.promoted = premium
+                    row.visibility_tier = "premium" if premium else "standard"
+                    row.subscription_plan = data["subscription_plan"]
+                    row.subscription_status = data["subscription_status"]
+                    db.commit()
+                    db.refresh(row)
+                    updated_profile = _profile_to_admin_payload(row, role_value, email_value)
+            finally:
+                db.close()
+    except Exception:
+        updated_profile = None
+
+    load_store()
+    store = get_store_snapshot()
+    store_key = "organizer_profiles" if role_value == "organizer" else "vendor_profiles"
+    profiles = store.get(store_key, {})
+    found_store = False
+
+    if isinstance(profiles, dict):
+        for key, profile in profiles.items():
+            if isinstance(profile, dict) and str(profile.get("email") or profile.get("user_email") or "").strip().lower() == email_value:
+                profile.update({
+                    "featured": premium,
+                    "promoted": premium,
+                    "visibility_tier": "premium" if premium else "standard",
+                    "subscription_plan": payload.get("subscription_plan") or ("premium" if premium else "free"),
+                    "subscription_status": payload.get("subscription_status") or ("active" if premium else "inactive"),
+                })
+                profiles[key] = profile
+                updated_profile = updated_profile or profile
+                found_store = True
+                break
+    elif isinstance(profiles, list):
+        for profile in profiles:
+            if isinstance(profile, dict) and str(profile.get("email") or profile.get("user_email") or "").strip().lower() == email_value:
+                profile.update({
+                    "featured": premium,
+                    "promoted": premium,
+                    "visibility_tier": "premium" if premium else "standard",
+                    "subscription_plan": payload.get("subscription_plan") or ("premium" if premium else "free"),
+                    "subscription_status": payload.get("subscription_status") or ("active" if premium else "inactive"),
+                })
+                updated_profile = updated_profile or profile
+                found_store = True
+                break
+
+    if found_store:
+        save_store()
+
+    return {
+        "ok": True,
+        "email": email_value,
+        "role": role_value,
+        "profile": updated_profile or {
+            "email": email_value,
+            "role": role_value,
+            "featured": premium,
+            "promoted": premium,
+            "visibility_tier": "premium" if premium else "standard",
+        },
+    }
+
+
+@router.delete("/profile")
+async def admin_profile_delete(
+    email: str,
+    role: str = "vendor",
+    user: dict = Depends(require_admin),
+):
+    role_value = str(role or "vendor").strip().lower()
+    email_value = str(email or "").strip().lower()
+
+    if not email_value:
+        raise HTTPException(status_code=400, detail="Email is required.")
+    if role_value not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=400, detail="Role must be vendor or organizer.")
+
+    deleted = False
+
+    try:
+        from sqlalchemy import func
+        from app.db import SessionLocal
+        from app.models.profile import Profile
+
+        if SessionLocal is not None:
+            db = SessionLocal()
+            try:
+                row = (
+                    db.query(Profile)
+                    .filter(func.lower(Profile.email) == email_value, Profile.role == role_value)
+                    .first()
+                )
+                if row is not None:
+                    db.delete(row)
+                    db.commit()
+                    deleted = True
+            finally:
+                db.close()
+    except Exception:
+        pass
+
+    load_store()
+    store = get_store_snapshot()
+    store_key = "organizer_profiles" if role_value == "organizer" else "vendor_profiles"
+    profiles = store.get(store_key, {})
+
+    if isinstance(profiles, dict):
+        keys_to_delete = [
+            key for key, profile in profiles.items()
+            if isinstance(profile, dict)
+            and str(profile.get("email") or profile.get("user_email") or "").strip().lower() == email_value
+        ]
+        for key in keys_to_delete:
+            del profiles[key]
+            deleted = True
+    elif isinstance(profiles, list):
+        remaining = [
+            profile for profile in profiles
+            if not (
+                isinstance(profile, dict)
+                and str(profile.get("email") or profile.get("user_email") or "").strip().lower() == email_value
+            )
+        ]
+        if len(remaining) != len(profiles):
+            store[store_key] = remaining
+            deleted = True
+
+    if deleted:
+        save_store()
+
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "email": email_value,
+        "role": role_value,
     }
