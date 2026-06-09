@@ -694,10 +694,18 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         verification = None
 
     verification_status = compute_verification_status(vendor, verification)
+    verified_statuses = {"verified", "approved", "complete", "expiring_soon"}
+    is_verified = verification_status in verified_statuses
+
+    # Public payload truth: anything approved/complete/expiring soon should still
+    # render as verified. Expiring soon is a renewal warning, not an unverified
+    # state. This keeps /vendors, admin profile view, vendor dashboard, and
+    # public trust pages aligned to the same profile-truth logic.
     payload["verification_status"] = verification_status
-    payload["public_verification_status"] = "verified" if verification_status in {"verified", "expiring_soon"} else verification_status
-    payload["public_verification_label"] = "Verified" if verification_status in {"verified", "expiring_soon"} else payload.get("public_verification_label", "Not verified")
-    payload["verified"] = verification_status in {"verified", "expiring_soon"}
+    payload["verified"] = is_verified
+    payload["is_verified"] = is_verified
+    payload["public_verification_status"] = "verified" if is_verified else "not_verified"
+    payload["public_verification_label"] = "Verified" if is_verified else payload.get("public_verification_label", "Not verified")
 
     # Visibility + monetization logic.
     plan = _safe_str(
