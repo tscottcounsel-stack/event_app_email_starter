@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.store import _VERIFICATIONS, save_store
+from app.routers.auth import get_current_user
 
 router = APIRouter(tags=["Verifications"])
 
@@ -143,6 +144,233 @@ def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "verification_status": _compute_lifecycle_status(record),
     }
 
+
+def _verification_fee_for_role(role: str) -> int:
+    return 49 if _safe_lower(role) == "organizer" else 25
+
+
+def _record_fee_paid(record: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return bool(
+        record.get("fee_paid") is True
+        or _safe_lower(record.get("payment_status")) == "paid"
+        or _safe_lower(record.get("verification_payment_status")) == "paid"
+        or bool(record.get("paid_at"))
+    )
+
+
+def _ensure_identity_record(email: str, role: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    existing = _find_latest_record(email, role)
+    if existing:
+        if extra:
+            existing.update(extra)
+        existing.setdefault("email", email)
+        existing.setdefault("role", role)
+        existing.setdefault("fee_amount", _verification_fee_for_role(role))
+        return existing
+
+    verification_id = _next_verification_id()
+    record: Dict[str, Any] = {
+        "id": verification_id,
+        "email": email,
+        "role": role,
+        "status": "not_started",
+        "verification_status": "not_verified",
+        "payment_status": "unpaid",
+        "fee_paid": False,
+        "fee_amount": _verification_fee_for_role(role),
+        "submitted_at": None,
+        "reviewed_at": None,
+        "documents": [],
+        "created_at": _now_iso(),
+    }
+    if extra:
+        record.update(extra)
+    _VERIFICATIONS[verification_id] = record
+    return record
+
+
+def _current_identity(current_user: Dict[str, Any]) -> tuple[str, str]:
+    email = _safe_lower(
+        current_user.get("email")
+        or current_user.get("sub")
+        or current_user.get("username")
+    )
+    role = _safe_lower(
+        current_user.get("role")
+        or current_user.get("user_role")
+        or current_user.get("account_type")
+        or "vendor"
+    )
+    if role not in VALID_ROLES:
+        role = "vendor"
+    if not email:
+        raise HTTPException(status_code=401, detail="Unable to identify current user.")
+    return email, role
+
+
+def _private_record(record: Optional[Dict[str, Any]], email: str, role: str) -> Dict[str, Any]:
+    if not record:
+        return {
+            "email": email,
+            "role": role,
+            "status": "not_started",
+            "verification_status": "not_verified",
+            "review_status": "",
+            "fee_paid": False,
+            "payment_status": "unpaid",
+            "fee_amount": _verification_fee_for_role(role),
+            "documents": [],
+        }
+
+    payload = _public_record(record)
+    paid = _record_fee_paid(record)
+    payload.update({
+        "fee_paid": paid,
+        "payment_status": "paid" if paid else _safe_lower(record.get("payment_status")) or "unpaid",
+        "verification_payment_status": "paid" if paid else _safe_lower(record.get("verification_payment_status")) or _safe_lower(record.get("payment_status")) or "unpaid",
+        "fee_amount": record.get("fee_amount") or _verification_fee_for_role(role),
+        "email": _safe_lower(record.get("email")) or email,
+        "role": _safe_lower(record.get("role")) or role,
+        "documents": _normalize_documents(record.get("documents")) if isinstance(record.get("documents"), list) else [],
+    })
+    return payload
+
+
+
+
+@router.get("/verification/me")
+def get_my_verification(current_user: dict = Depends(get_current_user)):
+    email, role = _current_identity(current_user)
+    record = _find_latest_record(email, role)
+    return {
+        "ok": True,
+        "email": email,
+        "role": role,
+        "verification": _private_record(record, email, role),
+    }
+
+
+@router.get("/verification/current")
+def get_current_verification(current_user: dict = Depends(get_current_user)):
+    # Backward-compatible alias used by older frontend builds.
+    return get_my_verification(current_user)
+
+
+@router.post("/verification/create-checkout")
+def create_verification_checkout(payload: Dict[str, Any], current_user: dict = Depends(get_current_user)):
+    email, role = _current_identity(current_user)
+    fee_amount = _verification_fee_for_role(role)
+
+    record = _ensure_identity_record(
+        email,
+        role,
+        {
+            "business_name": _safe_str(payload.get("business_name")),
+            "notes": _safe_str(payload.get("notes")),
+            "fee_amount": fee_amount,
+            "payment_status": "unpaid",
+            "fee_paid": False,
+            "updated_at": _now_iso(),
+        },
+    )
+    save_store()
+
+    success_url = _safe_str(payload.get("success_url"))
+    cancel_url = _safe_str(payload.get("cancel_url"))
+    if not success_url or not cancel_url:
+        raise HTTPException(status_code=400, detail="success_url and cancel_url are required.")
+
+    try:
+        import os
+        import stripe
+
+        secret = _safe_str(os.getenv("STRIPE_SECRET_KEY"))
+        if not secret:
+            raise RuntimeError("Stripe is not configured.")
+        stripe.api_key = secret
+
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            customer_email=email,
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "unit_amount": int(fee_amount * 100),
+                        "product_data": {
+                            "name": "VendCore Verification",
+                            "description": f"{role.title()} verification fee",
+                        },
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "email": email,
+                "role": role,
+                "verification_id": str(record.get("id") or ""),
+                "purpose": "verification",
+            },
+        )
+        record["checkout_session_id"] = str(session.get("id") if isinstance(session, dict) else session.id)
+        save_store()
+        return {"ok": True, "url": session.get("url") if isinstance(session, dict) else session.url, "verification": _private_record(record, email, role)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc) or "Unable to start payment.")
+
+
+@router.post("/verification/confirm-payment")
+def confirm_verification_payment(payload: Dict[str, Any], current_user: dict = Depends(get_current_user)):
+    email, role = _current_identity(current_user)
+    session_id = _safe_str(payload.get("session_id"))
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required.")
+
+    paid = False
+    amount_total = None
+    try:
+        import os
+        import stripe
+
+        secret = _safe_str(os.getenv("STRIPE_SECRET_KEY"))
+        if secret:
+            stripe.api_key = secret
+            session = stripe.checkout.Session.retrieve(session_id)
+            payment_status = _safe_lower(session.get("payment_status") if isinstance(session, dict) else getattr(session, "payment_status", ""))
+            status = _safe_lower(session.get("status") if isinstance(session, dict) else getattr(session, "status", ""))
+            amount_total = session.get("amount_total") if isinstance(session, dict) else getattr(session, "amount_total", None)
+            paid = payment_status == "paid" or status == "complete"
+    except Exception:
+        # If Stripe lookup fails, do not fabricate payment success.
+        paid = False
+
+    if not paid:
+        raise HTTPException(status_code=400, detail="Payment has not been confirmed by Stripe yet.")
+
+    record = _ensure_identity_record(
+        email,
+        role,
+        {
+            "payment_status": "paid",
+            "verification_payment_status": "paid",
+            "fee_paid": True,
+            "paid_at": _now_iso(),
+            "checkout_session_id": session_id,
+            "fee_amount": round(float(amount_total or (_verification_fee_for_role(role) * 100)) / 100.0, 2),
+            "updated_at": _now_iso(),
+        },
+    )
+    save_store()
+
+    return {
+        "ok": True,
+        "verification": _private_record(record, email, role),
+    }
 
 @router.post("/verification/submit")
 def submit_verification(payload: Dict[str, Any]):
