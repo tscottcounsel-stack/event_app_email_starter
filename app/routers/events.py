@@ -764,6 +764,245 @@ def _booth_is_sellable(booth: Dict[str, Any]) -> bool:
     return True
 
 
+
+# ---------------- Category availability helpers ----------------
+
+def _availability_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _availability_slug(value: Any) -> str:
+    text = _availability_text(value).lower().replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    aliases = {
+        "food": "food_vendors",
+        "food_vendor": "food_vendors",
+        "food_vendors": "food_vendors",
+        "food_and_beverage": "food_vendors",
+        "food_beverage": "food_vendors",
+        "coffee": "coffee_vendors",
+        "coffee_vendor": "coffee_vendors",
+        "coffee_vendors": "coffee_vendors",
+        "bakery": "bakery_desserts",
+        "desserts": "bakery_desserts",
+        "bakery_and_desserts": "bakery_desserts",
+        "mobile_catering": "mobile_catering",
+        "arts_crafts": "arts_crafts",
+        "arts_and_crafts": "arts_crafts",
+        "art": "arts_crafts",
+        "technology": "technology_electronics",
+        "tech": "technology_electronics",
+        "electronics": "technology_electronics",
+        "technology_electronics": "technology_electronics",
+        "technology_and_electronics": "technology_electronics",
+        "cleaning": "cleaning_crew",
+        "cleanup": "cleaning_crew",
+        "cleaning_crew": "cleaning_crew",
+        "audio_visual": "audio_visual",
+        "audio_and_visual": "audio_visual",
+        "generator_power": "generator_power",
+        "generator_and_power": "generator_power",
+        "tent_rental_company": "tent_rental_company",
+        "tent_and_rental_company": "tent_rental_company",
+        "decor_production": "decor_production",
+        "decor_and_production": "decor_production",
+    }
+    return aliases.get(text, text)
+
+
+def _availability_label(value: Any) -> str:
+    raw = _availability_text(value)
+    return raw or "Uncategorized"
+
+
+def _booth_category_for_availability(booth: Dict[str, Any]) -> str:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for source in (booth, meta):
+        for key in (
+            "category",
+            "booth_category",
+            "boothCategory",
+            "vendor_category",
+            "vendorCategory",
+            "category_name",
+            "categoryName",
+            "category_label",
+            "categoryLabel",
+            "vendor_type",
+            "vendorType",
+        ):
+            value = _availability_text(source.get(key))
+            if value:
+                return value
+    return "Other"
+
+
+def _booth_token_values_for_availability(booth: Dict[str, Any], fallback: str) -> set[str]:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    tokens: set[str] = set()
+    for source in (booth, meta):
+        for key in (
+            "id", "booth_id", "boothId", "key", "code",
+            "label", "booth_label", "boothLabel", "number", "booth_number",
+            "boothNumber", "name", "booth_name", "boothName",
+        ):
+            value = _availability_text(source.get(key))
+            if value:
+                tokens.add(value.lower())
+    if fallback:
+        tokens.add(str(fallback).strip().lower())
+    return {token for token in tokens if token}
+
+
+def _app_booth_tokens_for_availability(app: Dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for key in (
+        "booth_id", "boothId", "requested_booth_id", "requestedBoothId",
+        "selected_booth_id", "selectedBoothId", "assigned_booth_id", "assignedBoothId",
+        "booth_label", "boothLabel", "booth_number", "boothNumber",
+        "selected_booth_label", "selectedBoothLabel", "selected_booth_number", "selectedBoothNumber",
+        "booth_name", "boothName",
+    ):
+        value = _availability_text(app.get(key))
+        if value:
+            tokens.add(value.lower())
+    for nested_key in ("selected_booth", "booth", "booth_snapshot"):
+        nested = app.get(nested_key)
+        if isinstance(nested, dict):
+            tokens.update(_booth_token_values_for_availability(nested, ""))
+    return {token for token in tokens if token}
+
+
+def _app_category_for_availability(app: Dict[str, Any]) -> str:
+    for key in (
+        "booth_category", "boothCategory", "requested_booth_category", "requestedBoothCategory",
+        "selected_booth_category", "selectedBoothCategory", "vendor_category", "vendorCategory",
+        "category",
+    ):
+        value = _availability_text(app.get(key))
+        if value:
+            return value
+    for nested_key in ("selected_booth", "booth", "booth_snapshot"):
+        nested = app.get(nested_key)
+        if isinstance(nested, dict):
+            value = _booth_category_for_availability(nested)
+            if value and value != "Other":
+                return value
+    return ""
+
+
+def _app_counts_as_filled_for_availability(app: Dict[str, Any]) -> bool:
+    payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
+    status = _availability_text(app.get("status") or app.get("application_status") or app.get("applicationStatus")).lower()
+    if app.get("deleted_at") or app.get("released_at") or app.get("event_canceled"):
+        return False
+    if status in {"rejected", "declined", "deleted", "cancelled", "canceled", "expired", "released", "draft"}:
+        return False
+    if payment_status == "paid":
+        return True
+    if status in {"approved", "accepted", "confirmed", "reserved", "assigned", "submitted", "under_review", "pending"}:
+        return True
+    if payment_status in {"pending", "processing"}:
+        return True
+    reserved_until = app.get("booth_reserved_until") or app.get("reserved_until") or app.get("reservedUntil")
+    if reserved_until:
+        try:
+            return datetime.fromisoformat(str(reserved_until).replace("Z", "+00:00")) > datetime.now(timezone.utc)
+        except Exception:
+            return False
+    return False
+
+
+def _category_availability_for_event(event_data: Dict[str, Any], applications: dict, booths: list[Dict[str, Any]]) -> Dict[str, Any]:
+    selected_needs = _extract_event_needs(event_data)
+    buckets: Dict[str, Dict[str, Any]] = {}
+
+    def ensure(label: str) -> Dict[str, Any]:
+        display = _availability_label(label)
+        slug = _availability_slug(display) or display.lower()
+        row = buckets.setdefault(slug, {
+            "category": display,
+            "label": display,
+            "slug": slug,
+            "total_slots": 0,
+            "filled_slots": 0,
+            "remaining_slots": 0,
+            "status": "open",
+        })
+        if display and row.get("category") in {"", "Other", "Uncategorized"}:
+            row["category"] = display
+            row["label"] = display
+        return row
+
+    for need in selected_needs:
+        ensure(need)
+
+    booth_token_to_slug: Dict[str, str] = {}
+    for index, booth in enumerate(booths, start=1):
+        category = _booth_category_for_availability(booth)
+        row = ensure(category)
+        row["total_slots"] += 1
+        fallback = str(booth.get("id") or booth.get("label") or f"booth-{index}")
+        for token in _booth_token_values_for_availability(booth, fallback):
+            booth_token_to_slug[token] = row["slug"]
+
+    filled_booths: set[str] = set()
+    fallback_filled_by_slug: Dict[str, int] = {}
+    for app in applications.values():
+        if not isinstance(app, dict):
+            continue
+        try:
+            if int(app.get("event_id") or app.get("eventId") or 0) != int(event_data.get("id") or 0):
+                continue
+        except Exception:
+            continue
+        if not _app_counts_as_filled_for_availability(app):
+            continue
+
+        app_tokens = _app_booth_tokens_for_availability(app)
+        matched_slug = ""
+        for token in app_tokens:
+            if token in booth_token_to_slug:
+                matched_slug = booth_token_to_slug[token]
+                filled_booths.add(token)
+                break
+        if not matched_slug:
+            category = _app_category_for_availability(app)
+            if category:
+                matched_slug = ensure(category)["slug"]
+        if matched_slug:
+            fallback_filled_by_slug[matched_slug] = fallback_filled_by_slug.get(matched_slug, 0) + 1
+
+    # Use one filled count per application, capped to total slot inventory when inventory exists.
+    for slug, count in fallback_filled_by_slug.items():
+        row = buckets.setdefault(slug, {
+            "category": slug.replace("_", " ").title(),
+            "label": slug.replace("_", " ").title(),
+            "slug": slug,
+            "total_slots": 0,
+            "filled_slots": 0,
+            "remaining_slots": 0,
+            "status": "open",
+        })
+        total = int(row.get("total_slots") or 0)
+        row["filled_slots"] = min(count, total) if total > 0 else count
+
+    rows = []
+    for row in buckets.values():
+        total = int(row.get("total_slots") or 0)
+        filled = int(row.get("filled_slots") or 0)
+        remaining = max(total - filled, 0) if total > 0 else None
+        row["remaining_slots"] = remaining
+        row["status"] = "filled" if total > 0 and remaining == 0 else "open"
+        rows.append(row)
+
+    rows.sort(key=lambda item: (0 if item.get("status") == "open" else 1, str(item.get("category") or "").lower()))
+    return {
+        "items": rows,
+        "by_category": {str(item.get("category")): item for item in rows},
+        "by_slug": {str(item.get("slug")): item for item in rows},
+    }
+
 def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Session] = None) -> dict:
     event_id = int(event.get("id") or 0)
 
@@ -814,6 +1053,7 @@ def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Sessi
     paid_booths = len(paid_booth_ids)
     held_booths = len(reserved_booth_ids - paid_booth_ids)
     spots_left = max(total_booths - paid_booths - held_booths, 0)
+    category_availability = _category_availability_for_event(event, applications, booths)
 
     return {
         "booths_from_price": booths_from_price,
@@ -825,6 +1065,10 @@ def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Sessi
         "held_booths": held_booths,
         "spots_left": spots_left,
         "booths_remaining": spots_left,
+        "category_availability": category_availability,
+        "categoryAvailability": category_availability,
+        "needed_category_availability": category_availability.get("items", []),
+        "neededCategoryAvailability": category_availability.get("items", []),
     }
 
 
