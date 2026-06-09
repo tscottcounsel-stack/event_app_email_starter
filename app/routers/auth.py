@@ -105,35 +105,56 @@ def _ensure_public_profile_for_user(user: Dict[str, Any]) -> None:
         return
 
     if role == "vendor":
+        # Postgres profiles are now the single source of truth for public vendor
+        # identity. Do not create legacy _VENDORS JSON rows on signup; those
+        # rows caused deleted/test vendors to reappear and made verification
+        # state drift across pages.
+        if SessionLocal is None:
+            return
+
+        db = SessionLocal()
         try:
-            from app.store import _VENDORS, save_store as _save_main_store  # type: ignore
+            existing = (
+                db.query(Profile)
+                .filter(func.lower(Profile.email) == email, Profile.role == "vendor")
+                .one_or_none()
+            )
+            if existing is not None:
+                return
+
+            profile = Profile(
+                email=email,
+                role="vendor",
+                display_name=user.get("full_name") or "",
+                business_name="",
+                city="",
+                state="",
+                categories=[],
+                data={
+                    "email": email,
+                    "vendor_id": email,
+                    "contact_name": user.get("full_name") or "",
+                    "profile_complete": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                verified=False,
+                verification_status="unverified",
+                public_verification_status="not_verified",
+                public_verification_label="Not verified",
+                review_status="not_started",
+                visibility_tier="standard",
+                subscription_plan="starter",
+                subscription_status="inactive",
+                featured=False,
+                promoted=False,
+            )
+            db.add(profile)
+            db.commit()
         except Exception:
-            return
-
-        existing = _VENDORS.get(email)
-        if isinstance(existing, dict) and existing:
-            return
-
-        _VENDORS[email] = {
-            "vendor_id": email,
-            "email": email,
-            "business_name": "",
-            "contact_name": user.get("full_name") or "",
-            "city": "",
-            "state": "",
-            "categories": [],
-            "vendor_categories": [],
-            "description": "",
-            "logo_url": "",
-            "banner_url": "",
-            "image_urls": [],
-            "verified": False,
-            "verification_status": "unverified",
-            "profile_complete": False,
-            "created_at": now,
-            "updated_at": now,
-        }
-        _save_main_store()
+            db.rollback()
+        finally:
+            db.close()
 
 
 def send_welcome_email(email: str, role: str, full_name: Optional[str] = None) -> None:

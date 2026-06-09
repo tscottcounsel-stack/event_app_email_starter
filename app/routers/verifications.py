@@ -7,6 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.store import _VERIFICATIONS, save_store
 from app.routers.auth import get_current_user
+from sqlalchemy import func
+from app.db import SessionLocal
+from app.models.profile import Profile
 
 router = APIRouter(tags=["Verifications"])
 
@@ -240,10 +243,106 @@ def _private_record(record: Optional[Dict[str, Any]], email: str, role: str) -> 
 
 
 
+
+
+def _profile_row_to_verification_record(email: str, role: str) -> Optional[Dict[str, Any]]:
+    if SessionLocal is None:
+        return None
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == _safe_lower(email), Profile.role == _safe_lower(role))
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        data = row.data if isinstance(row.data, dict) else {}
+        status = _safe_lower(row.verification_status or data.get("verification_status") or data.get("status"))
+        public_status = _safe_lower(row.public_verification_status or data.get("public_verification_status"))
+        verified = bool(row.verified or status in {"verified", "approved", "complete", "expiring_soon"} or public_status == "verified")
+        payment_status = _safe_lower(data.get("verification_payment_status") or data.get("payment_status"))
+        return {
+            "id": data.get("verification_id") or row.id,
+            "email": _safe_lower(email),
+            "role": _safe_lower(role),
+            "status": "verified" if verified else (status or "not_started"),
+            "verification_status": "verified" if verified else (public_status or status or "not_verified"),
+            "review_status": row.review_status or data.get("review_status") or ("approved" if verified else ""),
+            "fee_paid": payment_status == "paid" or bool(data.get("fee_paid")),
+            "payment_status": payment_status or ("paid" if data.get("fee_paid") else "unpaid"),
+            "fee_amount": data.get("fee_amount") or _verification_fee_for_role(role),
+            "business_name": row.business_name or data.get("business_name") or data.get("businessName"),
+            "tax_id_masked": data.get("tax_id_masked"),
+            "submitted_at": data.get("submitted_at") or data.get("created_at") or row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+            "reviewed_at": data.get("reviewed_at") or data.get("last_verified_at"),
+            "last_verified_at": data.get("last_verified_at") or data.get("reviewed_at"),
+            "expires_at": data.get("expires_at") or data.get("expiration_date"),
+            "expiration_date": data.get("expiration_date") or data.get("expires_at"),
+            "documents": data.get("documents") if isinstance(data.get("documents"), list) else [],
+        }
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def _sync_verification_record_to_profile(record: Dict[str, Any]) -> None:
+    if SessionLocal is None or not isinstance(record, dict):
+        return
+    email = _safe_lower(record.get("email"))
+    role = _safe_lower(record.get("role"))
+    if not email or role not in VALID_ROLES:
+        return
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .one_or_none()
+        )
+        if row is None:
+            row = Profile(email=email, role=role)
+            db.add(row)
+        data = row.data if isinstance(row.data, dict) else {}
+        status = _compute_lifecycle_status(record)
+        paid = _record_fee_paid(record)
+        row.data = {
+            **data,
+            "email": email,
+            "role": role,
+            "verification_id": record.get("id"),
+            "verification_status": status,
+            "payment_status": "paid" if paid else _safe_lower(record.get("payment_status")) or "unpaid",
+            "verification_payment_status": "paid" if paid else _safe_lower(record.get("verification_payment_status")) or "unpaid",
+            "fee_paid": paid,
+            "fee_amount": record.get("fee_amount") or _verification_fee_for_role(role),
+            "submitted_at": record.get("submitted_at"),
+            "reviewed_at": record.get("reviewed_at"),
+            "last_verified_at": record.get("last_verified_at") or record.get("reviewed_at"),
+            "expiration_date": record.get("expiration_date"),
+            "expires_at": record.get("expires_at") or record.get("expiration_date"),
+            "documents": record.get("documents") if isinstance(record.get("documents"), list) else data.get("documents", []),
+        }
+        verified = status in {"verified", "expiring_soon"}
+        row.verified = verified
+        row.verification_status = status
+        row.public_verification_status = "verified" if verified else "not_verified"
+        row.public_verification_label = "Verified" if verified else "Not verified"
+        row.review_status = "approved" if verified else (_safe_lower(record.get("review_status")) or row.review_status)
+        if record.get("business_name") and not row.business_name:
+            row.business_name = _safe_str(record.get("business_name"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
 @router.get("/verification/me")
 def get_my_verification(current_user: dict = Depends(get_current_user)):
     email, role = _current_identity(current_user)
-    record = _find_latest_record(email, role)
+    record = _find_latest_record(email, role) or _profile_row_to_verification_record(email, role)
     return {
         "ok": True,
         "email": email,
@@ -366,6 +465,7 @@ def confirm_verification_payment(payload: Dict[str, Any], current_user: dict = D
         },
     )
     save_store()
+    _sync_verification_record_to_profile(record)
 
     return {
         "ok": True,
@@ -430,6 +530,7 @@ def submit_verification(payload: Dict[str, Any]):
         _VERIFICATIONS[verification_id] = saved
 
     save_store()
+    _sync_verification_record_to_profile(saved)
 
     return {
         "ok": True,
@@ -439,11 +540,12 @@ def submit_verification(payload: Dict[str, Any]):
 
 @router.get("/verification/status")
 def get_verification_status(email: str, role: str = ""):
-    record = _find_latest_record(email, role)
+    normalized_role = _safe_lower(role) or "vendor"
+    record = _find_latest_record(email, normalized_role) or _profile_row_to_verification_record(email, normalized_role)
     return {
         "ok": True,
         "email": _safe_lower(email),
-        "role": _safe_lower(role),
+        "role": normalized_role,
         "verification_status": _compute_lifecycle_status(record),
         "verification": _public_record(record) if record else None,
     }
@@ -489,6 +591,7 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
         ).isoformat()
 
     save_store()
+    _sync_verification_record_to_profile(record)
 
     return {
         "ok": True,

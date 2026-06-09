@@ -76,7 +76,7 @@ def set_vendor_premium(
     if not email:
         raise HTTPException(status_code=400, detail="Vendor email required")
 
-    vendor = _load_vendor_from_db(db, email) or _VENDORS.get(email)
+    vendor = _load_vendor_from_db(db, email)
 
     if not isinstance(vendor, dict):
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -114,16 +114,12 @@ def set_vendor_premium(
         vendor["subscription_status"] = "active"
         vendor["subscriptionStatus"] = "active"
 
-    updated = upsert_vendor(email, vendor)
-
     _upsert_profile_row(
         db,
         email=email,
         role="vendor",
-        data=updated,
+        data=vendor,
     )
-
-    save_store()
 
     return {
         "ok": True,
@@ -151,7 +147,7 @@ def unverify_vendor(
     if not email:
         raise HTTPException(status_code=400, detail="Vendor email required")
 
-    vendor = _load_vendor_from_db(db, email) or _VENDORS.get(email)
+    vendor = _load_vendor_from_db(db, email)
 
     if not isinstance(vendor, dict):
         raise HTTPException(status_code=404, detail="Vendor not found")
@@ -173,16 +169,13 @@ def unverify_vendor(
     vendor["subscription_status"] = "inactive"
     vendor["subscriptionStatus"] = "inactive"
 
-    updated = upsert_vendor(email, vendor)
-
     _upsert_profile_row(
         db,
         email=email,
         role="vendor",
-        data=updated,
+        data=vendor,
     )
-
-    save_store()
+    updated = _load_vendor_from_db(db, email) or vendor
 
     return {
         "ok": True,
@@ -197,12 +190,12 @@ def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_curren
     if not email:
         raise HTTPException(status_code=400, detail="Vendor email required")
 
-    vendor = _VENDORS.get(email)
+    vendor = _load_vendor_from_db(db, email)
     if not isinstance(vendor, dict) or not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     now = _now_iso()
-    updated = upsert_vendor(email, {
+    updated = {
         **vendor,
         "email": email,
         "vendor_id": vendor.get("vendor_id") or email,
@@ -214,9 +207,10 @@ def force_verify_vendor(payload: dict, user: Dict[str, Any] = Depends(get_curren
         "verified_at": vendor.get("verified_at") or now,
         "last_verified_at": vendor.get("last_verified_at") or now,
         "updated_at": now,
-    })
+    }
 
     _upsert_profile_row(db, email=email, role="vendor", data=updated)
+    updated = _load_vendor_from_db(db, email) or updated
 
     return {
         "ok": True,
@@ -634,11 +628,10 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
     return "unverified"
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
-    vendor_key = _normalize_vendor_key(vendor_id)
-    vendor = _VENDORS.get(vendor_key)
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-    return vendor
+    # Legacy _VENDORS is migration-only. Runtime public/vendor truth lives in
+    # Postgres Profile rows, so callers that need a vendor should load it with
+    # _load_vendor_from_db(db, email).
+    raise HTTPException(status_code=404, detail="Vendor not found")
 
 
 def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
@@ -868,16 +861,21 @@ class VendorReviewCreate(BaseModel):
 @router.get("/me")
 def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     key = _user_vendor_key(user)
-    vendor = _load_vendor_from_db(db, key) or _VENDORS.get(key) or {}
+    vendor = _load_vendor_from_db(db, key) or {}
     if not vendor:
-        vendor = upsert_vendor(key, {
+        _upsert_profile_row(db, email=key, role="vendor", data={
             "vendor_id": key,
             "email": key,
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
+            "verification_status": "unverified",
+            "public_verification_status": "not_verified",
+            "public_verification_label": "Not verified",
+            "visibility_tier": "standard",
+            "subscription_plan": "starter",
+            "subscription_status": "inactive",
         })
-    if vendor:
-        _upsert_profile_row(db, email=key, role="vendor", data=vendor)
+        vendor = _load_vendor_from_db(db, key) or {"vendor_id": key, "email": key}
     return _vendor_public_payload(key, vendor)
 
 
@@ -888,7 +886,7 @@ def save_my_vendor_profile(
     db: Session = Depends(get_db),
 ):
     key = _user_vendor_key(user)
-    existing = _VENDORS.get(key, {})
+    existing = _load_vendor_from_db(db, key) or {}
     mapped = _map_payload(payload.model_dump())
 
     updated = {**existing, **mapped}
@@ -906,8 +904,8 @@ def save_my_vendor_profile(
     updated["business_type"] = primary_category
     updated["updated_at"] = _now_iso()
 
-    updated = upsert_vendor(key, updated)
     _upsert_profile_row(db, email=key, role="vendor", data=updated)
+    updated = _load_vendor_from_db(db, key) or updated
     _sync_vendor_category_to_applications(key, updated)
 
     return _vendor_public_payload(key, updated)
@@ -915,20 +913,26 @@ def save_my_vendor_profile(
 @router.get("/by-email/{email}")
 def get_vendor_profile_by_email(email: str, db: Session = Depends(get_db)):
     vendor_key = _normalize_vendor_key(email)
-    vendor = _load_vendor_from_db(db, vendor_key) or _get_vendor_or_404(vendor_key)
+    vendor = _load_vendor_from_db(db, vendor_key)
+    if not isinstance(vendor, dict) or not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
     return _vendor_public_payload(vendor_key, vendor)
 
 
 @router.get("/public/{vendor_id}")
 def get_vendor_profile(vendor_id: str, db: Session = Depends(get_db)):
     vendor_key = _normalize_vendor_key(vendor_id)
-    vendor = _load_vendor_from_db(db, vendor_key) or _get_vendor_or_404(vendor_key)
+    vendor = _load_vendor_from_db(db, vendor_key)
+    if not isinstance(vendor, dict) or not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
     return _vendor_public_payload(vendor_key, vendor)
 
 
 @router.get("/{vendor_id}/reviews")
-def get_vendor_reviews(vendor_id: str):
-    _get_vendor_or_404(vendor_id)
+def get_vendor_reviews(vendor_id: str, db: Session = Depends(get_db)):
+    vendor_key = _normalize_vendor_key(vendor_id)
+    if not _load_vendor_from_db(db, vendor_key):
+        raise HTTPException(status_code=404, detail="Vendor not found")
     return _review_summary(vendor_id)
 
 
@@ -937,9 +941,11 @@ def create_vendor_review(
     vendor_id: str,
     payload: VendorReviewCreate,
     user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     vendor_key = _normalize_vendor_key(vendor_id)
-    _get_vendor_or_404(vendor_key)
+    if not _load_vendor_from_db(db, vendor_key):
+        raise HTTPException(status_code=404, detail="Vendor not found")
 
     reviewer_key = _user_vendor_key(user)
     if reviewer_key == vendor_key:
