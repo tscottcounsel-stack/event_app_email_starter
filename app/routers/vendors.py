@@ -570,13 +570,14 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def compute_verification_status(profile: Dict[str, Any], verification: Dict[str, Any] | None = None) -> str:
-    """Return vendor verification status without treating payment as approval.
+    """Canonical profile-truth verification status for marketplace display.
 
-    Mirrors the organizer side's profile-truth approach: explicit pending/rejected
-    statuses beat old verified booleans, and fee_paid/payment_status only affects
-    payment display, never verification approval.
+    Profile review approval is the source of truth. Stale legacy/public fields
+    such as public_verification_status=not_verified must not downgrade a profile
+    whose review_status/status is approved or verified. Expired/due documents
+    keep the public credential verified but surface as needs_review for admin.
     """
-    source = verification if isinstance(verification, dict) and verification else profile
+    source = {**(verification or {}), **(profile or {})}
     now = datetime.utcnow()
 
     public_status = _safe_lower(source.get("public_verification_status") or source.get("publicVerificationStatus"))
@@ -586,27 +587,36 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
         or source.get("verificationStatus")
         or source.get("status")
     )
+    raw_status = _safe_lower(source.get("status"))
 
-    if explicit_status in {"pending", "submitted", "under_review"} or review_status in {"pending", "submitted", "under_review"} or public_status == "renewal_pending":
-        return "pending"
-    if explicit_status == "rejected" or review_status == "rejected" or public_status in {"not_verified", "unverified"}:
-        return "rejected" if explicit_status == "rejected" or review_status == "rejected" else "unverified"
+    deleted_statuses = {"deleted", "archived", "inactive", "removed", "hidden", "disabled", "suspended"}
+    if public_status in deleted_statuses or review_status in deleted_statuses or explicit_status in deleted_statuses or raw_status in deleted_statuses:
+        return "deleted"
 
-    verified = (
+    if review_status == "rejected" or explicit_status == "rejected" or raw_status == "rejected":
+        return "rejected"
+
+    approved = (
         source.get("verified") is True
         or source.get("is_verified") is True
-        or public_status == "verified"
-        or explicit_status in {"verified", "approved", "complete", "expiring_soon"}
         or review_status in {"approved", "verified"}
+        or explicit_status in {"verified", "approved", "complete", "expiring_soon", "needs_review"}
+        or raw_status in {"verified", "approved", "complete"}
+        or public_status == "verified"
     )
 
-    if verified:
+    # Pending/unverified only wins when the profile is not already approved.
+    if not approved:
+        if explicit_status in {"pending", "submitted", "under_review"} or review_status in {"pending", "submitted", "under_review"} or public_status == "renewal_pending":
+            return "pending"
+        if public_status in {"not_verified", "unverified"} or explicit_status in {"not_verified", "unverified", "not_started"}:
+            return "unverified"
+
+    if approved:
+        due = False
         exp_date = _parse_datetime(source.get("expiration_date") or source.get("expirationDate") or source.get("expires_at") or source.get("expiresAt"))
-        if exp_date:
-            if exp_date < now:
-                return "expired"
-            if exp_date - now <= timedelta(days=30):
-                return "expiring_soon"
+        if exp_date and exp_date <= now:
+            due = True
         documents = source.get("documents") or source.get("verification_documents") or source.get("verificationDocuments") or []
         if isinstance(documents, dict):
             documents = list(documents.values())
@@ -615,16 +625,13 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
                 if not isinstance(doc, dict):
                     continue
                 doc_exp = _parse_datetime(doc.get("expiration_date") or doc.get("expirationDate") or doc.get("expires_at") or doc.get("expiresAt"))
-                if not doc_exp:
-                    continue
-                if doc_exp < now:
-                    return "expired"
-                if doc_exp - now <= timedelta(days=30):
-                    return "expiring_soon"
-        return "verified"
+                if doc_exp and doc_exp <= now:
+                    due = True
+                    break
+        return "needs_review" if due else "verified"
 
-    if explicit_status in {"expired", "expiring_soon"}:
-        return explicit_status
+    if explicit_status in {"expired", "expiring_soon", "needs_review"}:
+        return "needs_review"
     return "unverified"
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
@@ -694,18 +701,22 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         verification = None
 
     verification_status = compute_verification_status(vendor, verification)
-    verified_statuses = {"verified", "approved", "complete", "expiring_soon"}
-    is_verified = verification_status in verified_statuses
+    public_verified = verification_status in {"verified", "needs_review", "expiring_soon"}
 
-    # Public payload truth: anything approved/complete/expiring soon should still
-    # render as verified. Expiring soon is a renewal warning, not an unverified
-    # state. This keeps /vendors, admin profile view, vendor dashboard, and
-    # public trust pages aligned to the same profile-truth logic.
+    # Return one canonical truth set. Do not leak stale conflicting flags.
+    payload["status"] = verification_status
     payload["verification_status"] = verification_status
-    payload["verified"] = is_verified
-    payload["is_verified"] = is_verified
-    payload["public_verification_status"] = "verified" if is_verified else "not_verified"
-    payload["public_verification_label"] = "Verified" if is_verified else payload.get("public_verification_label", "Not verified")
+    payload["verificationStatus"] = verification_status
+    payload["public_verification_status"] = "verified" if public_verified else "not_verified"
+    payload["publicVerificationStatus"] = payload["public_verification_status"]
+    payload["public_verification_label"] = "Verified" if public_verified else "Not verified"
+    payload["publicVerificationLabel"] = payload["public_verification_label"]
+    payload["review_status"] = "approved" if public_verified else verification_status
+    payload["reviewStatus"] = payload["review_status"]
+    payload["verified"] = public_verified
+    payload["is_verified"] = public_verified
+    payload["document_review_due"] = verification_status == "needs_review"
+    payload["compliance_review_due"] = verification_status == "needs_review"
 
     # Visibility + monetization logic.
     plan = _safe_str(

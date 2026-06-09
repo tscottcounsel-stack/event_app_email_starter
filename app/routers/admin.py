@@ -851,7 +851,7 @@ def _normalize_admin_verification_record(raw: Dict[str, Any], fallback_role: str
         lifecycle_status = "deleted"
         explicitly_verified = False
     elif explicitly_verified and due_soon_or_overdue:
-        # The credential is still verified, but it must appear in the
+        # The credential remains publicly verified, but it must appear in the
         # admin "Document Review Due" queue so staff can review renewal docs.
         lifecycle_status = "needs_review"
         verification_status = "needs_review"
@@ -862,14 +862,16 @@ def _normalize_admin_verification_record(raw: Dict[str, Any], fallback_role: str
         verification_status = "needs_review"
         review_status = "needs_review"
         public_status = "verified" if explicitly_verified else public_status
-    elif explicit_unverified:
-        lifecycle_status = "unverified"
-        explicitly_verified = False
     elif explicitly_verified:
+        # Profile approval is canonical. Stale not_verified public fields from
+        # old test/store rows must not downgrade an approved profile.
         lifecycle_status = "verified"
         verification_status = "verified"
         public_status = "verified"
         review_status = review_status or "approved"
+    elif explicit_unverified:
+        lifecycle_status = "unverified"
+        explicitly_verified = False
 
     fee_paid = bool(
         raw.get("fee_paid") is True
@@ -1021,14 +1023,7 @@ async def admin_verifications(
             # Profile truth should be able to promote a verified record into
             # document-review due, while preserving submitted documents from the
             # verification record when present.
-            # Profile rows are the admin/public source of truth. Preserve
-            # submitted documents/admin notes from old verification records, but
-            # let the current Profile status control verified/deleted/review due.
-            merged = {**existing, **record}
-            if isinstance(existing.get("documents"), list) and existing.get("documents"):
-                merged["documents"] = existing.get("documents")
-            if existing.get("notes") and not merged.get("notes"):
-                merged["notes"] = existing.get("notes")
+            merged = {**record, **existing}
 
             if record.get("lifecycle_status") == "deleted":
                 # Deleted/archived/hidden profile truth must win over stale
@@ -1063,19 +1058,11 @@ async def admin_verifications(
                 })
             records_by_identity[key] = merged
         else:
-            # Add profile-backed verification truth when the profile has a real
-            # verification lifecycle state. Do not add ordinary unverified signup
-            # shells. This keeps /admin/verifications, /vendors, and /verified/*
-            # reading the same Profile truth without reintroducing legacy ghosts.
-            if record.get("lifecycle_status") in {
-                "verified",
-                "needs_review",
-                "expired",
-                "expiring_soon",
-                "pending",
-                "rejected",
-                "deleted",
-            }:
+            # Do not add every normal Profile row to the verification queue.
+            # The queue should contain actual verification submissions plus
+            # active profiles whose documents/compliance are due for review.
+            # Deleted rows are only useful when the Deleted filter is selected.
+            if record.get("lifecycle_status") in {"needs_review", "deleted"}:
                 records_by_identity[key] = record
 
     records = list(records_by_identity.values())
