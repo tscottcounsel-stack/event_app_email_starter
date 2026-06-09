@@ -378,6 +378,8 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         return event_data
 
     existing = _EVENTS.get(event_id, {}) if isinstance(_EVENTS.get(event_id), dict) else {}
+    if not existing:
+        existing = _EVENTS.get(str(event_id), {}) if isinstance(_EVENTS.get(str(event_id)), dict) else {}
     merged = {
         **existing,
         **dict(event_data or {}),
@@ -422,7 +424,13 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         merged.setdefault("owner_id", organizer_id)
         merged.setdefault("created_by", organizer_id)
 
+    # Preserve organizer-selected vendor/service needs across every event payload alias.
+    needs = _extract_event_needs(merged, existing, event_data)
+    if needs or _payload_contains_event_needs(event_data):
+        _apply_event_needs_aliases(merged, needs)
+
     _EVENTS[event_id] = merged
+    _EVENTS[str(event_id)] = merged
     save_store()
     return merged
 
@@ -1823,7 +1831,16 @@ def public_list_events(
     out = []
     for event in rows:
         event_dict = _serialize_event_model(event)
+        store_event = _EVENTS.get(int(event.id or 0), {}) if isinstance(_EVENTS.get(int(event.id or 0)), dict) else {}
+        if not store_event:
+            store_event = _EVENTS.get(str(int(event.id or 0)), {}) if isinstance(_EVENTS.get(str(int(event.id or 0))), dict) else {}
+        needs = _extract_event_needs(store_event, event_dict)
+        if needs or _payload_contains_event_needs(store_event):
+            _apply_event_needs_aliases(event_dict, needs)
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
+        if int(event_dict.get("booths_total") or event_dict.get("total_booths") or 0) <= 0:
+            event_dict["booths_remaining"] = None
+            event_dict["spots_left"] = None
         out.append(event_dict)
 
     return {
@@ -2148,7 +2165,23 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     event_dict = _serialize_event_model(ev)
     if not _event_is_active_marketplace_event(event_dict):
         raise HTTPException(status_code=404, detail="Event not found")
+
+    store_event = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
+    if not store_event:
+        store_event = _EVENTS.get(str(int(event_id)), {}) if isinstance(_EVENTS.get(str(int(event_id))), dict) else {}
+
+    needs = _extract_event_needs(store_event, event_dict)
+    if needs or _payload_contains_event_needs(store_event):
+        _apply_event_needs_aliases(event_dict, needs)
+
     event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
+
+    # A new event with no map yet should not be treated as full. If there is no
+    # booth inventory, keep organizer-selected needs visible on the public page.
+    if int(event_dict.get("booths_total") or event_dict.get("total_booths") or 0) <= 0:
+        event_dict["booths_remaining"] = None
+        event_dict["spots_left"] = None
+
     return event_dict
 
 
