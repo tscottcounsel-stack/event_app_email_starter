@@ -905,7 +905,7 @@ def _normalize_admin_verification_record(raw: Dict[str, Any], fallback_role: str
         "lifecycle_status": lifecycle_status,
         "verification_status": verification_status,
         "public_verification_status": public_status,
-        "public_verification_label": raw.get("public_verification_label") or ("Verified" if explicitly_verified else "Not verified"),
+        "public_verification_label": "Verified" if explicitly_verified else (raw.get("public_verification_label") or "Not verified"),
         "review_status": review_status,
         "verified": bool(explicitly_verified),
         "is_verified": bool(explicitly_verified),
@@ -1020,10 +1020,15 @@ async def admin_verifications(
         existing = records_by_identity.get(key)
 
         if existing:
-            # Profile truth should be able to promote a verified record into
-            # document-review due, while preserving submitted documents from the
-            # verification record when present.
-            merged = {**record, **existing}
+            # Profile truth is canonical for lifecycle/verification status.
+            # Store verification rows may contain uploaded documents, notes, or
+            # older payment metadata, but stale store fields must not downgrade
+            # an approved Profile row to unverified/not_verified.
+            merged = {**existing, **record}
+            existing_documents = existing.get("documents") if isinstance(existing.get("documents"), list) else []
+            record_documents = record.get("documents") if isinstance(record.get("documents"), list) else []
+            if existing_documents and not record_documents:
+                merged["documents"] = existing_documents
 
             if record.get("lifecycle_status") == "deleted":
                 # Deleted/archived/hidden profile truth must win over stale
@@ -1059,10 +1064,10 @@ async def admin_verifications(
             records_by_identity[key] = merged
         else:
             # Do not add every normal Profile row to the verification queue.
-            # The queue should contain actual verification submissions plus
-            # active profiles whose documents/compliance are due for review.
-            # Deleted rows are only useful when the Deleted filter is selected.
-            if record.get("lifecycle_status") in {"needs_review", "deleted"}:
+            # Include verified profile-only rows so the admin Verified filter
+            # reflects the same canonical state as public vendor/profile pages.
+            # Include due/deleted rows for their specific admin filters.
+            if record.get("lifecycle_status") in {"verified", "needs_review", "deleted"}:
                 records_by_identity[key] = record
 
     records = list(records_by_identity.values())
