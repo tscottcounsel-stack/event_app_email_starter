@@ -329,10 +329,10 @@ def _sync_profile_subscription_from_user(user: Dict[str, Any]) -> None:
         profile.subscription_plan = plan
         profile.subscription_status = status
 
-        if is_active_paid and is_premium_plan:
-            profile.visibility_tier = "premium"
-            profile.featured = True
-            profile.promoted = True
+        # Billing subscriptions do not control marketplace placement.
+        # Premium placement is an admin-controlled profile field handled by /vendors/admin/set-premium.
+        if profile.visibility_tier in (None, ""):
+            profile.visibility_tier = "standard"
 
         db.commit()
     except Exception as exc:
@@ -407,10 +407,9 @@ def _force_paid_checkout_premium_state(user: Dict[str, Any], *, plan: str) -> No
 
     if role == "vendor":
         normalized_plan = "pro_vendor"
-        user["visibility_tier"] = "premium"
-        user["visibilityTier"] = "premium"
-        user["featured"] = True
-        user["promoted"] = True
+        # Do not auto-grant public premium placement from billing.
+        user["visibility_tier"] = user.get("visibility_tier") or "standard"
+        user["visibilityTier"] = user.get("visibilityTier") or user["visibility_tier"]
     elif role == "organizer":
         normalized_plan = "enterprise_organizer"
     else:

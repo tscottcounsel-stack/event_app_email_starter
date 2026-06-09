@@ -97,6 +97,10 @@ def set_vendor_premium(
 
         vendor["subscription_status"] = "inactive"
         vendor["subscriptionStatus"] = "inactive"
+        vendor["marketplace_tier"] = "verified" if vendor.get("verified") else "standard"
+        vendor["marketplaceTier"] = vendor["marketplace_tier"]
+        vendor["premium_placement"] = False
+        vendor["premiumPlacement"] = False
 
     else:
         vendor["featured"] = True
@@ -113,6 +117,10 @@ def set_vendor_premium(
 
         vendor["subscription_status"] = "active"
         vendor["subscriptionStatus"] = "active"
+        vendor["marketplace_tier"] = "premium_verified"
+        vendor["marketplaceTier"] = "premium_verified"
+        vendor["premium_placement"] = True
+        vendor["premiumPlacement"] = True
 
     _upsert_profile_row(
         db,
@@ -168,6 +176,10 @@ def unverify_vendor(
     vendor["plan"] = "free"
     vendor["subscription_status"] = "inactive"
     vendor["subscriptionStatus"] = "inactive"
+    vendor["marketplace_tier"] = "standard"
+    vendor["marketplaceTier"] = "standard"
+    vendor["premium_placement"] = False
+    vendor["premiumPlacement"] = False
 
     _upsert_profile_row(
         db,
@@ -570,14 +582,13 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def compute_verification_status(profile: Dict[str, Any], verification: Dict[str, Any] | None = None) -> str:
-    """Canonical profile-truth verification status for marketplace display.
+    """Return vendor verification status without treating payment as approval.
 
-    Profile review approval is the source of truth. Stale legacy/public fields
-    such as public_verification_status=not_verified must not downgrade a profile
-    whose review_status/status is approved or verified. Expired/due documents
-    keep the public credential verified but surface as needs_review for admin.
+    Mirrors the organizer side's profile-truth approach: explicit pending/rejected
+    statuses beat old verified booleans, and fee_paid/payment_status only affects
+    payment display, never verification approval.
     """
-    source = {**(verification or {}), **(profile or {})}
+    source = verification if isinstance(verification, dict) and verification else profile
     now = datetime.utcnow()
 
     public_status = _safe_lower(source.get("public_verification_status") or source.get("publicVerificationStatus"))
@@ -587,36 +598,27 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
         or source.get("verificationStatus")
         or source.get("status")
     )
-    raw_status = _safe_lower(source.get("status"))
 
-    deleted_statuses = {"deleted", "archived", "inactive", "removed", "hidden", "disabled", "suspended"}
-    if public_status in deleted_statuses or review_status in deleted_statuses or explicit_status in deleted_statuses or raw_status in deleted_statuses:
-        return "deleted"
+    if explicit_status in {"pending", "submitted", "under_review"} or review_status in {"pending", "submitted", "under_review"} or public_status == "renewal_pending":
+        return "pending"
+    if explicit_status == "rejected" or review_status == "rejected" or public_status in {"not_verified", "unverified"}:
+        return "rejected" if explicit_status == "rejected" or review_status == "rejected" else "unverified"
 
-    if review_status == "rejected" or explicit_status == "rejected" or raw_status == "rejected":
-        return "rejected"
-
-    approved = (
+    verified = (
         source.get("verified") is True
         or source.get("is_verified") is True
-        or review_status in {"approved", "verified"}
-        or explicit_status in {"verified", "approved", "complete", "expiring_soon", "needs_review"}
-        or raw_status in {"verified", "approved", "complete"}
         or public_status == "verified"
+        or explicit_status in {"verified", "approved", "complete", "expiring_soon"}
+        or review_status in {"approved", "verified"}
     )
 
-    # Pending/unverified only wins when the profile is not already approved.
-    if not approved:
-        if explicit_status in {"pending", "submitted", "under_review"} or review_status in {"pending", "submitted", "under_review"} or public_status == "renewal_pending":
-            return "pending"
-        if public_status in {"not_verified", "unverified"} or explicit_status in {"not_verified", "unverified", "not_started"}:
-            return "unverified"
-
-    if approved:
-        due = False
+    if verified:
         exp_date = _parse_datetime(source.get("expiration_date") or source.get("expirationDate") or source.get("expires_at") or source.get("expiresAt"))
-        if exp_date and exp_date <= now:
-            due = True
+        if exp_date:
+            if exp_date < now:
+                return "expired"
+            if exp_date - now <= timedelta(days=30):
+                return "expiring_soon"
         documents = source.get("documents") or source.get("verification_documents") or source.get("verificationDocuments") or []
         if isinstance(documents, dict):
             documents = list(documents.values())
@@ -625,13 +627,16 @@ def compute_verification_status(profile: Dict[str, Any], verification: Dict[str,
                 if not isinstance(doc, dict):
                     continue
                 doc_exp = _parse_datetime(doc.get("expiration_date") or doc.get("expirationDate") or doc.get("expires_at") or doc.get("expiresAt"))
-                if doc_exp and doc_exp <= now:
-                    due = True
-                    break
-        return "needs_review" if due else "verified"
+                if not doc_exp:
+                    continue
+                if doc_exp < now:
+                    return "expired"
+                if doc_exp - now <= timedelta(days=30):
+                    return "expiring_soon"
+        return "verified"
 
-    if explicit_status in {"expired", "expiring_soon", "needs_review"}:
-        return "needs_review"
+    if explicit_status in {"expired", "expiring_soon"}:
+        return explicit_status
     return "unverified"
 
 def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
@@ -640,6 +645,41 @@ def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     # _load_vendor_from_db(db, email).
     raise HTTPException(status_code=404, detail="Vendor not found")
 
+
+
+def _compute_marketplace_tier(vendor: Dict[str, Any], *, verified: bool) -> str:
+    """Canonical marketplace placement.
+
+    Verification and premium placement are separate states:
+    - verified: trust status
+    - premium_verified: admin-selected marketplace placement for a verified profile
+
+    Do not infer premium placement from subscription_plan, Stripe status,
+    featured/promoted leftovers, or legacy _VENDORS flags. Those fields caused
+    verified-but-not-premium vendors to be promoted incorrectly.
+    """
+    if not verified:
+        return "standard"
+
+    explicit = _safe_lower(
+        vendor.get("marketplace_tier")
+        or vendor.get("marketplaceTier")
+        or vendor.get("public_marketplace_tier")
+        or vendor.get("publicMarketplaceTier")
+    )
+    if explicit in {"premium_verified", "premium", "featured"}:
+        return "premium_verified"
+
+    if vendor.get("premium_placement") is True or vendor.get("premiumPlacement") is True:
+        return "premium_verified"
+
+    if _safe_lower(vendor.get("visibility_tier") or vendor.get("visibilityTier")) == "premium" and (
+        vendor.get("premium_active") is True
+        or vendor.get("premiumActive") is True
+    ):
+        return "premium_verified"
+
+    return "verified"
 
 def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
     categories = _safe_list_of_str(
@@ -701,53 +741,38 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         verification = None
 
     verification_status = compute_verification_status(vendor, verification)
-    public_verified = verification_status in {"verified", "needs_review", "expiring_soon"}
-
-    # Return one canonical truth set. Do not leak stale conflicting flags.
-    payload["status"] = verification_status
     payload["verification_status"] = verification_status
-    payload["verificationStatus"] = verification_status
-    payload["public_verification_status"] = "verified" if public_verified else "not_verified"
-    payload["publicVerificationStatus"] = payload["public_verification_status"]
-    payload["public_verification_label"] = "Verified" if public_verified else "Not verified"
-    payload["publicVerificationLabel"] = payload["public_verification_label"]
-    payload["review_status"] = "approved" if public_verified else verification_status
-    payload["reviewStatus"] = payload["review_status"]
-    payload["verified"] = public_verified
-    payload["is_verified"] = public_verified
-    payload["document_review_due"] = verification_status == "needs_review"
-    payload["compliance_review_due"] = verification_status == "needs_review"
+    payload["public_verification_status"] = "verified" if verification_status in {"verified", "expiring_soon"} else verification_status
+    payload["public_verification_label"] = "Verified" if verification_status in {"verified", "expiring_soon"} else payload.get("public_verification_label", "Not verified")
+    payload["verified"] = verification_status in {"verified", "expiring_soon"}
 
-    # Visibility + monetization logic.
-    plan = _safe_str(
-        vendor.get("plan")
-        or vendor.get("subscription_plan")
-        or vendor.get("subscriptionPlan")
-    ).lower()
-
-    subscription_status = _safe_str(
-        vendor.get("subscription_status") or vendor.get("subscriptionStatus")
-    ).lower()
-    premium_plan = any(token in plan for token in ["premium", "pro", "growth", "enterprise"])
-    active_subscription = subscription_status in {"active", "trialing", "paid"}
-    is_premium = (
-        ((bool(vendor.get("featured")) or bool(vendor.get("promoted"))) and active_subscription)
-        or (_safe_str(vendor.get("visibility_tier") or vendor.get("visibilityTier")).lower() == "premium" and active_subscription)
-        or (premium_plan and active_subscription)
-    )
-
-    if is_premium:
+    # Canonical marketplace tier. Do not derive premium placement from Stripe,
+    # subscription_plan, or stale featured/promoted booleans.
+    marketplace_tier = _compute_marketplace_tier(vendor, verified=bool(payload["verified"]))
+    if marketplace_tier == "premium_verified":
         visibility_tier = "premium"
-    elif payload["verified"]:
+    elif marketplace_tier == "verified":
         visibility_tier = "verified"
     else:
         visibility_tier = "standard"
 
+    payload["marketplace_tier"] = marketplace_tier
+    payload["marketplaceTier"] = marketplace_tier
+    payload["premium_placement"] = marketplace_tier == "premium_verified"
+    payload["premiumPlacement"] = payload["premium_placement"]
+
+    # Keep subscription fields for billing display only; they do not control public placement.
+    plan = _safe_str(vendor.get("plan") or vendor.get("subscription_plan") or vendor.get("subscriptionPlan")).lower()
+    subscription_status = _safe_str(vendor.get("subscription_status") or vendor.get("subscriptionStatus")).lower()
     payload["plan"] = plan
+    payload["subscription_plan"] = plan
+    payload["subscriptionPlan"] = plan
     payload["subscription_status"] = subscription_status
     payload["subscriptionStatus"] = subscription_status
     payload["visibility_tier"] = visibility_tier
     payload["visibilityTier"] = visibility_tier
+    payload["featured"] = marketplace_tier == "premium_verified"
+    payload["promoted"] = marketplace_tier == "premium_verified"
 
     if verification:
         payload["verification_id"] = verification.get("id")
