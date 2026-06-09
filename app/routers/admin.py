@@ -21,6 +21,14 @@ from app.store import get_store_snapshot, load_store, save_store
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+# Live-mode cleanup:
+# These accounts completed test checkout/payment during pre-launch.
+# They should still be visible for review, but the admin queue must show them
+# as unpaid until they complete a real live verification checkout.
+TEST_VERIFICATION_PAYMENT_RESET_EMAILS = {
+    "beanallicoffee@gmail.com",
+}
+
 
 class AdminAccountCreateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -869,6 +877,12 @@ def _normalize_admin_verification_record(raw: Dict[str, Any], fallback_role: str
         or str(raw.get("verification_payment_status") or "").strip().lower() == "paid"
     )
 
+    # Beanalli's earlier verification payment was a tester/live-transition row,
+    # not a real post-launch payment. Keep the record visible, but require
+    # real payment before approval.
+    if email in TEST_VERIFICATION_PAYMENT_RESET_EMAILS:
+        fee_paid = False
+
     fee_amount = raw.get("fee_amount")
     if fee_amount is None:
         fee_amount = raw.get("annual_fee")
@@ -1008,7 +1022,23 @@ async def admin_verifications(
             # document-review due, while preserving submitted documents from the
             # verification record when present.
             merged = {**record, **existing}
-            if record.get("lifecycle_status") == "needs_review":
+
+            if record.get("lifecycle_status") == "deleted":
+                # Deleted/archived/hidden profile truth must win over stale
+                # verification rows so old deleted accounts do not reappear.
+                merged.update({
+                    "status": "deleted",
+                    "lifecycle_status": "deleted",
+                    "verification_status": "deleted",
+                    "review_status": "deleted",
+                    "public_verification_status": "deleted",
+                    "document_review_due": False,
+                    "compliance_review_due": False,
+                    "needs_review": False,
+                    "verified": False,
+                    "is_verified": False,
+                })
+            elif record.get("lifecycle_status") == "needs_review":
                 merged.update({
                     "status": "needs_review",
                     "lifecycle_status": "needs_review",
@@ -1026,12 +1056,23 @@ async def admin_verifications(
                 })
             records_by_identity[key] = merged
         else:
-            # Keep profile-backed verified review records, deleted records, and
-            # normal profile status records visible to admin filters.
-            if record.get("lifecycle_status") in {"needs_review", "verified", "deleted", "rejected", "pending", "expired", "unverified"}:
+            # Do not add every normal Profile row to the verification queue.
+            # The queue should contain actual verification submissions plus
+            # active profiles whose documents/compliance are due for review.
+            # Deleted rows are only useful when the Deleted filter is selected.
+            if record.get("lifecycle_status") in {"needs_review", "deleted"}:
                 records_by_identity[key] = record
 
     records = list(records_by_identity.values())
+
+    # Hide deleted/archived/hidden/inactive accounts from the normal admin queue.
+    # They should not inflate All/Vendor/Organizer/Document Review Due counts.
+    # Keep them visible only when the Deleted filter is intentionally selected.
+    if requested_status != "deleted":
+        records = [
+            row for row in records
+            if str(row.get("lifecycle_status") or row.get("status") or "").strip().lower() != "deleted"
+        ]
 
     if requested_role in {"vendor", "organizer"}:
         records = [row for row in records if str(row.get("role") or "").lower() == requested_role]
