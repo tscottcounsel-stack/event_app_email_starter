@@ -896,6 +896,42 @@ def _unique_categories(values: list[Any]) -> list[str]:
             out.append(str(item).strip())
     return out
 
+_EVENT_NEEDS_KEYS = (
+    "desired_vendor_categories",
+    "desiredVendorCategories",
+    "vendor_categories_needed",
+    "looking_for_categories",
+    "vendor_categories",
+)
+
+
+def _extract_event_needs(*sources: Any) -> list[str]:
+    """Return canonical organizer-selected vendor/service needs from any payload shape."""
+    values: list[Any] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in _EVENT_NEEDS_KEYS:
+            if key in source:
+                values.append(source.get(key))
+    return _unique_categories(values)
+
+
+def _payload_contains_event_needs(payload: Any) -> bool:
+    return isinstance(payload, dict) and any(key in payload for key in _EVENT_NEEDS_KEYS)
+
+
+def _apply_event_needs_aliases(target: Dict[str, Any], needs: list[str]) -> Dict[str, Any]:
+    """Write organizer-selected needs to every legacy/public alias used by the app."""
+    clean = _unique_categories([needs])
+    target["desired_vendor_categories"] = clean
+    target["desiredVendorCategories"] = clean
+    target["vendor_categories_needed"] = clean
+    target["looking_for_categories"] = clean
+    target["vendor_categories"] = clean
+    return target
+
+
 
 def _event_alert_categories(event_data: Dict[str, Any]) -> list[str]:
     values: list[Any] = [
@@ -1168,34 +1204,42 @@ def organizer_patch_event(
 ):
     ev = _get_owned_event_or_404(db, event_id, user)
     was_published = bool(ev.published)
-    _apply_event_patch_model(ev, dict(payload or {}))
+    incoming = dict(payload or {})
+
+    # SQL Event currently has no dedicated JSON column for these "Organizer is
+    # looking for" selections, so _apply_event_patch_model intentionally ignores
+    # them. Keep writing normal Event fields to Postgres, then persist the needs
+    # in the runtime store under every alias used by organizer/public/vendor UI.
+    _apply_event_patch_model(ev, incoming)
     db.add(ev)
     db.commit()
     db.refresh(ev)
+
     serialized = _serialize_event_model(ev)
 
-    # Preserve organizer-selected vendor/service needs even before the SQL Event
-    # model has dedicated columns for them. These fields power the public event
-    # detail page section: "What the organizer needs".
-    selected_needs = _unique_categories([
-        payload.get("desired_vendor_categories"),
-        payload.get("desiredVendorCategories"),
-        payload.get("vendor_categories_needed"),
-        payload.get("looking_for_categories"),
-        payload.get("vendor_categories"),
-    ])
-    if selected_needs:
-        serialized["desired_vendor_categories"] = selected_needs
-        serialized["desiredVendorCategories"] = selected_needs
-        serialized["vendor_categories_needed"] = selected_needs
-        serialized["looking_for_categories"] = selected_needs
-        serialized["vendor_categories"] = selected_needs
+    existing_store = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
+    if not existing_store:
+        existing_store = _EVENTS.get(str(int(event_id)), {}) if isinstance(_EVENTS.get(str(int(event_id))), dict) else {}
 
-    _sync_event_to_store(serialized, user)
+    if _payload_contains_event_needs(incoming):
+        # If the organizer intentionally clears all chips, persist the empty
+        # list too. The prior code only saved truthy lists, which made the UI
+        # reload as 0 selected or fall back to stale data unpredictably.
+        selected_needs = _extract_event_needs(incoming)
+    else:
+        selected_needs = _extract_event_needs(existing_store, serialized)
+
+    _apply_event_needs_aliases(serialized, selected_needs)
+
+    # Persist both int and string keys because older routes have used both.
+    synced = _sync_event_to_store(serialized, user)
+    _EVENTS[int(event_id)] = dict(synced)
+    _EVENTS[str(int(event_id))] = dict(synced)
+    save_store()
+
     if bool(ev.published) and not was_published:
-        _create_vendor_event_alerts(db, serialized)
-    return serialized
-
+        _create_vendor_event_alerts(db, synced)
+    return synced
 
 @router.delete("/organizer/events/{event_id}")
 def organizer_delete_event(
