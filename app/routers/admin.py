@@ -704,3 +704,372 @@ async def admin_profile_delete(
         "email": email_value,
         "role": role_value,
     }
+
+
+def _parse_admin_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    try:
+        if raw.isdigit():
+            numeric = int(raw)
+            if numeric <= 0:
+                return None
+            if numeric < 10_000_000_000:
+                numeric *= 1000
+            return datetime.fromtimestamp(numeric / 1000, tz=timezone.utc)
+
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _admin_iso_or_none(value: Any) -> str | None:
+    parsed = _parse_admin_datetime(value)
+    if parsed:
+        return parsed.isoformat()
+    raw = str(value or "").strip()
+    return raw or None
+
+
+def _verification_due_date_from_payload(payload: Dict[str, Any]) -> datetime | None:
+    """Return the earliest date that should put a verified profile in document review."""
+    candidates = [
+        payload.get("compliance_review_due_at"),
+        payload.get("complianceReviewDueAt"),
+        payload.get("document_review_due_at"),
+        payload.get("documentReviewDueAt"),
+        payload.get("renewal_due_at"),
+        payload.get("renewalDueAt"),
+        payload.get("expires_at"),
+        payload.get("expiresAt"),
+        payload.get("expiration_date"),
+        payload.get("expirationDate"),
+        payload.get("verification_expires_at"),
+        payload.get("verificationExpiresAt"),
+    ]
+
+    parsed = [dt for dt in (_parse_admin_datetime(value) for value in candidates) if dt is not None]
+    return min(parsed) if parsed else None
+
+
+def _status_is_deleted(*values: Any) -> bool:
+    deleted_statuses = {"deleted", "inactive", "disabled", "archived", "hidden", "removed", "suspended"}
+    return any(str(value or "").strip().lower() in deleted_statuses for value in values)
+
+
+def _normalize_admin_verification_record(raw: Dict[str, Any], fallback_role: str = "") -> Dict[str, Any]:
+    """Normalize store/profile records so the admin verification page and public trust page agree."""
+    now = datetime.now(timezone.utc)
+
+    email = str(
+        raw.get("email")
+        or raw.get("user_email")
+        or raw.get("vendor_email")
+        or raw.get("organizer_email")
+        or ""
+    ).strip().lower()
+
+    role = str(raw.get("role") or fallback_role or "vendor").strip().lower()
+    if role not in {"vendor", "organizer"}:
+        role = "vendor"
+
+    raw_status = str(
+        raw.get("status")
+        or raw.get("verification_status")
+        or raw.get("public_verification_status")
+        or raw.get("review_status")
+        or ""
+    ).strip().lower()
+
+    verification_status = str(
+        raw.get("verification_status")
+        or raw.get("verificationStatus")
+        or raw_status
+        or "not_started"
+    ).strip().lower()
+
+    public_status = str(
+        raw.get("public_verification_status")
+        or raw.get("publicVerificationStatus")
+        or verification_status
+        or raw_status
+        or "not_verified"
+    ).strip().lower()
+
+    review_status = str(
+        raw.get("review_status")
+        or raw.get("reviewStatus")
+        or ""
+    ).strip().lower()
+
+    deleted = bool(
+        raw.get("deleted") is True
+        or raw.get("is_deleted") is True
+        or raw.get("deleted_at")
+        or raw.get("deletedAt")
+        or _status_is_deleted(
+            raw.get("status"),
+            raw.get("account_status"),
+            raw.get("accountStatus"),
+            raw.get("profile_status"),
+            raw.get("profileStatus"),
+            raw.get("public_status"),
+            raw.get("publicStatus"),
+            review_status,
+        )
+    )
+
+    explicit_unverified = public_status in {"not_verified", "unverified"} or verification_status in {"not_verified", "unverified"}
+    explicitly_verified = (
+        raw.get("verified") is True
+        or raw.get("is_verified") is True
+        or public_status in {"verified", "approved", "complete"}
+        or verification_status in {"verified", "approved", "complete"}
+        or review_status in {"approved", "verified"}
+    )
+
+    due_date = _verification_due_date_from_payload(raw)
+    due_soon_or_overdue = bool(due_date and due_date <= now)
+
+    lifecycle_status = verification_status or public_status or raw_status or "not_started"
+
+    if deleted:
+        lifecycle_status = "deleted"
+        explicitly_verified = False
+    elif explicitly_verified and due_soon_or_overdue:
+        # The credential is still verified, but it must appear in the
+        # admin "Document Review Due" queue so staff can review renewal docs.
+        lifecycle_status = "needs_review"
+        verification_status = "needs_review"
+        review_status = "needs_review"
+        public_status = "verified"
+    elif raw_status in {"needs_review", "document_review_due", "compliance_review_due", "renewal_due", "expiring_soon", "needs_renewal"}:
+        lifecycle_status = "needs_review"
+        verification_status = "needs_review"
+        review_status = "needs_review"
+        public_status = "verified" if explicitly_verified else public_status
+    elif explicit_unverified:
+        lifecycle_status = "unverified"
+        explicitly_verified = False
+    elif explicitly_verified:
+        lifecycle_status = "verified"
+        verification_status = "verified"
+        public_status = "verified"
+        review_status = review_status or "approved"
+
+    fee_paid = bool(
+        raw.get("fee_paid") is True
+        or str(raw.get("payment_status") or "").strip().lower() == "paid"
+        or str(raw.get("verification_payment_status") or "").strip().lower() == "paid"
+    )
+
+    fee_amount = raw.get("fee_amount")
+    if fee_amount is None:
+        fee_amount = raw.get("annual_fee")
+    if fee_amount is None:
+        fee_amount = raw.get("verification_fee")
+    if fee_amount is None:
+        fee_amount = 49 if role == "organizer" else 25
+
+    record_id = raw.get("id") or raw.get("verification_id") or raw.get("profile_id") or email or f"{role}-profile"
+
+    return {
+        **raw,
+        "id": record_id,
+        "verification_id": raw.get("verification_id") or record_id,
+        "email": email,
+        "role": role,
+        "status": lifecycle_status,
+        "lifecycle_status": lifecycle_status,
+        "verification_status": verification_status,
+        "public_verification_status": public_status,
+        "public_verification_label": raw.get("public_verification_label") or ("Verified" if explicitly_verified else "Not verified"),
+        "review_status": review_status,
+        "verified": bool(explicitly_verified),
+        "is_verified": bool(explicitly_verified),
+        "document_review_due": lifecycle_status == "needs_review",
+        "compliance_review_due": lifecycle_status == "needs_review",
+        "needs_review": lifecycle_status == "needs_review",
+        "payment_status": "paid" if fee_paid else str(raw.get("payment_status") or "unpaid").lower(),
+        "verification_payment_status": "paid" if fee_paid else str(raw.get("verification_payment_status") or raw.get("payment_status") or "unpaid").lower(),
+        "fee_paid": fee_paid,
+        "fee_amount": fee_amount,
+        "submitted_at": raw.get("submitted_at") or raw.get("created_at") or raw.get("updated_at"),
+        "reviewed_at": raw.get("reviewed_at") or raw.get("last_verified_at") or raw.get("lastVerifiedAt"),
+        "expires_at": _admin_iso_or_none(raw.get("expires_at") or raw.get("expiresAt")),
+        "expiration_date": _admin_iso_or_none(raw.get("expiration_date") or raw.get("expirationDate") or raw.get("verification_expires_at") or raw.get("verificationExpiresAt")),
+        "compliance_review_due_at": _admin_iso_or_none(
+            raw.get("compliance_review_due_at")
+            or raw.get("complianceReviewDueAt")
+            or raw.get("document_review_due_at")
+            or raw.get("documentReviewDueAt")
+            or raw.get("renewal_due_at")
+            or raw.get("renewalDueAt")
+            or due_date
+        ),
+        "documents": raw.get("documents") if isinstance(raw.get("documents"), list) else [],
+    }
+
+
+def _all_db_profiles_for_admin_queue() -> List[Dict[str, Any]]:
+    try:
+        from app.db import SessionLocal
+        from app.models.profile import Profile
+    except Exception:
+        return []
+
+    if SessionLocal is None:
+        return []
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Profile)
+            .filter(Profile.role.in_(["vendor", "organizer"]))
+            .all()
+        )
+
+        payloads: List[Dict[str, Any]] = []
+        for row in rows:
+            role_value = str(getattr(row, "role", "") or "").strip().lower()
+            email_value = str(getattr(row, "email", "") or "").strip().lower()
+            if not email_value or role_value not in {"vendor", "organizer"}:
+                continue
+            payloads.append(_profile_to_admin_payload(row, role_value, email_value))
+        return payloads
+    except Exception:
+        return []
+    finally:
+        db.close()
+
+
+def _store_profiles_for_admin_queue() -> List[Dict[str, Any]]:
+    load_store()
+    store = get_store_snapshot()
+
+    rows: List[Dict[str, Any]] = []
+    for store_key, role_value in (("vendor_profiles", "vendor"), ("organizer_profiles", "organizer"), ("profiles", "")):
+        for profile in _as_list(store.get(store_key, {})):
+            if not isinstance(profile, dict):
+                continue
+            profile_role = str(profile.get("role") or role_value or "").strip().lower()
+            if profile_role not in {"vendor", "organizer"}:
+                profile_role = role_value or "vendor"
+            rows.append({**profile, "role": profile_role})
+    return rows
+
+
+def _store_verifications_for_admin_queue() -> List[Dict[str, Any]]:
+    load_store()
+    store = get_store_snapshot()
+
+    rows: List[Dict[str, Any]] = []
+    for record in _as_list(store.get("verifications", {})):
+        if isinstance(record, dict):
+            rows.append(record)
+    return rows
+
+
+@router.get("/verifications")
+async def admin_verifications(
+    role: str = "all",
+    status: str = "all",
+    user: dict = Depends(require_admin),
+):
+    """Canonical admin verification queue.
+
+    Includes normal verification submissions plus verified profiles whose
+    compliance/document review date is due. This keeps the admin queue in sync
+    with public /verified pages that show renewal or document-review warnings.
+    """
+    requested_role = str(role or "all").strip().lower()
+    requested_status = str(status or "all").strip().lower()
+
+    records_by_identity: Dict[str, Dict[str, Any]] = {}
+
+    for raw in _store_verifications_for_admin_queue():
+        record = _normalize_admin_verification_record(raw)
+        key = f"{record.get('role')}:{record.get('email') or record.get('id')}"
+        records_by_identity[key] = record
+
+    for raw in _store_profiles_for_admin_queue() + _all_db_profiles_for_admin_queue():
+        record = _normalize_admin_verification_record(raw, str(raw.get("role") or "vendor"))
+        key = f"{record.get('role')}:{record.get('email') or record.get('id')}"
+        existing = records_by_identity.get(key)
+
+        if existing:
+            # Profile truth should be able to promote a verified record into
+            # document-review due, while preserving submitted documents from the
+            # verification record when present.
+            merged = {**record, **existing}
+            if record.get("lifecycle_status") == "needs_review":
+                merged.update({
+                    "status": "needs_review",
+                    "lifecycle_status": "needs_review",
+                    "verification_status": "needs_review",
+                    "review_status": "needs_review",
+                    "public_verification_status": "verified",
+                    "document_review_due": True,
+                    "compliance_review_due": True,
+                    "needs_review": True,
+                    "verified": True,
+                    "is_verified": True,
+                    "compliance_review_due_at": record.get("compliance_review_due_at") or existing.get("compliance_review_due_at"),
+                    "expiration_date": record.get("expiration_date") or existing.get("expiration_date"),
+                    "expires_at": record.get("expires_at") or existing.get("expires_at"),
+                })
+            records_by_identity[key] = merged
+        else:
+            # Keep profile-backed verified review records, deleted records, and
+            # normal profile status records visible to admin filters.
+            if record.get("lifecycle_status") in {"needs_review", "verified", "deleted", "rejected", "pending", "expired", "unverified"}:
+                records_by_identity[key] = record
+
+    records = list(records_by_identity.values())
+
+    if requested_role in {"vendor", "organizer"}:
+        records = [row for row in records if str(row.get("role") or "").lower() == requested_role]
+
+    if requested_status not in {"", "all"}:
+        aliases = {
+            "document_review_due": {"needs_review", "document_review_due", "compliance_review_due", "expiring_soon", "needs_renewal"},
+            "expiring_soon": {"needs_review", "document_review_due", "compliance_review_due", "expiring_soon", "needs_renewal"},
+            "needs_review": {"needs_review", "document_review_due", "compliance_review_due", "expiring_soon", "needs_renewal"},
+            "verified": {"verified"},
+            "pending": {"pending", "submitted", "under_review", "renewal_pending"},
+            "rejected": {"rejected", "denied"},
+            "deleted": {"deleted", "removed", "archived"},
+            "expired": {"expired"},
+        }
+        wanted = aliases.get(requested_status, {requested_status})
+        records = [
+            row for row in records
+            if str(row.get("lifecycle_status") or row.get("status") or "").lower() in wanted
+            or str(row.get("verification_status") or "").lower() in wanted
+            or str(row.get("review_status") or "").lower() in wanted
+        ]
+
+    records.sort(
+        key=lambda row: str(
+            row.get("compliance_review_due_at")
+            or row.get("submitted_at")
+            or row.get("reviewed_at")
+            or row.get("created_at")
+            or ""
+        ),
+        reverse=True,
+    )
+
+    return {
+        "ok": True,
+        "verifications": records,
+        "records": records,
+        "items": records,
+        "count": len(records),
+    }
