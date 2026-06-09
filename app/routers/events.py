@@ -333,20 +333,11 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         if key in store_payload:
             payload[key] = store_payload.get(key)
 
-    # Canonicalize the selected needs across old/new field names.
-    selected_needs = _unique_categories([
-        payload.get("desired_vendor_categories"),
-        payload.get("desiredVendorCategories"),
-        payload.get("vendor_categories_needed"),
-        payload.get("looking_for_categories"),
-        payload.get("vendor_categories"),
-    ])
-    if selected_needs:
-        payload["desired_vendor_categories"] = selected_needs
-        payload["desiredVendorCategories"] = selected_needs
-        payload["vendor_categories_needed"] = selected_needs
-        payload["looking_for_categories"] = selected_needs
-        payload["vendor_categories"] = selected_needs
+    # Canonicalize the selected needs across old/new field names and both runtime stores.
+    store_needs_payload = _event_needs_store_payload(int(ev.id or 0))
+    selected_needs = _extract_event_needs(payload, store_payload, store_needs_payload)
+    if selected_needs or _payload_contains_event_needs(store_needs_payload):
+        _apply_event_needs_aliases(payload, selected_needs)
 
     payload["is_past"] = _event_is_past(payload)
     payload["lifecycle_status"] = _event_lifecycle_status(payload)
@@ -940,6 +931,87 @@ def _apply_event_needs_aliases(target: Dict[str, Any], needs: list[str]) -> Dict
     return target
 
 
+def _event_needs_store_payload(event_id: int) -> Dict[str, Any]:
+    """Load saved organizer-needed vendor/service categories from every runtime store alias.
+
+    These selections are not yet first-class columns on the SQL Event model, so
+    they must be preserved in the persistent runtime store and requirements
+    store. Reading both stores prevents /public/events/{id} from losing them
+    after older routes write one store but not the other.
+    """
+    eid = int(event_id or 0)
+    if not eid:
+        return {}
+
+    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not event_store:
+        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+
+    req_store = _REQUIREMENTS.get(eid) if isinstance(_REQUIREMENTS.get(eid), dict) else {}
+    if not req_store:
+        req_store = _REQUIREMENTS.get(str(eid)) if isinstance(_REQUIREMENTS.get(str(eid)), dict) else {}
+
+    req_root = req_store.get("requirements") if isinstance(req_store.get("requirements"), dict) else req_store
+    req_root = req_root if isinstance(req_root, dict) else {}
+
+    payload: Dict[str, Any] = {}
+    for source in (event_store, req_store, req_root):
+        if not isinstance(source, dict):
+            continue
+        for key in _EVENT_NEEDS_KEYS:
+            if key in source:
+                payload[key] = source.get(key)
+
+    return payload
+
+
+def _persist_event_needs(event_id: int, needs: list[str]) -> list[str]:
+    """Persist organizer-selected needs in both runtime stores under all aliases."""
+    eid = int(event_id or 0)
+    clean = _unique_categories([needs])
+    if not eid:
+        return clean
+
+    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not event_store:
+        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+    event_store = dict(event_store or {})
+    event_store["id"] = eid
+    _apply_event_needs_aliases(event_store, clean)
+    _EVENTS[eid] = event_store
+    _EVENTS[str(eid)] = dict(event_store)
+
+    req_store = _REQUIREMENTS.get(eid) if isinstance(_REQUIREMENTS.get(eid), dict) else {}
+    if not req_store:
+        req_store = _REQUIREMENTS.get(str(eid)) if isinstance(_REQUIREMENTS.get(str(eid)), dict) else {}
+    req_store = dict(req_store or {})
+    _apply_event_needs_aliases(req_store, clean)
+    if isinstance(req_store.get("requirements"), dict):
+        req_store["requirements"] = dict(req_store["requirements"])
+        _apply_event_needs_aliases(req_store["requirements"], clean)
+    _REQUIREMENTS[eid] = req_store
+    _REQUIREMENTS[str(eid)] = dict(req_store)
+
+    save_store()
+    return clean
+
+
+def _attach_event_needs(event_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach organizer-needed categories to an event API payload."""
+    try:
+        eid = int(event_payload.get("id") or 0)
+    except Exception:
+        eid = 0
+
+    store_payload = _event_needs_store_payload(eid)
+    needs = _extract_event_needs(event_payload, store_payload)
+
+    if needs or _payload_contains_event_needs(store_payload):
+        _apply_event_needs_aliases(event_payload, needs)
+
+    return event_payload
+
+
 
 def _event_alert_categories(event_data: Dict[str, Any]) -> list[str]:
     values: list[Any] = [
@@ -1237,6 +1309,7 @@ def organizer_patch_event(
     else:
         selected_needs = _extract_event_needs(existing_store, serialized)
 
+    selected_needs = _persist_event_needs(int(event_id), selected_needs)
     _apply_event_needs_aliases(serialized, selected_needs)
 
     # Persist both int and string keys because older routes have used both.
@@ -1830,13 +1903,7 @@ def public_list_events(
 
     out = []
     for event in rows:
-        event_dict = _serialize_event_model(event)
-        store_event = _EVENTS.get(int(event.id or 0), {}) if isinstance(_EVENTS.get(int(event.id or 0)), dict) else {}
-        if not store_event:
-            store_event = _EVENTS.get(str(int(event.id or 0)), {}) if isinstance(_EVENTS.get(str(int(event.id or 0))), dict) else {}
-        needs = _extract_event_needs(store_event, event_dict)
-        if needs or _payload_contains_event_needs(store_event):
-            _apply_event_needs_aliases(event_dict, needs)
+        event_dict = _attach_event_needs(_serialize_event_model(event))
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
         if int(event_dict.get("booths_total") or event_dict.get("total_booths") or 0) <= 0:
             event_dict["booths_remaining"] = None
@@ -2166,14 +2233,7 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     if not _event_is_active_marketplace_event(event_dict):
         raise HTTPException(status_code=404, detail="Event not found")
 
-    store_event = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
-    if not store_event:
-        store_event = _EVENTS.get(str(int(event_id)), {}) if isinstance(_EVENTS.get(str(int(event_id))), dict) else {}
-
-    needs = _extract_event_needs(store_event, event_dict)
-    if needs or _payload_contains_event_needs(store_event):
-        _apply_event_needs_aliases(event_dict, needs)
-
+    event_dict = _attach_event_needs(event_dict)
     event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
 
     # A new event with no map yet should not be treated as full. If there is no
