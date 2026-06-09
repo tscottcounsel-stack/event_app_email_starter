@@ -660,13 +660,44 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
         "business_category": primary_category,
         "business_type": primary_category,
     }
-    verification = (
-    _find_latest_record(vendor.get("email") or vendor_key, "vendor")
-    or find_latest_verification_by_email(vendor.get("email") or vendor_key, "vendor")
-)
+    # Profiles are the source of truth for public verification display.
+    # Legacy store verification rows may still exist from early testing, but they
+    # must not downgrade a verified Profile row to unverified/not submitted.
+    # Document/renewal lifecycle data can still be attached below for display.
+    verification = None
+    try:
+        legacy_record = (
+            _find_latest_record(vendor.get("email") or vendor_key, "vendor")
+            or find_latest_verification_by_email(vendor.get("email") or vendor_key, "vendor")
+        )
+        if isinstance(legacy_record, dict):
+            legacy_status = _safe_lower(
+                legacy_record.get("verification_status")
+                or legacy_record.get("public_verification_status")
+                or legacy_record.get("status")
+            )
+            profile_status = _safe_lower(
+                vendor.get("verification_status")
+                or vendor.get("public_verification_status")
+                or vendor.get("review_status")
+            )
+            profile_verified = (
+                vendor.get("verified") is True
+                or profile_status in {"verified", "approved", "complete", "expiring_soon"}
+            )
+            # Only let legacy rows drive status when Profile has no verified
+            # truth yet. This keeps old not_started/unpaid rows from overriding
+            # an approved Profile.
+            if not profile_verified or legacy_status in {"expired", "expiring_soon", "needs_review", "needs_renewal", "renewal_pending"}:
+                verification = legacy_record
+    except Exception:
+        verification = None
+
     verification_status = compute_verification_status(vendor, verification)
     payload["verification_status"] = verification_status
-    payload["verified"] = verification_status == "verified"
+    payload["public_verification_status"] = "verified" if verification_status in {"verified", "expiring_soon"} else verification_status
+    payload["public_verification_label"] = "Verified" if verification_status in {"verified", "expiring_soon"} else payload.get("public_verification_label", "Not verified")
+    payload["verified"] = verification_status in {"verified", "expiring_soon"}
 
     # Visibility + monetization logic.
     plan = _safe_str(

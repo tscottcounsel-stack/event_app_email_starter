@@ -1021,7 +1021,14 @@ async def admin_verifications(
             # Profile truth should be able to promote a verified record into
             # document-review due, while preserving submitted documents from the
             # verification record when present.
-            merged = {**record, **existing}
+            # Profile rows are the admin/public source of truth. Preserve
+            # submitted documents/admin notes from old verification records, but
+            # let the current Profile status control verified/deleted/review due.
+            merged = {**existing, **record}
+            if isinstance(existing.get("documents"), list) and existing.get("documents"):
+                merged["documents"] = existing.get("documents")
+            if existing.get("notes") and not merged.get("notes"):
+                merged["notes"] = existing.get("notes")
 
             if record.get("lifecycle_status") == "deleted":
                 # Deleted/archived/hidden profile truth must win over stale
@@ -1056,11 +1063,19 @@ async def admin_verifications(
                 })
             records_by_identity[key] = merged
         else:
-            # Do not add every normal Profile row to the verification queue.
-            # The queue should contain actual verification submissions plus
-            # active profiles whose documents/compliance are due for review.
-            # Deleted rows are only useful when the Deleted filter is selected.
-            if record.get("lifecycle_status") in {"needs_review", "deleted"}:
+            # Add profile-backed verification truth when the profile has a real
+            # verification lifecycle state. Do not add ordinary unverified signup
+            # shells. This keeps /admin/verifications, /vendors, and /verified/*
+            # reading the same Profile truth without reintroducing legacy ghosts.
+            if record.get("lifecycle_status") in {
+                "verified",
+                "needs_review",
+                "expired",
+                "expiring_soon",
+                "pending",
+                "rejected",
+                "deleted",
+            }:
                 records_by_identity[key] = record
 
     records = list(records_by_identity.values())
