@@ -321,9 +321,32 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "cancellation_reason",
         "cancellation_message",
         "canceled_by",
+        # Organizer-selected needs live in the runtime store until the
+        # Event model grows dedicated JSON columns. Keep these fields on every
+        # event payload so the public event page can show "What the organizer needs".
+        "desired_vendor_categories",
+        "desiredVendorCategories",
+        "vendor_categories_needed",
+        "looking_for_categories",
+        "vendor_categories",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
+
+    # Canonicalize the selected needs across old/new field names.
+    selected_needs = _unique_categories([
+        payload.get("desired_vendor_categories"),
+        payload.get("desiredVendorCategories"),
+        payload.get("vendor_categories_needed"),
+        payload.get("looking_for_categories"),
+        payload.get("vendor_categories"),
+    ])
+    if selected_needs:
+        payload["desired_vendor_categories"] = selected_needs
+        payload["desiredVendorCategories"] = selected_needs
+        payload["vendor_categories_needed"] = selected_needs
+        payload["looking_for_categories"] = selected_needs
+        payload["vendor_categories"] = selected_needs
 
     payload["is_past"] = _event_is_past(payload)
     payload["lifecycle_status"] = _event_lifecycle_status(payload)
@@ -1150,6 +1173,24 @@ def organizer_patch_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
+
+    # Preserve organizer-selected vendor/service needs even before the SQL Event
+    # model has dedicated columns for them. These fields power the public event
+    # detail page section: "What the organizer needs".
+    selected_needs = _unique_categories([
+        payload.get("desired_vendor_categories"),
+        payload.get("desiredVendorCategories"),
+        payload.get("vendor_categories_needed"),
+        payload.get("looking_for_categories"),
+        payload.get("vendor_categories"),
+    ])
+    if selected_needs:
+        serialized["desired_vendor_categories"] = selected_needs
+        serialized["desiredVendorCategories"] = selected_needs
+        serialized["vendor_categories_needed"] = selected_needs
+        serialized["looking_for_categories"] = selected_needs
+        serialized["vendor_categories"] = selected_needs
+
     _sync_event_to_store(serialized, user)
     if bool(ev.published) and not was_published:
         _create_vendor_event_alerts(db, serialized)
