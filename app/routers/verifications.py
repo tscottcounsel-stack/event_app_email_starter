@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import store as store_module
 from app.routers.auth import get_current_user
-from sqlalchemy import func
+from sqlalchemy import func, or_, text
 from app.db import SessionLocal
 from app.models.profile import Profile
 
@@ -425,6 +425,275 @@ def mark_verification_paid(
     store_module.save_store()
     _sync_verification_record_to_profile(record)
     return record
+
+
+
+def _profile_public_payload_from_row(row: Profile, *, email: str, role: str) -> Dict[str, Any]:
+    data = row.data if isinstance(row.data, dict) else {}
+
+    documents = []
+    if isinstance(data.get("documents"), list):
+        documents = _normalize_documents(data.get("documents"))
+
+    verified = bool(
+        row.verified
+        or _safe_lower(row.verification_status) in {"verified", "approved", "complete", "expiring_soon"}
+        or _safe_lower(row.public_verification_status) == "verified"
+    )
+
+    business_name = _safe_str(
+        row.business_name
+        or data.get("business_name")
+        or data.get("businessName")
+        or data.get("company_name")
+        or data.get("companyName")
+        or data.get("organization_name")
+        or data.get("organizationName")
+        or data.get("name")
+    )
+
+    display_name = _safe_str(
+        row.display_name
+        or data.get("display_name")
+        or data.get("displayName")
+        or data.get("contact_name")
+        or data.get("contactName")
+        or business_name
+        or email
+    )
+
+    categories = data.get("categories") if isinstance(data.get("categories"), list) else []
+    if not categories and isinstance(row.categories, list):
+        categories = row.categories
+
+    payload = {
+        "id": row.id,
+        "email": _safe_lower(email),
+        "role": _safe_lower(role),
+        "name": business_name or display_name or email,
+        "business_name": business_name or display_name or email,
+        "businessName": business_name or display_name or email,
+        "display_name": display_name,
+        "displayName": display_name,
+        "city": _safe_str(row.city or data.get("city")),
+        "state": _safe_str(row.state or data.get("state")),
+        "country": _safe_str(data.get("country") or "United States"),
+        "phone": _safe_str(
+            data.get("phone")
+            or data.get("contact_phone")
+            or data.get("contactPhone")
+            or data.get("business_phone")
+            or data.get("businessPhone")
+        ),
+        "categories": categories,
+        "category": categories[0] if categories else _safe_str(data.get("category") or data.get("vendor_category")),
+        "logo_url": _safe_str(data.get("logo_url") or data.get("logoUrl") or data.get("logo_data_url") or data.get("logoDataUrl")),
+        "logoUrl": _safe_str(data.get("logoUrl") or data.get("logo_url") or data.get("logo_data_url") or data.get("logoDataUrl")),
+        "verified": verified,
+        "verification_status": "verified" if verified else (_safe_lower(row.verification_status) or "unverified"),
+        "verificationStatus": "verified" if verified else (_safe_lower(row.verification_status) or "unverified"),
+        "public_verification_status": "verified" if verified else (_safe_lower(row.public_verification_status) or "not_verified"),
+        "publicVerificationStatus": "verified" if verified else (_safe_lower(row.public_verification_status) or "not_verified"),
+        "public_verification_label": row.public_verification_label or ("Verified Vendor" if role == "vendor" and verified else "Verified Organizer" if verified else "Not verified"),
+        "publicVerificationLabel": row.public_verification_label or ("Verified Vendor" if role == "vendor" and verified else "Verified Organizer" if verified else "Not verified"),
+        "review_status": row.review_status or data.get("review_status") or ("approved" if verified else ""),
+        "reviewStatus": row.review_status or data.get("reviewStatus") or ("approved" if verified else ""),
+        "visibility_tier": row.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier") or "standard",
+        "visibilityTier": row.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier") or "standard",
+        "subscription_plan": row.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan"),
+        "subscription_status": row.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus"),
+        "last_verified_at": data.get("last_verified_at") or data.get("reviewed_at") or data.get("verified_at"),
+        "lastVerifiedAt": data.get("lastVerifiedAt") or data.get("last_verified_at") or data.get("reviewed_at") or data.get("verified_at"),
+        "documents": documents,
+    }
+    return payload
+
+
+def _load_public_profile_row(db: Any, *, email: str, role: str) -> Optional[Profile]:
+    return (
+        db.query(Profile)
+        .filter(func.lower(Profile.email) == _safe_lower(email), Profile.role == _safe_lower(role))
+        .filter(or_(Profile.verification_status.is_(None), func.lower(Profile.verification_status) != "deleted"))
+        .order_by(Profile.id.desc())
+        .first()
+    )
+
+
+def _load_public_verification_documents(db: Any, *, email: str, role: str, profile_id: Any = None) -> List[Dict[str, Any]]:
+    """Best-effort read from the current verification_documents table.
+
+    The table has changed over time, so this uses raw SQL and mapping access
+    instead of requiring a dedicated ORM model. Public output intentionally
+    excludes file URLs and expiration dates.
+    """
+    documents: List[Dict[str, Any]] = []
+    try:
+        clauses = ["(lower(owner_email) = :email AND lower(owner_role) = :role)"]
+        params: Dict[str, Any] = {"email": _safe_lower(email), "role": _safe_lower(role), "limit": 100}
+        if profile_id not in (None, ""):
+            clauses.append("owner_profile_id = :profile_id")
+            params["profile_id"] = profile_id
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT *
+                FROM verification_documents
+                WHERE {' OR '.join(clauses)}
+                ORDER BY id DESC
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+
+        seen = set()
+        for row in rows:
+            doc_type = _safe_str(
+                row.get("document_type")
+                or row.get("type")
+                or row.get("category")
+                or row.get("requirement_name")
+                or row.get("name")
+                or row.get("label")
+                or "Document"
+            )
+            label = _safe_str(
+                row.get("label")
+                or row.get("document_name")
+                or row.get("name")
+                or row.get("requirement_name")
+                or doc_type
+            )
+            status = _safe_str(
+                row.get("public_status")
+                or row.get("review_status")
+                or row.get("status")
+                or row.get("approval_status")
+                or "Reviewed"
+            )
+            key = f"{label}|{doc_type}".lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            documents.append({
+                "label": label or "Reviewed document",
+                "name": label or "Reviewed document",
+                "type": doc_type or "Document",
+                "status": status or "Reviewed",
+                "reviewed": _safe_lower(status) not in {"pending", "rejected", "missing"},
+            })
+    except Exception as exc:
+        print("⚠️ Public verification documents lookup skipped:", str(exc))
+    return documents
+
+
+@router.get("/verification/public/{role}/{email}")
+def get_public_verification(role: str, email: str):
+    normalized_role = _safe_lower(role)
+    normalized_email = _safe_lower(email)
+    if normalized_role not in VALID_ROLES or not normalized_email:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if SessionLocal is None:
+        raise HTTPException(status_code=500, detail="Database unavailable")
+
+    db = SessionLocal()
+    try:
+        row = _load_public_profile_row(db, email=normalized_email, role=normalized_role)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        profile = _profile_public_payload_from_row(row, email=normalized_email, role=normalized_role)
+        db_documents = _load_public_verification_documents(
+            db,
+            email=normalized_email,
+            role=normalized_role,
+            profile_id=getattr(row, "id", None),
+        )
+        if db_documents:
+            profile["documents"] = db_documents
+
+        verification = {
+            **profile,
+            "status": profile.get("verification_status"),
+            "verification_status": profile.get("verification_status"),
+            "public_verification_status": profile.get("public_verification_status"),
+            "review_status": profile.get("review_status"),
+            "documents": profile.get("documents") or [],
+        }
+
+        return {
+            "ok": True,
+            "email": normalized_email,
+            "role": normalized_role,
+            "profile": profile,
+            "vendor": profile if normalized_role == "vendor" else None,
+            "organizer": profile if normalized_role == "organizer" else None,
+            "verification": verification,
+            "verified": profile.get("verified") is True,
+            "verification_status": profile.get("verification_status"),
+            "public_verification_status": profile.get("public_verification_status"),
+            "public_verification_label": profile.get("public_verification_label"),
+            "review_status": profile.get("review_status"),
+            "documents": profile.get("documents") or [],
+        }
+    finally:
+        db.close()
+
+
+@router.get("/verification/public/{email}")
+def get_public_vendor_verification_by_email(email: str):
+    return get_public_verification("vendor", email)
+
+
+@router.get("/verification/public/{role}/{email}/trust-history")
+def get_public_verification_trust_history(role: str, email: str):
+    normalized_role = _safe_lower(role)
+    normalized_email = _safe_lower(email)
+    if normalized_role not in VALID_ROLES or not normalized_email:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if SessionLocal is None:
+        return {"ok": True, "records": [], "summary": {"confirmed_count": 0, "flagged_count": 0, "organizer_count": 0, "event_count": 0}}
+
+    db = SessionLocal()
+    try:
+        records: List[Dict[str, Any]] = []
+        if normalized_role == "vendor":
+            try:
+                rows = db.execute(
+                    text(
+                        """
+                        SELECT *
+                        FROM vendor_trust_history
+                        WHERE lower(vendor_email) = :email
+                        ORDER BY COALESCE(confirmed_at, created_at) DESC NULLS LAST, id DESC
+                        LIMIT 25
+                        """
+                    ),
+                    {"email": normalized_email},
+                ).mappings().all()
+                records = [dict(row) for row in rows]
+            except Exception as exc:
+                print("⚠️ Public trust history lookup skipped:", str(exc))
+
+        flagged_count = sum(1 for row in records if _safe_lower(row.get("trust_status")) == "flagged")
+        confirmed_records = [row for row in records if _safe_lower(row.get("trust_status")) != "flagged"]
+        organizer_count = len({ _safe_lower(row.get("organizer_email")) for row in confirmed_records if _safe_lower(row.get("organizer_email")) })
+        event_count = len({ _safe_str(row.get("event_id") or row.get("event_name")) for row in confirmed_records if _safe_str(row.get("event_id") or row.get("event_name")) })
+
+        return {
+            "ok": True,
+            "records": records,
+            "summary": {
+                "confirmed_count": len(confirmed_records),
+                "flagged_count": flagged_count,
+                "organizer_count": organizer_count,
+                "event_count": event_count,
+            },
+        }
+    finally:
+        db.close()
+
 
 @router.get("/verification/me")
 def get_my_verification(current_user: dict = Depends(get_current_user)):
