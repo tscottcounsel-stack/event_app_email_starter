@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.store import _VERIFICATIONS, save_store
+from app import store as store_module
 from app.routers.auth import get_current_user
 from sqlalchemy import func
 from app.db import SessionLocal
@@ -17,6 +17,17 @@ VALID_ROLES = {"vendor", "organizer"}
 VALID_REVIEW_STATUSES = {"verified", "rejected"}
 EXPIRING_SOON_DAYS = 30
 DEFAULT_VERIFICATION_DURATION_DAYS = 365
+
+
+def _verification_store() -> Dict[int, Dict[str, Any]]:
+    """Return the durable verification store from app.store.
+
+    Do not import _VERIFICATIONS directly. app.store.load_store() reassigns
+    that dictionary, so a direct import can point at a stale object and cause
+    submit/payment/admin reads to drift.
+    """
+    store_module.load_store()
+    return store_module._VERIFICATIONS
 
 
 def _now() -> datetime:
@@ -54,7 +65,7 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
 
 def _next_verification_id() -> int:
     ids: List[int] = []
-    for key in _VERIFICATIONS.keys():
+    for key in _verification_store().keys():
         try:
             ids.append(int(key))
         except Exception:
@@ -102,7 +113,7 @@ def _find_latest_record(email: str, role: str = "") -> Optional[Dict[str, Any]]:
     normalized_role = _safe_lower(role)
 
     matches: List[Dict[str, Any]] = []
-    for record in _VERIFICATIONS.values():
+    for record in _verification_store().values():
         if not isinstance(record, dict):
             continue
         if _safe_lower(record.get("email")) != normalized_email:
@@ -202,7 +213,7 @@ def _ensure_identity_record(email: str, role: str, extra: Optional[Dict[str, Any
     }
     if extra:
         record.update(extra)
-    _VERIFICATIONS[verification_id] = record
+    _verification_store()[verification_id] = record
     return record
 
 
@@ -378,7 +389,7 @@ def mark_verification_paid(
     clean_verification_id = _safe_str(verification_id)
     if clean_verification_id:
         try:
-            candidate = _VERIFICATIONS.get(int(clean_verification_id))
+            candidate = _verification_store().get(int(clean_verification_id))
             if isinstance(candidate, dict):
                 record = candidate
         except Exception:
@@ -411,7 +422,7 @@ def mark_verification_paid(
     if stripe_payment_intent_id:
         record["stripe_payment_intent_id"] = stripe_payment_intent_id
 
-    save_store()
+    store_module.save_store()
     _sync_verification_record_to_profile(record)
     return record
 
@@ -450,7 +461,7 @@ def create_verification_checkout(payload: Dict[str, Any], current_user: dict = D
             "updated_at": _now_iso(),
         },
     )
-    save_store()
+    store_module.save_store()
 
     success_url = _safe_str(payload.get("success_url"))
     cancel_url = _safe_str(payload.get("cancel_url"))
@@ -495,7 +506,7 @@ def create_verification_checkout(payload: Dict[str, Any], current_user: dict = D
             },
         )
         record["checkout_session_id"] = str(session.get("id") if isinstance(session, dict) else session.id)
-        save_store()
+        store_module.save_store()
         return {"ok": True, "url": session.get("url") if isinstance(session, dict) else session.url, "verification": _private_record(record, email, role)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc) or "Unable to start payment.")
@@ -542,7 +553,7 @@ def confirm_verification_payment(payload: Dict[str, Any], current_user: dict = D
             "updated_at": _now_iso(),
         },
     )
-    save_store()
+    store_module.save_store()
     _sync_verification_record_to_profile(record)
 
     return {
@@ -562,7 +573,7 @@ def submit_verification(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Role must be vendor or organizer")
 
     existing = None
-    for verification_id, record in _VERIFICATIONS.items():
+    for verification_id, record in _verification_store().items():
         if isinstance(record, dict) and _record_matches_identity(record, email, role):
             existing = (verification_id, record)
             break
@@ -605,9 +616,9 @@ def submit_verification(payload: Dict[str, Any]):
             "fee_amount": payload.get("fee_amount", 0),
             "expiration_date": payload.get("expiration_date"),
         }
-        _VERIFICATIONS[verification_id] = saved
+        _verification_store()[verification_id] = saved
 
-    save_store()
+    store_module.save_store()
     _sync_verification_record_to_profile(saved)
 
     return {
@@ -636,7 +647,7 @@ def get_admin_verifications(role: str = "all", status: str = "all"):
 
     records = [
         _public_record(record)
-        for record in _VERIFICATIONS.values()
+        for record in _verification_store().values()
         if isinstance(record, dict)
     ]
 
@@ -666,7 +677,7 @@ def get_admin_verifications(role: str = "all", status: str = "all"):
 
 @router.post("/admin/verify/{verification_id}")
 def review_verification(verification_id: int, payload: Dict[str, Any]):
-    record = _VERIFICATIONS.get(verification_id)
+    record = _verification_store().get(verification_id)
 
     if not isinstance(record, dict):
         raise HTTPException(status_code=404, detail="Verification not found")
@@ -687,7 +698,7 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
             _now() + timedelta(days=DEFAULT_VERIFICATION_DURATION_DAYS)
         ).isoformat()
 
-    save_store()
+    store_module.save_store()
     _sync_verification_record_to_profile(record)
 
     return {
@@ -698,11 +709,11 @@ def review_verification(verification_id: int, payload: Dict[str, Any]):
 
 @router.delete("/admin/verifications/{verification_id}")
 def delete_verification(verification_id: int):
-    if verification_id not in _VERIFICATIONS:
+    if verification_id not in _verification_store():
         raise HTTPException(status_code=404, detail="Verification not found")
 
-    removed = _VERIFICATIONS.pop(verification_id)
-    save_store()
+    removed = _verification_store().pop(verification_id)
+    store_module.save_store()
 
     return {
         "ok": True,
