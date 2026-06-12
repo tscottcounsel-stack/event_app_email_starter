@@ -25,10 +25,6 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 # These accounts completed test checkout/payment during pre-launch.
 # They should still be visible for review, but the admin queue must show them
 # as unpaid until they complete a real live verification checkout.
-TEST_VERIFICATION_PAYMENT_RESET_EMAILS = {
-    "beanallicoffee@gmail.com",
-}
-
 
 class AdminAccountCreateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
