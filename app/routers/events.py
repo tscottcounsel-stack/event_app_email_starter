@@ -110,6 +110,11 @@ class EventCreate(BaseModel):
     google_maps_url: Optional[str] = None
     category: Optional[str] = None
 
+    event_mode: Optional[str] = None
+    eventMode: Optional[str] = None
+    listing_only: Optional[bool] = None
+    listingOnly: Optional[bool] = None
+
     heroImageUrl: Optional[str] = None
     imageUrls: Optional[list[str]] = None
     videoUrls: Optional[list[str]] = None
@@ -192,6 +197,77 @@ def _event_is_active_marketplace_event(event_data: Dict[str, Any]) -> bool:
 
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+LISTING_ONLY_MODE = "listing_only"
+FULL_EVENT_MODE = "full"
+
+
+def _normalize_event_mode(value: Any, listing_only: Any = None) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"listing_only", "listing", "quick_listing", "public_listing", "list_only"}:
+        return LISTING_ONLY_MODE
+    if listing_only is True or str(listing_only or "").strip().lower() in {"true", "1", "yes", "y"}:
+        return LISTING_ONLY_MODE
+    return FULL_EVENT_MODE
+
+
+def _event_mode_store_payload(event_id: int) -> Dict[str, Any]:
+    eid = int(event_id or 0)
+    if not eid:
+        return {}
+
+    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not event_store:
+        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+
+    if not isinstance(event_store, dict):
+        return {}
+
+    return {
+        "event_mode": event_store.get("event_mode") or event_store.get("eventMode"),
+        "eventMode": event_store.get("eventMode") or event_store.get("event_mode"),
+        "listing_only": event_store.get("listing_only") or event_store.get("listingOnly"),
+        "listingOnly": event_store.get("listingOnly") or event_store.get("listing_only"),
+    }
+
+
+def _apply_event_mode_aliases(target: Dict[str, Any], mode: Any = None, listing_only: Any = None) -> Dict[str, Any]:
+    normalized = _normalize_event_mode(mode, listing_only)
+    is_listing = normalized == LISTING_ONLY_MODE
+    target["event_mode"] = normalized
+    target["eventMode"] = normalized
+    target["listing_only"] = is_listing
+    target["listingOnly"] = is_listing
+
+    if is_listing:
+        # Listing-only events are discovery pages. They should not look like
+        # booth/application workflows on public or organizer screens.
+        target["accepting_vendors"] = False
+        target["acceptingVendors"] = False
+        target["requirements_published"] = False
+        target["layout_published"] = False
+
+    return target
+
+
+def _persist_event_mode(event_id: int, mode: Any = None, listing_only: Any = None) -> str:
+    eid = int(event_id or 0)
+    normalized = _normalize_event_mode(mode, listing_only)
+    if not eid:
+        return normalized
+
+    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not event_store:
+        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+    event_store = dict(event_store or {})
+    event_store["id"] = eid
+    _apply_event_mode_aliases(event_store, normalized)
+
+    _EVENTS[eid] = dict(event_store)
+    _EVENTS[str(eid)] = dict(event_store)
+    save_store()
+    return normalized
 
 
 def _dt_to_iso(value: Any) -> Optional[str]:
@@ -329,9 +405,22 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "vendor_categories_needed",
         "looking_for_categories",
         "vendor_categories",
+        "event_mode",
+        "eventMode",
+        "listing_only",
+        "listingOnly",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
+
+    # Event mode currently lives in the runtime store until the SQL schema grows
+    # dedicated columns. Always expose both snake/camel aliases to the frontend.
+    store_mode_payload = _event_mode_store_payload(int(ev.id or 0))
+    _apply_event_mode_aliases(
+        payload,
+        store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode") or payload.get("event_mode"),
+        store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly") or payload.get("listing_only"),
+    )
 
     # Canonicalize the selected needs across old/new field names and both runtime stores.
     store_needs_payload = _event_needs_store_payload(int(ev.id or 0))
@@ -414,6 +503,25 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         merged["organizer_id"] = organizer_id
         merged.setdefault("owner_id", organizer_id)
         merged.setdefault("created_by", organizer_id)
+
+    # Preserve event mode across every event payload alias.
+    mode_payload = _event_mode_store_payload(event_id)
+    mode = (
+        merged.get("event_mode")
+        or merged.get("eventMode")
+        or mode_payload.get("event_mode")
+        or mode_payload.get("eventMode")
+    )
+    listing_only = (
+        merged.get("listing_only")
+        if "listing_only" in merged
+        else merged.get("listingOnly")
+        if "listingOnly" in merged
+        else mode_payload.get("listing_only")
+        if "listing_only" in mode_payload
+        else mode_payload.get("listingOnly")
+    )
+    _apply_event_mode_aliases(merged, mode, listing_only)
 
     # Preserve organizer-selected vendor/service needs across every event payload alias.
     needs = _extract_event_needs(merged, existing, event_data)
@@ -1005,6 +1113,24 @@ def _category_availability_for_event(event_data: Dict[str, Any], applications: d
 
 def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Session] = None) -> dict:
     event_id = int(event.get("id") or 0)
+    if _normalize_event_mode(event.get("event_mode") or event.get("eventMode"), event.get("listing_only") or event.get("listingOnly")) == LISTING_ONLY_MODE:
+        empty_availability = {"items": [], "by_category": {}, "by_slug": {}}
+        return {
+            "booths_from_price": None,
+            "starting_booth_price": None,
+            "booth_price": None,
+            "total_booths": 0,
+            "booths_total": 0,
+            "paid_booths": 0,
+            "held_booths": 0,
+            "spots_left": None,
+            "booths_remaining": None,
+            "category_availability": empty_availability,
+            "categoryAvailability": empty_availability,
+            "needed_category_availability": [],
+            "neededCategoryAvailability": [],
+        }
+
 
     diagram_payload: Dict[str, Any] = {}
     if db is not None and event_id:
@@ -1506,7 +1632,13 @@ def organizer_create_event(
     db.refresh(event)
 
     serialized = _serialize_event_model(event)
-    _sync_event_to_store(serialized, user)
+    mode = _normalize_event_mode(
+        payload.event_mode or payload.eventMode,
+        payload.listing_only if payload.listing_only is not None else payload.listingOnly,
+    )
+    _apply_event_mode_aliases(serialized, mode)
+    _persist_event_mode(int(event.id), mode)
+    serialized = _sync_event_to_store(serialized, user)
     return serialized
 
 
@@ -1556,6 +1688,21 @@ def organizer_patch_event(
     selected_needs = _persist_event_needs(int(event_id), selected_needs)
     _apply_event_needs_aliases(serialized, selected_needs)
 
+    if any(key in incoming for key in ("event_mode", "eventMode", "listing_only", "listingOnly")):
+        mode = _persist_event_mode(
+            int(event_id),
+            incoming.get("event_mode") or incoming.get("eventMode"),
+            incoming.get("listing_only") if "listing_only" in incoming else incoming.get("listingOnly"),
+        )
+        _apply_event_mode_aliases(serialized, mode)
+    else:
+        store_mode_payload = _event_mode_store_payload(int(event_id))
+        _apply_event_mode_aliases(
+            serialized,
+            store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode"),
+            store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly"),
+        )
+
     # Persist both int and string keys because older routes have used both.
     synced = _sync_event_to_store(serialized, user)
     _EVENTS[int(event_id)] = dict(synced)
@@ -1597,8 +1744,14 @@ def organizer_publish_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
-    _sync_event_to_store(serialized, user)
-    if not was_published:
+    store_mode_payload = _event_mode_store_payload(int(event_id))
+    _apply_event_mode_aliases(
+        serialized,
+        store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode") or serialized.get("event_mode"),
+        store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly") or serialized.get("listing_only"),
+    )
+    serialized = _sync_event_to_store(serialized, user)
+    if not was_published and serialized.get("event_mode") != LISTING_ONLY_MODE:
         _create_vendor_event_alerts(db, serialized)
     return serialized
 
@@ -2479,6 +2632,8 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
 
     event_dict = _attach_event_needs(event_dict)
     event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
+    if event_dict.get("event_mode") == LISTING_ONLY_MODE:
+        _apply_event_mode_aliases(event_dict, LISTING_ONLY_MODE)
 
     # A new event with no map yet should not be treated as full. If there is no
     # booth inventory, keep organizer-selected needs visible on the public page.
