@@ -110,6 +110,19 @@ class EventCreate(BaseModel):
     google_maps_url: Optional[str] = None
     category: Optional[str] = None
 
+    host_name: Optional[str] = None
+    hostName: Optional[str] = None
+    organizer_name: Optional[str] = None
+    organizerName: Optional[str] = None
+    facebook_url: Optional[str] = None
+    facebookUrl: Optional[str] = None
+    instagram_url: Optional[str] = None
+    instagramUrl: Optional[str] = None
+    tiktok_url: Optional[str] = None
+    tiktokUrl: Optional[str] = None
+    website_url: Optional[str] = None
+    websiteUrl: Optional[str] = None
+
     event_mode: Optional[str] = None
     eventMode: Optional[str] = None
     listing_only: Optional[bool] = None
@@ -270,6 +283,65 @@ def _persist_event_mode(event_id: int, mode: Any = None, listing_only: Any = Non
     return normalized
 
 
+def _pick_first_value(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _apply_public_listing_aliases(target: Dict[str, Any], source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    source = source or target
+
+    host_name = _pick_first_value(
+        source.get("host_name"),
+        source.get("hostName"),
+        source.get("organizer_name"),
+        source.get("organizerName"),
+        source.get("company_name"),
+    )
+    if host_name:
+        target["host_name"] = host_name
+        target["hostName"] = host_name
+        target["organizer_name"] = host_name
+        target["organizerName"] = host_name
+        target["company_name"] = host_name
+
+    social_pairs = (
+        ("facebook_url", "facebookUrl"),
+        ("instagram_url", "instagramUrl"),
+        ("tiktok_url", "tiktokUrl"),
+        ("website_url", "websiteUrl"),
+    )
+    for snake, camel in social_pairs:
+        value = _pick_first_value(source.get(snake), source.get(camel))
+        if value:
+            target[snake] = value
+            target[camel] = value
+
+    return target
+
+
+def _persist_public_listing_fields(event_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    eid = int(event_id or 0)
+    if not eid:
+        return {}
+
+    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not event_store:
+        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+
+    event_store = dict(event_store or {})
+    event_store["id"] = eid
+    _apply_public_listing_aliases(event_store, payload)
+
+    _EVENTS[eid] = dict(event_store)
+    _EVENTS[str(eid)] = dict(event_store)
+    save_store()
+    return event_store
+
+
 def _dt_to_iso(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -409,6 +481,19 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "eventMode",
         "listing_only",
         "listingOnly",
+        "host_name",
+        "hostName",
+        "organizer_name",
+        "organizerName",
+        "company_name",
+        "facebook_url",
+        "facebookUrl",
+        "instagram_url",
+        "instagramUrl",
+        "tiktok_url",
+        "tiktokUrl",
+        "website_url",
+        "websiteUrl",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
@@ -421,6 +506,8 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode") or payload.get("event_mode"),
         store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly") or payload.get("listing_only"),
     )
+
+    _apply_public_listing_aliases(payload, store_payload)
 
     # Canonicalize the selected needs across old/new field names and both runtime stores.
     store_needs_payload = _event_needs_store_payload(int(ev.id or 0))
@@ -503,6 +590,8 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         merged["organizer_id"] = organizer_id
         merged.setdefault("owner_id", organizer_id)
         merged.setdefault("created_by", organizer_id)
+
+    _apply_public_listing_aliases(merged, merged)
 
     # Preserve event mode across every event payload alias.
     mode_payload = _event_mode_store_payload(event_id)
@@ -1641,6 +1730,14 @@ def organizer_create_event(
     mode = create_mode
     _apply_event_mode_aliases(serialized, mode)
     _persist_event_mode(int(event.id), mode)
+    _apply_public_listing_aliases(serialized, {
+        "host_name": payload.host_name or payload.hostName or payload.organizer_name or payload.organizerName,
+        "facebook_url": payload.facebook_url or payload.facebookUrl,
+        "instagram_url": payload.instagram_url or payload.instagramUrl,
+        "tiktok_url": payload.tiktok_url or payload.tiktokUrl,
+        "website_url": payload.website_url or payload.websiteUrl,
+    })
+    _persist_public_listing_fields(int(event.id), serialized)
     serialized = _sync_event_to_store(serialized, user)
     return serialized
 
@@ -1690,6 +1787,9 @@ def organizer_patch_event(
 
     selected_needs = _persist_event_needs(int(event_id), selected_needs)
     _apply_event_needs_aliases(serialized, selected_needs)
+
+    _persist_public_listing_fields(int(event_id), incoming)
+    _apply_public_listing_aliases(serialized, incoming)
 
     if any(key in incoming for key in ("event_mode", "eventMode", "listing_only", "listingOnly")):
         mode = _persist_event_mode(
