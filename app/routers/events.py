@@ -1601,6 +1601,12 @@ def organizer_create_event(
     organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
     organizer_id_str = None if organizer_id is None else str(organizer_id)
 
+    create_mode = _normalize_event_mode(
+        payload.event_mode or payload.eventMode,
+        payload.listing_only if payload.listing_only is not None else payload.listingOnly,
+    )
+    create_listing_only = create_mode == LISTING_ONLY_MODE
+
     event = Event(
         title=payload.title,
         description=payload.description,
@@ -1617,7 +1623,7 @@ def organizer_create_event(
         hero_image_url=payload.heroImageUrl,
         image_urls=list(payload.imageUrls or []),
         video_urls=list(payload.videoUrls or []),
-        published=False,
+        published=create_listing_only,
         archived=False,
         requirements_published=False,
         layout_published=False,
@@ -1632,10 +1638,7 @@ def organizer_create_event(
     db.refresh(event)
 
     serialized = _serialize_event_model(event)
-    mode = _normalize_event_mode(
-        payload.event_mode or payload.eventMode,
-        payload.listing_only if payload.listing_only is not None else payload.listingOnly,
-    )
+    mode = create_mode
     _apply_event_mode_aliases(serialized, mode)
     _persist_event_mode(int(event.id), mode)
     serialized = _sync_event_to_store(serialized, user)
@@ -1694,6 +1697,12 @@ def organizer_patch_event(
             incoming.get("event_mode") or incoming.get("eventMode"),
             incoming.get("listing_only") if "listing_only" in incoming else incoming.get("listingOnly"),
         )
+        if mode == LISTING_ONLY_MODE and not bool(ev.published):
+            ev.published = True
+            db.add(ev)
+            db.commit()
+            db.refresh(ev)
+            serialized = _serialize_event_model(ev)
         _apply_event_mode_aliases(serialized, mode)
     else:
         store_mode_payload = _event_mode_store_payload(int(event_id))
