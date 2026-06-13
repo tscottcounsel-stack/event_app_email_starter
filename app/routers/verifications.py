@@ -131,12 +131,26 @@ def _first_media_url(value: Any) -> str:
     return ""
 
 
-def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> str:
-    """Best-effort public logo resolver.
+def _profile_attr(row: Optional[Profile], *names: str) -> str:
+    if row is None:
+        return ""
+    for name in names:
+        try:
+            value = getattr(row, name, None)
+        except Exception:
+            value = None
+        found = _first_media_url(value)
+        if found:
+            return found
+    return ""
 
-    Some older profiles do not have a dedicated logo_url column/key. In those
-    cases, use the first available uploaded media image so public verified pages
-    do not fall back to initials when a business clearly has profile media.
+
+def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> str:
+    """Resolve the same logo source used by public profile pages.
+
+    Some profiles store the logo as a real column on the Profile row, while
+    others store it inside the JSON data blob. Public verification pages should
+    check both so the verified credential matches the public profile card.
     """
     if not isinstance(data, dict):
         data = {}
@@ -158,6 +172,24 @@ def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> st
     if direct:
         return direct
 
+    row_direct = _profile_attr(
+        row,
+        "logo_url",
+        "logoUrl",
+        "logo_data_url",
+        "logoDataUrl",
+        "business_logo_url",
+        "businessLogoUrl",
+        "profile_image_url",
+        "profileImageUrl",
+        "avatar_url",
+        "avatarUrl",
+        "image_url",
+        "imageUrl",
+    )
+    if row_direct:
+        return row_direct
+
     for key in (
         "logo",
         "profile_image",
@@ -176,13 +208,9 @@ def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> st
         if found:
             return found
 
-    if row is not None:
-        row_data = getattr(row, "data", None)
-        if isinstance(row_data, dict) and row_data is not data:
-            for key in ("image_urls", "imageUrls", "images", "gallery", "photos"):
-                found = _first_media_url(row_data.get(key))
-                if found:
-                    return found
+    row_media = _profile_attr(row, "image_urls", "imageUrls", "images", "media", "gallery", "photos")
+    if row_media:
+        return row_media
 
     return ""
 
