@@ -102,6 +102,91 @@ def _normalize_documents(value: Any) -> List[Dict[str, Any]]:
     return docs
 
 
+def _first_media_url(value: Any) -> str:
+    """Return the first usable media URL from a string/list/dict payload."""
+    if isinstance(value, str):
+        return _safe_str(value)
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and _safe_str(item):
+                return _safe_str(item)
+            if isinstance(item, dict):
+                found = _safe_str(
+                    item.get("url")
+                    or item.get("secure_url")
+                    or item.get("src")
+                    or item.get("image_url")
+                    or item.get("imageUrl")
+                )
+                if found:
+                    return found
+    if isinstance(value, dict):
+        return _safe_str(
+            value.get("url")
+            or value.get("secure_url")
+            or value.get("src")
+            or value.get("image_url")
+            or value.get("imageUrl")
+        )
+    return ""
+
+
+def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> str:
+    """Best-effort public logo resolver.
+
+    Some older profiles do not have a dedicated logo_url column/key. In those
+    cases, use the first available uploaded media image so public verified pages
+    do not fall back to initials when a business clearly has profile media.
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    direct = _safe_str(
+        data.get("logo_url")
+        or data.get("logoUrl")
+        or data.get("logo_data_url")
+        or data.get("logoDataUrl")
+        or data.get("business_logo_url")
+        or data.get("businessLogoUrl")
+        or data.get("profile_image_url")
+        or data.get("profileImageUrl")
+        or data.get("avatar_url")
+        or data.get("avatarUrl")
+        or data.get("image_url")
+        or data.get("imageUrl")
+    )
+    if direct:
+        return direct
+
+    for key in (
+        "logo",
+        "profile_image",
+        "profileImage",
+        "avatar",
+        "images",
+        "image_urls",
+        "imageUrls",
+        "media",
+        "gallery",
+        "photos",
+        "photo_urls",
+        "photoUrls",
+    ):
+        found = _first_media_url(data.get(key))
+        if found:
+            return found
+
+    if row is not None:
+        row_data = getattr(row, "data", None)
+        if isinstance(row_data, dict) and row_data is not data:
+            for key in ("image_urls", "imageUrls", "images", "gallery", "photos"):
+                found = _first_media_url(row_data.get(key))
+                if found:
+                    return found
+
+    return ""
+
+
 def _record_matches_identity(record: Dict[str, Any], email: str, role: str) -> bool:
     record_email = _safe_lower(record.get("email"))
     record_role = _safe_lower(record.get("role"))
@@ -487,8 +572,8 @@ def _profile_public_payload_from_row(row: Profile, *, email: str, role: str) -> 
         ),
         "categories": categories,
         "category": categories[0] if categories else _safe_str(data.get("category") or data.get("vendor_category")),
-        "logo_url": _safe_str(data.get("logo_url") or data.get("logoUrl") or data.get("logo_data_url") or data.get("logoDataUrl")),
-        "logoUrl": _safe_str(data.get("logoUrl") or data.get("logo_url") or data.get("logo_data_url") or data.get("logoDataUrl")),
+        "logo_url": _profile_logo_url(data, row),
+        "logoUrl": _profile_logo_url(data, row),
         "verified": verified,
         "verification_status": "verified" if verified else (_safe_lower(row.verification_status) or "unverified"),
         "verificationStatus": "verified" if verified else (_safe_lower(row.verification_status) or "unverified"),
