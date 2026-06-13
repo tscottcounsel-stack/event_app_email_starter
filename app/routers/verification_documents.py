@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import mimetypes
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import boto3
@@ -176,6 +176,179 @@ def _document_public(row: VerificationDocument) -> Dict[str, Any]:
     }
 
 
+def _legacy_doc_type(value: Any) -> str:
+    """Map older verification/profile document labels to vault document types."""
+    raw = _safe_lower(value).replace("-", "_").replace(" ", "_").replace("/", "_")
+    aliases = {
+        "business_license": "business_license",
+        "business_license_registration": "business_license",
+        "business_registration": "business_registration",
+        "dba_business_registration": "business_registration",
+        "certificate_of_insurance": "certificate_of_insurance",
+        "insurance": "certificate_of_insurance",
+        "insurance_certificate": "insurance_certificate",
+        "coi": "certificate_of_insurance",
+        "w_9": "w9_document",
+        "w9": "w9_document",
+        "w9_document": "w9_document",
+        "sales_tax_resale_permit": "sales_tax_permit",
+        "sales_tax_permit": "sales_tax_permit",
+        "resale_permit": "sales_tax_permit",
+        "government_id": "government_id",
+        "identity_verification_support": "government_id",
+        "food_handler_permit": "food_handler_permit",
+        "health_permit": "health_permit",
+    }
+    if raw in VALID_DOCUMENT_TYPES:
+        return raw
+    if raw in aliases:
+        return aliases[raw]
+    for token, mapped in aliases.items():
+        if token and token in raw:
+            return mapped
+    return "other"
+
+
+def _legacy_doc_mime(filename: str, provided: Any = "", url: str = "") -> str:
+    provided_mime = _safe_lower(provided)
+    if provided_mime in ALLOWED_UPLOAD_MIME_TYPES:
+        return provided_mime
+
+    guessed = mimetypes.guess_type(filename or url)[0] or ""
+    if guessed in ALLOWED_UPLOAD_MIME_TYPES:
+        return guessed
+
+    lowered = _safe_lower(url or filename)
+    if lowered.startswith("data:application/pdf") or ".pdf" in lowered:
+        return "application/pdf"
+    if lowered.startswith("data:image/png") or lowered.endswith(".png"):
+        return "image/png"
+    if lowered.startswith("data:image/webp") or lowered.endswith(".webp"):
+        return "image/webp"
+    if lowered.startswith("data:image/jpeg") or lowered.startswith("data:image/jpg") or lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+        return "image/jpeg"
+
+    return "application/pdf"
+
+
+def _legacy_doc_label(item: Dict[str, Any], document_type: str) -> str:
+    label = _safe_str(
+        item.get("display_name")
+        or item.get("label")
+        or item.get("name")
+        or item.get("original_filename")
+    )
+    if label:
+        return label
+    return document_type.replace("_", " ").title()
+
+
+def _backfill_profile_documents(db: Session, *, email: str, role: str) -> None:
+    """Create vault rows for older verification-record/profile documents.
+
+    Some older verification uploads were saved only inside profile.data["documents"].
+    The send-docs page needs real verification_documents IDs, so this performs a
+    conservative one-way backfill. It does not delete or modify existing vault rows.
+    """
+    profile = _profile_for_user(db, email, role)
+    if profile is None:
+        return
+
+    data = profile.data if isinstance(profile.data, dict) else {}
+    raw_docs = data.get("documents")
+    if not isinstance(raw_docs, list):
+        return
+
+    changed = False
+    for item in raw_docs:
+        if not isinstance(item, dict):
+            continue
+
+        document_type = _legacy_doc_type(
+            item.get("document_type")
+            or item.get("type")
+            or item.get("label")
+            or item.get("name")
+            or item.get("category")
+        )
+        url = _safe_str(item.get("url") or item.get("file_url") or item.get("fileUrl"))
+        filename = _clean_filename(
+            item.get("original_filename")
+            or item.get("filename")
+            or item.get("name")
+            or item.get("label")
+            or f"{document_type}.pdf"
+        )
+        label = _legacy_doc_label(item, document_type)
+        storage_key = _safe_str(item.get("storage_key") or item.get("key"))
+        if not storage_key:
+            storage_key = f"legacy-profile-doc://{role}/{email}/{document_type}/{abs(hash(url or filename or label))}"
+
+        existing = (
+            db.query(VerificationDocument)
+            .filter(
+                func.lower(VerificationDocument.owner_email) == _safe_lower(email),
+                VerificationDocument.owner_role == _safe_lower(role),
+                VerificationDocument.storage_key == storage_key,
+                VerificationDocument.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if existing is not None:
+            continue
+
+        row = VerificationDocument(
+            owner_email=_safe_lower(email),
+            owner_role=_safe_lower(role),
+            owner_profile_id=profile.id,
+            document_type=document_type,
+            display_name=label,
+            bucket=_safe_str(item.get("bucket")) or "legacy_profile_document",
+            storage_key=storage_key,
+            original_filename=filename,
+            mime_type=_legacy_doc_mime(filename, item.get("mime_type") or item.get("content_type"), url),
+            file_size=int(item.get("file_size") or item.get("size") or 0) or None,
+            status=_safe_lower(item.get("status")) or "approved",
+            review_status=_safe_lower(item.get("review_status") or item.get("reviewStatus") or item.get("public_status") or item.get("status")) or "approved",
+            scan_status=_safe_lower(item.get("scan_status")) or "not_scanned",
+            expires_at=_parse_datetime(item.get("expires_at") or item.get("expiration_date") or item.get("expirationDate")),
+            uploaded_at=_now(),
+            reviewed_at=_now() if _safe_lower(item.get("review_status") or item.get("status")) in {"approved", "verified", "reviewed"} else None,
+            metadata_json={
+                "source": "profile_data_backfill",
+                "legacy_url": url,
+                "backfilled_at": _now().isoformat(),
+            },
+        )
+        db.add(row)
+        changed = True
+
+    if changed:
+        db.commit()
+
+
+def _grant_public(grant: DocumentAccessGrant, document: Optional[VerificationDocument] = None, share_url: str = "") -> Dict[str, Any]:
+    return {
+        "id": grant.id,
+        "document_id": grant.document_id,
+        "document": _document_public(document) if document is not None else None,
+        "granted_to_email": grant.granted_to_email,
+        "granted_to_name": getattr(grant, "granted_to_name", None),
+        "organization_name": getattr(grant, "organization_name", None),
+        "share_url": share_url,
+        "expires_at": grant.expires_at.isoformat() if grant.expires_at else None,
+        "revoked_at": grant.revoked_at.isoformat() if getattr(grant, "revoked_at", None) else None,
+        "created_at": grant.created_at.isoformat() if getattr(grant, "created_at", None) else None,
+    }
+
+
+def _frontend_origin(request: Request) -> str:
+    origin = _safe_str(request.headers.get("origin"))
+    if origin:
+        return origin.rstrip("/")
+    return f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+
+
 def _can_view_document(db: Session, row: VerificationDocument, user: Dict[str, Any]) -> bool:
     email = _safe_lower(user.get("email"))
     role = _safe_lower(user.get("role"))
@@ -306,6 +479,7 @@ def complete_verification_document_upload(document_id: int, payload: Dict[str, A
 def list_my_verification_documents(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     email = _safe_lower(user.get("email"))
     role = _require_role(user.get("role"))
+    _backfill_profile_documents(db, email=email, role=role)
     rows = (
         db.query(VerificationDocument)
         .filter(func.lower(VerificationDocument.owner_email) == email, VerificationDocument.owner_role == role, VerificationDocument.deleted_at.is_(None))
@@ -313,6 +487,12 @@ def list_my_verification_documents(user: dict = Depends(get_current_user), db: S
         .all()
     )
     return {"ok": True, "documents": [_document_public(row) for row in rows]}
+
+
+@router.get("/verification-documents/my")
+def list_my_verification_documents_alias(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Backward-compatible alias used by the Send Verified Documents page.
+    return list_my_verification_documents(user=user, db=db)
 
 
 @router.get("/verification-documents/admin/pending")
@@ -409,6 +589,121 @@ def grant_verification_document_access(document_id: int, payload: Dict[str, Any]
     db.commit()
     db.refresh(grant)
     return {"ok": True, "grant": {"id": grant.id, "document_id": grant.document_id, "granted_to_email": grant.granted_to_email, "expires_at": grant.expires_at.isoformat()}}
+
+
+@router.get("/verification-documents/grants/mine")
+def list_my_verification_document_grants(request: Request, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    email = _safe_lower(user.get("email"))
+    role = _require_role(user.get("role"))
+    rows = (
+        db.query(DocumentAccessGrant, VerificationDocument)
+        .join(VerificationDocument, VerificationDocument.id == DocumentAccessGrant.document_id)
+        .filter(
+            func.lower(DocumentAccessGrant.owner_email) == email,
+            VerificationDocument.owner_role == role,
+            VerificationDocument.deleted_at.is_(None),
+        )
+        .order_by(DocumentAccessGrant.id.desc())
+        .limit(100)
+        .all()
+    )
+    origin = _frontend_origin(request)
+    grants = [
+        _grant_public(grant, doc, f"{origin}/shared-documents/{grant.id}")
+        for grant, doc in rows
+    ]
+    return {"ok": True, "grants": grants}
+
+
+@router.post("/verification-documents/share-bundle")
+def create_verification_document_share_bundle(payload: Dict[str, Any], request: Request, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    email = _safe_lower(user.get("email"))
+    role = _require_role(user.get("role"))
+    if not email:
+        raise HTTPException(status_code=401, detail="Authenticated email required")
+
+    document_ids = payload.get("document_ids") or payload.get("documentIds") or []
+    if not isinstance(document_ids, list) or not document_ids:
+        raise HTTPException(status_code=400, detail="Select at least one document to share.")
+
+    granted_to_email = _safe_lower(
+        payload.get("recipient_email")
+        or payload.get("granted_to_email")
+        or payload.get("organizer_email")
+        or payload.get("email")
+    )
+    if not granted_to_email:
+        raise HTTPException(status_code=400, detail="Recipient email required")
+
+    try:
+        expires_in_days = int(payload.get("expires_in_days") or payload.get("expiresInDays") or DEFAULT_GRANT_DAYS)
+    except Exception:
+        expires_in_days = DEFAULT_GRANT_DAYS
+    expires_in_days = max(1, min(expires_in_days, 90))
+    expires_at = _now() + timedelta(days=expires_in_days)
+
+    grants: List[DocumentAccessGrant] = []
+    origin = _frontend_origin(request)
+
+    for raw_id in document_ids:
+        try:
+            document_id = int(raw_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid document id")
+
+        row = (
+            db.query(VerificationDocument)
+            .filter(
+                VerificationDocument.id == document_id,
+                func.lower(VerificationDocument.owner_email) == email,
+                VerificationDocument.owner_role == role,
+                VerificationDocument.deleted_at.is_(None),
+            )
+            .one_or_none()
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Verification document {document_id} not found")
+
+        grant = DocumentAccessGrant(
+            document_id=row.id,
+            owner_email=row.owner_email,
+            granted_to_email=granted_to_email,
+            granted_to_role="organizer",
+            purpose=_safe_str(payload.get("purpose") or "owner_sent_document_bundle"),
+            expires_at=expires_at,
+            created_by=email,
+        )
+        db.add(grant)
+        db.flush()
+        grants.append(grant)
+        _audit(
+            db,
+            request,
+            user,
+            "verification_document_bundle_access_granted",
+            row.id,
+            {
+                "granted_to_email": granted_to_email,
+                "expires_at": expires_at.isoformat(),
+                "recipient_name": _safe_str(payload.get("recipient_name")),
+                "organization_name": _safe_str(payload.get("organization_name")),
+                "note": _safe_str(payload.get("note")),
+            },
+        )
+
+    db.commit()
+    for grant in grants:
+        db.refresh(grant)
+
+    share_url = f"{origin}/shared-documents/{grants[0].id}" if grants else ""
+    return {
+        "ok": True,
+        "share_url": share_url,
+        "grants": [_grant_public(grant, None, f"{origin}/shared-documents/{grant.id}") for grant in grants],
+        "expires_at": expires_at.isoformat(),
+        "emailed": False,
+        "message": "Secure document access created.",
+    }
 
 
 @router.post("/verification-documents/grants/{grant_id}/revoke")
