@@ -31,6 +31,8 @@ VALID_DOCUMENT_TYPES = {
     "insurance_certificate",
     "food_handler_permit",
     "health_permit",
+    "department_of_health_permit",
+    "food_service_permit",
     "sales_tax_permit",
     "w9_document",
     "business_registration",
@@ -45,7 +47,7 @@ ALLOWED_UPLOAD_MIME_TYPES = {
 MAX_UPLOAD_BYTES = int(os.getenv("VERIFICATION_DOC_MAX_BYTES", str(15 * 1024 * 1024)))
 DEFAULT_UPLOAD_URL_SECONDS = int(os.getenv("VERIFICATION_DOC_UPLOAD_URL_SECONDS", "900"))
 DEFAULT_VIEW_URL_SECONDS = int(os.getenv("VERIFICATION_DOC_VIEW_URL_SECONDS", "300"))
-DEFAULT_GRANT_DAYS = int(os.getenv("VERIFICATION_DOC_GRANT_DAYS", "7"))
+DEFAULT_GRANT_DAYS = int(os.getenv("VERIFICATION_DOC_GRANT_DAYS", "3"))
 
 
 def _now() -> datetime:
@@ -116,7 +118,14 @@ def _clean_filename(filename: str) -> str:
 
 
 def _normalize_doc_type(value: Any) -> str:
-    doc_type = _safe_lower(value).replace(" ", "_").replace("-", "_")
+    doc_type = _safe_lower(value).replace(" ", "_").replace("-", "_").replace("/", "_")
+    aliases = {
+        "department_of_health_permit": "health_permit",
+        "dept_of_health_permit": "health_permit",
+        "food_service_permit": "health_permit",
+        "food_health_permit": "health_permit",
+    }
+    doc_type = aliases.get(doc_type, doc_type)
     if doc_type not in VALID_DOCUMENT_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported document_type")
     return doc_type
@@ -198,6 +207,9 @@ def _legacy_doc_type(value: Any) -> str:
         "identity_verification_support": "government_id",
         "food_handler_permit": "food_handler_permit",
         "health_permit": "health_permit",
+        "department_of_health_permit": "health_permit",
+        "dept_of_health_permit": "health_permit",
+        "food_service_permit": "health_permit",
     }
     if raw in VALID_DOCUMENT_TYPES:
         return raw
