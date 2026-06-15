@@ -570,6 +570,192 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    raw = _safe_str(value).lower()
+    if raw in {"1", "true", "yes", "y", "on", "published", "public"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "hidden", "private"}:
+        return False
+    return default
+
+
+def _normalize_external_events(raw: Any, *, include_unpublished: bool = False) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+
+        title = _safe_str(item.get("title") or item.get("name") or item.get("event_name") or item.get("eventName"))
+        if not title:
+            continue
+
+        published = _coerce_bool(item.get("published"), True)
+        if not include_unpublished and not published:
+            continue
+
+        event_id = _safe_str(item.get("id") or item.get("external_event_id") or item.get("externalEventId"))
+        if not event_id:
+            event_id = f"external_{idx + 1}"
+
+        normalized.append({
+            "id": event_id,
+            "source": "external",
+            "source_label": "Listed by vendor",
+            "title": title[:140],
+            "start_date": _safe_str(item.get("start_date") or item.get("startDate") or item.get("starts_at") or item.get("startsAt")),
+            "end_date": _safe_str(item.get("end_date") or item.get("endDate") or item.get("ends_at") or item.get("endsAt")),
+            "venue_name": _safe_str(item.get("venue_name") or item.get("venueName") or item.get("venue")),
+            "city": _safe_str(item.get("city")),
+            "state": _safe_str(item.get("state")),
+            "booth_note": _safe_str(item.get("booth_note") or item.get("boothNote") or item.get("booth") or item.get("location_note") or item.get("locationNote")),
+            "event_url": _safe_str(item.get("event_url") or item.get("eventUrl") or item.get("website") or item.get("url")),
+            "maps_url": _safe_str(item.get("maps_url") or item.get("mapsUrl") or item.get("google_maps_url") or item.get("googleMapsUrl")),
+            "published": published,
+        })
+
+    normalized.sort(
+        key=lambda item: (_parse_datetime(item.get("start_date")) or datetime.max, _safe_str(item.get("title")).lower())
+    )
+    return normalized
+
+
+def _event_lookup(event_id: Any) -> Dict[str, Any] | None:
+    if event_id is None:
+        return None
+
+    candidates: List[Any] = [event_id, _safe_str(event_id)]
+    try:
+        candidates.append(int(event_id))
+    except Exception:
+        pass
+
+    for key in candidates:
+        event = _EVENTS.get(key) if hasattr(_EVENTS, "get") else None
+        if isinstance(event, dict):
+            return event
+    return None
+
+
+def _vendor_vendcore_events(vendor_key: str) -> List[Dict[str, Any]]:
+    vendor_key = _safe_str(vendor_key).lower()
+    if not vendor_key:
+        return []
+
+    now = datetime.utcnow() - timedelta(hours=12)
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for app in _APPLICATIONS.values():
+        if not isinstance(app, dict):
+            continue
+
+        app_vendor_email = _safe_str(app.get("vendor_email") or app.get("email")).lower()
+        app_vendor_id = _safe_str(app.get("vendor_id") or app.get("vendorId")).lower()
+        if vendor_key not in {app_vendor_email, app_vendor_id}:
+            continue
+
+        app_status = _safe_lower(app.get("status") or app.get("application_status") or app.get("applicationStatus"))
+        payment_status = _safe_lower(app.get("payment_status") or app.get("paymentStatus"))
+        if (
+            app_status not in {"approved", "paid", "complete", "completed", "accepted"}
+            and payment_status not in {"paid", "complete", "completed", "succeeded"}
+        ):
+            continue
+
+        event_id = app.get("event_id") or app.get("eventId")
+        event = _event_lookup(event_id)
+        if not isinstance(event, dict):
+            continue
+
+        if event.get("archived") is True or event.get("deleted") is True:
+            continue
+        if event.get("published") is False:
+            continue
+
+        start_raw = _safe_str(event.get("start_date") or event.get("startDate") or event.get("start_datetime") or event.get("startDatetime"))
+        end_raw = _safe_str(event.get("end_date") or event.get("endDate") or event.get("end_datetime") or event.get("endDatetime"))
+        parsed_start = _parse_datetime(start_raw)
+        parsed_end = _parse_datetime(end_raw) or parsed_start
+        if parsed_end and parsed_end < now:
+            continue
+
+        key = f"vendcore:{event_id}:{app.get('id') or app.get('application_id') or app.get('applicationId') or ''}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rows.append({
+            "id": key,
+            "source": "vendcore",
+            "source_label": "VendCore event",
+            "event_id": event_id,
+            "application_id": app.get("id") or app.get("application_id") or app.get("applicationId"),
+            "title": _safe_str(event.get("title") or event.get("name") or f"Event {event_id}"),
+            "start_date": start_raw,
+            "end_date": end_raw,
+            "venue_name": _safe_str(event.get("venue_name") or event.get("venueName") or event.get("venue")),
+            "city": _safe_str(event.get("city")),
+            "state": _safe_str(event.get("state")),
+            "booth_note": _safe_str(app.get("booth_id") or app.get("boothId") or app.get("booth_number") or app.get("boothNumber") or app.get("requested_booth_id")),
+            "event_url": f"/events/{event_id}" if event_id not in (None, "") else "",
+            "maps_url": _safe_str(event.get("google_maps_url") or event.get("googleMapsUrl") or event.get("googleMapsLink")),
+            "published": True,
+        })
+
+    rows.sort(key=lambda item: (_parse_datetime(item.get("start_date")) or datetime.max, _safe_str(item.get("title")).lower()))
+    return rows
+
+
+def _external_events_from_vendor(vendor: Dict[str, Any], *, include_unpublished: bool = False) -> List[Dict[str, Any]]:
+    raw_external = (
+        vendor.get("external_events")
+        or vendor.get("externalEvents")
+        or []
+    )
+    return _normalize_external_events(raw_external, include_unpublished=include_unpublished)
+
+
+def _vendor_schedule(vendor_key: str, vendor: Dict[str, Any], *, include_unpublished_external: bool = False) -> List[Dict[str, Any]]:
+    external_events = _external_events_from_vendor(vendor, include_unpublished=include_unpublished_external)
+    if include_unpublished_external:
+        return external_events
+
+    merged = [*_vendor_vendcore_events(vendor_key), *external_events]
+    merged.sort(key=lambda item: (_parse_datetime(item.get("start_date")) or datetime.max, _safe_str(item.get("title")).lower()))
+    return merged[:24]
+
+
+def _vendor_payload_with_schedule(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
+    # Important: keep directory listing logic safe. The /vendors/public directory
+    # still uses _vendor_public_payload directly. This wrapper is only for
+    # individual vendor profile responses.
+    payload = _vendor_public_payload(vendor_key, vendor)
+    try:
+        external_events = _external_events_from_vendor(vendor, include_unpublished=False)
+        vendcore_events = _vendor_vendcore_events(vendor_key)
+        upcoming_events = _vendor_schedule(vendor_key, vendor, include_unpublished_external=False)
+    except Exception:
+        external_events = []
+        vendcore_events = []
+        upcoming_events = []
+
+    payload["external_events"] = external_events
+    payload["externalEvents"] = external_events
+    payload["vendcore_events"] = vendcore_events
+    payload["vendcoreEvents"] = vendcore_events
+    payload["upcoming_events"] = upcoming_events
+    payload["upcomingEvents"] = upcoming_events
+    return payload
+
 def _is_paid_status(value: Any) -> bool:
     return _safe_lower(value) in {"paid", "succeeded", "complete", "completed"}
 
@@ -937,6 +1123,34 @@ class VendorReviewCreate(BaseModel):
     reviewer_display_name: str = ""
 
 
+class VendorExternalEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = ""
+    title: str = ""
+    start_date: str = ""
+    startDate: str = ""
+    end_date: str = ""
+    endDate: str = ""
+    venue_name: str = ""
+    venueName: str = ""
+    city: str = ""
+    state: str = ""
+    booth_note: str = ""
+    boothNote: str = ""
+    event_url: str = ""
+    eventUrl: str = ""
+    maps_url: str = ""
+    mapsUrl: str = ""
+    published: bool = True
+
+
+class VendorExternalEventsSave(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    events: List[VendorExternalEvent] = Field(default_factory=list)
+
+
 @router.get("/me")
 def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     key = _user_vendor_key(user)
@@ -955,7 +1169,7 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: 
             "subscription_status": "inactive",
         })
         vendor = _load_vendor_from_db(db, key) or {"vendor_id": key, "email": key}
-    return _vendor_public_payload(key, vendor)
+    return _vendor_payload_with_schedule(key, vendor)
 
 
 @router.post("/me")
@@ -987,7 +1201,52 @@ def save_my_vendor_profile(
     updated = _load_vendor_from_db(db, key) or updated
     _sync_vendor_category_to_applications(key, updated)
 
-    return _vendor_public_payload(key, updated)
+    return _vendor_payload_with_schedule(key, updated)
+
+
+@router.get("/me/external-events")
+def get_my_external_events(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = _user_vendor_key(user)
+    vendor = _load_vendor_from_db(db, key) or {"vendor_id": key, "email": key}
+    events = _vendor_schedule(key, vendor, include_unpublished_external=True)
+    return {"ok": True, "events": events, "external_events": events, "externalEvents": events}
+
+
+@router.put("/me/external-events")
+def save_my_external_events(
+    payload: VendorExternalEventsSave,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    key = _user_vendor_key(user)
+    existing = _load_vendor_from_db(db, key) or {"vendor_id": key, "email": key}
+    raw_events = [event.model_dump() for event in payload.events]
+    normalized_events = _normalize_external_events(raw_events, include_unpublished=True)
+
+    updated = {
+        **existing,
+        "vendor_id": key,
+        "email": key,
+        "external_events": normalized_events,
+        "externalEvents": normalized_events,
+        "updated_at": _now_iso(),
+    }
+
+    _upsert_profile_row(db, email=key, role="vendor", data=updated)
+    updated = _load_vendor_from_db(db, key) or updated
+    public_payload = _vendor_payload_with_schedule(key, updated)
+    return {
+        "ok": True,
+        "events": normalized_events,
+        "external_events": normalized_events,
+        "externalEvents": normalized_events,
+        "upcoming_events": public_payload.get("upcoming_events", []),
+        "upcomingEvents": public_payload.get("upcomingEvents", []),
+    }
+
 
 @router.get("/by-email/{email}")
 def get_vendor_profile_by_email(email: str, db: Session = Depends(get_db)):
@@ -995,7 +1254,7 @@ def get_vendor_profile_by_email(email: str, db: Session = Depends(get_db)):
     vendor = _load_vendor_from_db(db, vendor_key)
     if not isinstance(vendor, dict) or not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    return _vendor_public_payload(vendor_key, vendor)
+    return _vendor_payload_with_schedule(vendor_key, vendor)
 
 
 @router.get("/public/{vendor_id}")
@@ -1004,7 +1263,7 @@ def get_vendor_profile(vendor_id: str, db: Session = Depends(get_db)):
     vendor = _load_vendor_from_db(db, vendor_key)
     if not isinstance(vendor, dict) or not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    return _vendor_public_payload(vendor_key, vendor)
+    return _vendor_payload_with_schedule(vendor_key, vendor)
 
 
 @router.get("/{vendor_id}/reviews")
