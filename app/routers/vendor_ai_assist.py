@@ -284,6 +284,154 @@ def _dt_to_iso(value: Any) -> Optional[str]:
     return _safe_str(value) or None
 
 
+AI_PAYLOAD_MAX_CHARS = int(os.getenv("OPENAI_VENDOR_ASSIST_PAYLOAD_MAX_CHARS", "18000"))
+
+
+def _clip(value: Any, limit: int = 900) -> str:
+    """Keep AI prompts small and strip huge data URLs/base64 blobs."""
+    text = _safe_str(value)
+    if not text:
+        return ""
+
+    if text.startswith("data:"):
+        comma = text.find(",")
+        header = text[:comma] if comma > 0 else "data"
+        return f"{header},[omitted-large-file-data]"
+
+    text = re.sub(r"data:[^\\s,;]+;base64,[A-Za-z0-9+/=]{200,}", "[omitted-large-file-data]", text)
+    text = re.sub(r"[A-Za-z0-9+/=]{1500,}", "[omitted-large-encoded-content]", text)
+
+    if len(text) > limit:
+        return text[:limit].rstrip() + "…"
+    return text
+
+
+def _compact_list(value: Any, *, limit: int = 12, text_limit: int = 220) -> List[str]:
+    items = _flatten_categories(value) if not isinstance(value, list) else value
+    out: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            label = _safe_str(item.get("name") or item.get("label") or item.get("category") or item.get("title") or item.get("value"))
+        else:
+            label = _safe_str(item)
+        if not label:
+            continue
+        clipped = _clip(label, text_limit)
+        if clipped and clipped not in out:
+            out.append(clipped)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _compact_offerings(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in value[:10]:
+        if not isinstance(item, dict):
+            label = _safe_str(item)
+            if label:
+                out.append({"name": _clip(label, 140)})
+            continue
+
+        out.append({
+            "name": _clip(item.get("name") or item.get("title") or item.get("label"), 140),
+            "category": _clip(item.get("category") or item.get("type"), 120),
+            "description": _clip(item.get("description") or item.get("details"), 280),
+            "price": _clip(item.get("price") or item.get("price_label") or item.get("priceLabel"), 80),
+            "tags": _compact_list(item.get("tags") or item.get("keywords") or [], limit=5, text_limit=60),
+        })
+
+    return [row for row in out if any(row.values())]
+
+
+def _compact_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+
+    for doc in docs[:25]:
+        if not isinstance(doc, dict):
+            continue
+
+        out.append({
+            "document_type": _clip(doc.get("document_type") or doc.get("type") or doc.get("category"), 90),
+            "display_name": _clip(doc.get("display_name") or doc.get("label") or doc.get("name"), 120),
+            "status": _clip(doc.get("status"), 80),
+            "review_status": _clip(doc.get("review_status"), 80),
+            "scan_status": _clip(doc.get("scan_status"), 80),
+            "expires_at": _clip(doc.get("expires_at") or doc.get("expiration_date") or doc.get("expirationDate"), 80),
+            "uploaded_at": _clip(doc.get("uploaded_at") or doc.get("uploadedAt"), 80),
+        })
+
+    return out
+
+
+def _compact_ai_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Last safety pass so one oversized profile/event cannot break OpenAI context."""
+    def compact(value: Any, depth: int = 0) -> Any:
+        if depth > 5:
+            return _clip(value, 180)
+
+        if isinstance(value, str):
+            return _clip(value, 900 if depth < 3 else 320)
+
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+
+        if isinstance(value, list):
+            return [compact(item, depth + 1) for item in value[:20]]
+
+        if isinstance(value, dict):
+            clean: Dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = _safe_lower(key)
+                if any(token in key_text for token in ("image", "photo", "video", "file", "url", "base64", "data_url", "raw", "blob")):
+                    if key_text in {"event_url", "apply_url"}:
+                        clean[key] = _clip(item, 180)
+                    continue
+                clean[str(key)[:80]] = compact(item, depth + 1)
+            return clean
+
+        return _clip(value, 180)
+
+    compacted = compact(payload)
+    dumped = json.dumps(compacted, default=str)
+
+    if len(dumped) <= AI_PAYLOAD_MAX_CHARS:
+        return compacted
+
+    # Hard fallback: preserve only the most important decision inputs.
+    vendor = compacted.get("vendor", {}) if isinstance(compacted, dict) else {}
+    event = compacted.get("event", {}) if isinstance(compacted, dict) else {}
+    return {
+        "task": compacted.get("task") if isinstance(compacted, dict) else "vendor_ai_assist",
+        "vendor": {
+            "business_name": vendor.get("business_name"),
+            "city": vendor.get("city"),
+            "state": vendor.get("state"),
+            "categories": (vendor.get("categories") or [])[:10],
+            "description": _clip(vendor.get("description"), 500),
+            "offerings": (vendor.get("offerings") or [])[:6],
+            "documents": (vendor.get("documents") or [])[:15],
+        },
+        "event": {
+            "id": event.get("id"),
+            "title": event.get("title") or event.get("name"),
+            "description": _clip(event.get("description"), 700),
+            "city": event.get("city"),
+            "state": event.get("state"),
+            "venue_name": event.get("venue_name") or event.get("venueName"),
+            "start_date": event.get("start_date") or event.get("startDate"),
+            "end_date": event.get("end_date") or event.get("endDate"),
+            "category": event.get("category"),
+            "desired_vendor_categories": (event.get("desired_vendor_categories") or event.get("desiredVendorCategories") or [])[:12],
+            "requirements": (event.get("requirements") or event.get("event_requirements") or [])[:15],
+        },
+        "matching_hint": compacted.get("matching_hint", {}) if isinstance(compacted, dict) else {},
+    }
+
+
 def _event_from_db(db: Session, event_id: int) -> Optional[Event]:
     return db.query(Event).filter(Event.id == int(event_id)).one_or_none()
 
@@ -308,35 +456,84 @@ def _event_payload(db: Session, event_id: int) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         "id": ev.id,
-        "title": ev.title,
-        "name": ev.title,
-        "description": ev.description,
+        "title": _clip(ev.title, 180),
+        "name": _clip(ev.title, 180),
+        "description": _clip(ev.description, 1100),
         "start_date": _dt_to_iso(ev.start_date),
         "startDate": _dt_to_iso(ev.start_date),
         "end_date": _dt_to_iso(ev.end_date),
         "endDate": _dt_to_iso(ev.end_date),
-        "venue_name": ev.venue_name,
-        "venueName": ev.venue_name,
-        "city": ev.city,
-        "state": ev.state,
-        "category": ev.category,
+        "venue_name": _clip(ev.venue_name, 180),
+        "venueName": _clip(ev.venue_name, 180),
+        "city": _clip(ev.city, 100),
+        "state": _clip(ev.state, 80),
+        "category": _clip(ev.category, 100),
         "published": bool(ev.published),
         "archived": bool(ev.archived),
-        "organizer_email": ev.organizer_email,
-        "owner_email": ev.owner_email,
+        "organizer_email": _clip(ev.organizer_email, 140),
+        "owner_email": _clip(ev.owner_email, 140),
     }
 
-    for key, value in store_payload.items():
-        if key not in payload or value not in (None, "", [], {}):
-            payload[key] = value
+    # Whitelist only useful event fields. Do NOT copy the whole store payload;
+    # older events can contain data URLs / base64 media that exceed model context.
+    allowed_store_keys = [
+        "status",
+        "lifecycle_status",
+        "lifecycleStatus",
+        "accepting_vendors",
+        "acceptingVendors",
+        "desired_vendor_categories",
+        "desiredVendorCategories",
+        "vendor_categories_needed",
+        "vendorCategoriesNeeded",
+        "looking_for_categories",
+        "lookingForCategories",
+        "vendor_categories",
+        "vendorCategories",
+        "categories",
+        "requirements",
+        "event_requirements",
+        "requirement_summary",
+        "booth_price",
+        "booth_fee",
+        "vendor_fee",
+        "price",
+        "available_booths",
+        "remaining_booths",
+        "total_booths",
+        "booth_count",
+        "application_count",
+        "applications_count",
+    ]
+
+    for key in allowed_store_keys:
+        value = store_payload.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if "categor" in key.lower():
+            payload[key] = _compact_list(value, limit=15, text_limit=120)
+        elif "requirement" in key.lower():
+            if isinstance(value, list):
+                payload[key] = [_clip(item, 220) if not isinstance(item, dict) else {
+                    "name": _clip(item.get("name") or item.get("label") or item.get("title"), 120),
+                    "type": _clip(item.get("type") or item.get("document_type"), 100),
+                    "required": item.get("required", True),
+                    "category": _clip(item.get("category"), 100),
+                } for item in value[:20]]
+            else:
+                payload[key] = _clip(value, 600)
+        else:
+            payload[key] = value if isinstance(value, (int, float, bool)) else _clip(value, 180)
 
     categories = _event_categories(payload)
     if categories:
-        payload["desired_vendor_categories"] = categories
-        payload["desiredVendorCategories"] = categories
-        payload["vendor_categories_needed"] = categories
+        compact_categories = _compact_list(categories, limit=15, text_limit=120)
+        payload["desired_vendor_categories"] = compact_categories
+        payload["desiredVendorCategories"] = compact_categories
+        payload["vendor_categories_needed"] = compact_categories
 
     return payload
+
 
 
 def _document_rows(db: Session, email: str) -> List[Dict[str, Any]]:
@@ -393,9 +590,18 @@ def _vendor_context(db: Session, user: Dict[str, Any], profile: Optional[Profile
     email = _safe_lower(user.get("email") or (profile.email if profile else ""))
     docs = _document_rows(db, email) + _profile_documents(profile)
 
+    raw_offerings = (
+        data.get("offerings")
+        or data.get("vendor_offerings")
+        or data.get("vendorOfferings")
+        or data.get("menu_items")
+        or data.get("menuItems")
+        or []
+    )
+
     return {
-        "email": email,
-        "business_name": (
+        "email": _clip(email, 140),
+        "business_name": _clip(
             (profile.business_name if profile is not None else None)
             or data.get("business_name")
             or data.get("businessName")
@@ -403,22 +609,25 @@ def _vendor_context(db: Session, user: Dict[str, Any], profile: Optional[Profile
             or data.get("companyName")
             or data.get("display_name")
             or user.get("full_name")
-            or user.get("email")
+            or user.get("email"),
+            180,
         ),
-        "display_name": (
+        "display_name": _clip(
             (profile.display_name if profile is not None else None)
             or data.get("display_name")
-            or data.get("displayName")
+            or data.get("displayName"),
+            140,
         ),
-        "city": (profile.city if profile is not None else None) or data.get("city"),
-        "state": (profile.state if profile is not None else None) or data.get("state"),
-        "categories": _profile_categories(profile),
-        "description": data.get("description") or data.get("business_description") or data.get("businessDescription") or data.get("bio"),
-        "offerings": data.get("offerings") or data.get("vendor_offerings") or data.get("vendorOfferings") or data.get("menu_items") or data.get("menuItems") or [],
-        "setup_requirements": data.get("setup_requirements") or data.get("setupRequirements") or data.get("booth_needs") or data.get("boothNeeds"),
-        "service_area": data.get("service_area") or data.get("serviceArea"),
-        "documents": docs[:50],
+        "city": _clip((profile.city if profile is not None else None) or data.get("city"), 100),
+        "state": _clip((profile.state if profile is not None else None) or data.get("state"), 80),
+        "categories": _compact_list(_profile_categories(profile), limit=15, text_limit=120),
+        "description": _clip(data.get("description") or data.get("business_description") or data.get("businessDescription") or data.get("bio"), 900),
+        "offerings": _compact_offerings(raw_offerings),
+        "setup_requirements": _clip(data.get("setup_requirements") or data.get("setupRequirements") or data.get("booth_needs") or data.get("boothNeeds"), 400),
+        "service_area": _clip(data.get("service_area") or data.get("serviceArea"), 220),
+        "documents": _compact_documents(docs),
     }
+
 
 
 def _client() -> OpenAI:
@@ -454,6 +663,7 @@ def _extract_output_text(response: Any) -> str:
 def _run_structured_ai(*, schema_name: str, schema: Dict[str, Any], system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     model = _safe_str(os.getenv("OPENAI_VENDOR_ASSIST_MODEL") or os.getenv("OPENAI_VERIFICATION_MODEL") or "gpt-4.1-mini")
     client = _client()
+    compact_payload = _compact_ai_payload(payload)
 
     try:
         response = client.responses.create(
@@ -465,7 +675,7 @@ def _run_structured_ai(*, schema_name: str, schema: Dict[str, Any], system_promp
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(payload, default=str),
+                    "content": json.dumps(compact_payload, default=str),
                 },
             ],
             text={
@@ -487,7 +697,14 @@ def _run_structured_ai(*, schema_name: str, schema: Dict[str, Any], system_promp
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"AI vendor assist failed: {exc}")
+        detail = str(exc)
+        if "context_length_exceeded" in detail or "exceeds the context window" in detail:
+            raise HTTPException(
+                status_code=502,
+                detail="AI vendor assist failed because the event/profile payload was too large. The backend now compacts payloads; retry the request after redeploy.",
+            )
+        raise HTTPException(status_code=502, detail=f"AI vendor assist failed: {detail}")
+
 
 
 def _premium_required_response() -> Dict[str, Any]:
