@@ -116,6 +116,7 @@ for module_name in [
     "app.routers.organizer_applications",
     "app.routers.organizer_diagram",
     "app.routers.organizer_profiles",
+    "app.routers.vendor_notifications",
     "app.routers.vendor_profiles",
     "app.routers.verification_documents",
     "app.routers.verifications",
