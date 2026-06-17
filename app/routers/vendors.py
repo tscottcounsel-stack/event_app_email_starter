@@ -245,6 +245,86 @@ def _safe_list_of_str(value: Any) -> List[str]:
     return []
 
 
+
+
+def _normalize_vendor_offerings(raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw[:60]):
+        if not isinstance(item, dict):
+            continue
+
+        name = _safe_str(item.get("name") or item.get("title") or item.get("itemName"))
+        category = _safe_str(item.get("category") or item.get("type"))
+        description = _safe_str(item.get("description") or item.get("body"))
+        if not name and not category and not description:
+            continue
+
+        tags_raw = item.get("tags")
+        tags = _safe_list_of_str(tags_raw) if not isinstance(tags_raw, str) else _safe_list_of_str(tags_raw)
+        is_featured = _coerce_bool(item.get("isFeatured", item.get("is_featured", idx < 3)), idx < 3)
+        is_available = _coerce_bool(item.get("isAvailable", item.get("is_available", True)), True)
+
+        try:
+            sort_order = int(item.get("sortOrder", item.get("sort_order", idx)))
+        except Exception:
+            sort_order = idx
+
+        offering = {
+            "id": _safe_str(item.get("id")) or f"offering_{idx + 1}",
+            "name": name or "Untitled offering",
+            "category": category,
+            "description": description,
+            "priceDisplay": _safe_str(item.get("priceDisplay") or item.get("price_display") or item.get("price") or item.get("priceRange")),
+            "price_display": _safe_str(item.get("priceDisplay") or item.get("price_display") or item.get("price") or item.get("priceRange")),
+            "imageUrl": _safe_str(item.get("imageUrl") or item.get("image_url") or item.get("photoUrl") or item.get("url")),
+            "image_url": _safe_str(item.get("imageUrl") or item.get("image_url") or item.get("photoUrl") or item.get("url")),
+            "tags": tags[:12],
+            "isFeatured": is_featured,
+            "is_featured": is_featured,
+            "isAvailable": is_available,
+            "is_available": is_available,
+            "sortOrder": sort_order,
+            "sort_order": sort_order,
+        }
+        normalized.append(offering)
+
+    normalized.sort(key=lambda item: int(item.get("sortOrder") or item.get("sort_order") or 0))
+    return normalized
+
+
+def _normalize_vendor_menu_uploads(raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw[:12]):
+        if not isinstance(item, dict):
+            continue
+
+        url = _safe_str(item.get("url") or item.get("href") or item.get("secure_url"))
+        if not url:
+            continue
+
+        title = _safe_str(item.get("title") or item.get("name")) or f"Menu / product list {idx + 1}"
+        file_type = _safe_str(item.get("fileType") or item.get("file_type") or item.get("type"))
+        uploaded_at = _safe_str(item.get("uploadedAt") or item.get("uploaded_at")) or _now_iso()
+
+        normalized.append({
+            "id": _safe_str(item.get("id")) or f"menu_{idx + 1}",
+            "title": title,
+            "url": url,
+            "fileType": file_type,
+            "file_type": file_type,
+            "description": _safe_str(item.get("description") or item.get("note")),
+            "uploadedAt": uploaded_at,
+            "uploaded_at": uploaded_at,
+        })
+
+    return normalized
+
 def _first_category(categories: Any, fallback: Any = "") -> str:
     values = _safe_list_of_str(categories)
     if values:
@@ -296,6 +376,8 @@ def _normalize_categories(payload: Dict[str, Any]) -> List[str]:
 def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     categories = _normalize_categories(payload)
     primary_category = _first_category(categories)
+    offerings = _normalize_vendor_offerings(payload.get("offerings") or payload.get("vendor_offerings") or [])
+    menu_uploads = _normalize_vendor_menu_uploads(payload.get("menuUploads") or payload.get("menu_uploads") or [])
 
     mapped = {
         "business_name": payload.get("businessName", ""),
@@ -311,6 +393,8 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "website": payload.get("website", ""),
         "instagram": payload.get("instagram", ""),
         "facebook": payload.get("facebook", ""),
+        "tiktok": payload.get("tiktok", ""),
+        "youtube": payload.get("youtube", ""),
         "city": payload.get("city", ""),
         "state": payload.get("state", ""),
         "country": payload.get("country", ""),
@@ -319,6 +403,10 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "banner_url": payload.get("bannerUrl", ""),
         "image_urls": payload.get("imageUrls", []),
         "video_urls": payload.get("videoUrls", []),
+        "offerings": offerings,
+        "vendor_offerings": offerings,
+        "menuUploads": menu_uploads,
+        "menu_uploads": menu_uploads,
         "contact_name": payload.get("contactName", ""),
         "updated_at": _now_iso(),
     }
@@ -342,6 +430,10 @@ def _profile_row_to_vendor(row: Profile) -> Dict[str, Any]:
         "state": data.get("state") or row.state or "",
         "categories": data.get("categories") or row.categories or [],
         "vendor_categories": data.get("vendor_categories") or data.get("categories") or row.categories or [],
+        "offerings": _normalize_vendor_offerings(data.get("offerings") or data.get("vendor_offerings") or []),
+        "vendor_offerings": _normalize_vendor_offerings(data.get("offerings") or data.get("vendor_offerings") or []),
+        "menuUploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
+        "menu_uploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
         "verified": bool(row.verified),
         "verification_status": row.verification_status or data.get("verification_status") or "",
         "verificationStatus": row.verification_status or data.get("verificationStatus") or "",
@@ -1103,6 +1195,8 @@ class VendorProfileUpsert(BaseModel):
     website: str = ""
     instagram: str = ""
     facebook: str = ""
+    tiktok: str = ""
+    youtube: str = ""
     city: str = ""
     state: str = ""
     country: str = ""
@@ -1111,6 +1205,10 @@ class VendorProfileUpsert(BaseModel):
     bannerUrl: str = ""
     imageUrls: List[str] = Field(default_factory=list)
     videoUrls: List[str] = Field(default_factory=list)
+    offerings: List[Dict[str, Any]] = Field(default_factory=list)
+    vendor_offerings: List[Dict[str, Any]] = Field(default_factory=list)
+    menuUploads: List[Dict[str, Any]] = Field(default_factory=list)
+    menu_uploads: List[Dict[str, Any]] = Field(default_factory=list)
     contactName: str = ""
 
 
