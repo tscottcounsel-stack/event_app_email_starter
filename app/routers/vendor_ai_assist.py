@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app import store as store_module
 from app.db import get_db
 from app.models.event import Event
+from app.models.diagram import Diagram
 from app.models.profile import Profile
 from app.routers.auth import get_current_user
 
@@ -71,6 +72,91 @@ FIT_SCORE_SCHEMA: Dict[str, Any] = {
         "human_review_required",
     ],
 }
+
+
+
+BOOTH_ADVISOR_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "strategy_summary": {"type": "string"},
+        "top_recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "booth_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "tag": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "tradeoffs": {"type": "array", "items": {"type": "string"}},
+                    "best_for": {"type": "string"},
+                },
+                "required": ["booth_id", "label", "score", "tag", "reason", "tradeoffs", "best_for"],
+            },
+        },
+        "best_value": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "booth_id": {"type": "string"},
+                "label": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["booth_id", "label", "reason"],
+        },
+        "highest_visibility": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "booth_id": {"type": "string"},
+                "label": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["booth_id", "label", "reason"],
+        },
+        "budget_friendly": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "booth_id": {"type": "string"},
+                "label": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["booth_id", "label", "reason"],
+        },
+        "avoid": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "booth_id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["booth_id", "label", "reason"],
+            },
+        },
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "vendor_tip": {"type": "string"},
+        "human_review_required": {"type": "boolean"},
+    },
+    "required": [
+        "strategy_summary",
+        "top_recommendations",
+        "best_value",
+        "highest_visibility",
+        "budget_friendly",
+        "avoid",
+        "assumptions",
+        "vendor_tip",
+        "human_review_required",
+    ],
+}
+
 
 APPLICATION_NOTE_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -630,6 +716,213 @@ def _vendor_context(db: Session, user: Dict[str, Any], profile: Optional[Profile
 
 
 
+def _booth_value(booth: Dict[str, Any], *keys: str) -> Any:
+    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
+    for key in keys:
+        if key in booth and booth.get(key) not in (None, "", [], {}):
+            return booth.get(key)
+        if key in meta and meta.get(key) not in (None, "", [], {}):
+            return meta.get(key)
+    return None
+
+
+def _booth_label(booth: Dict[str, Any], fallback: str = "Booth") -> str:
+    return _clip(
+        _booth_value(
+            booth,
+            "label",
+            "booth_label",
+            "boothLabel",
+            "number",
+            "booth_number",
+            "boothNumber",
+            "name",
+            "booth_name",
+            "boothName",
+            "code",
+            "id",
+        )
+        or fallback,
+        90,
+    )
+
+
+def _booth_id(booth: Dict[str, Any], fallback: str = "") -> str:
+    return _clip(
+        _booth_value(booth, "id", "booth_id", "boothId", "selected_booth_id", "selectedBoothId")
+        or fallback
+        or _booth_label(booth, "booth"),
+        120,
+    )
+
+
+def _booth_status(booth: Dict[str, Any]) -> str:
+    return _safe_lower(_booth_value(booth, "status", "state", "availability") or "available")
+
+
+def _booth_price(booth: Dict[str, Any]) -> float:
+    for key in ("price", "booth_price", "boothPrice", "amount", "cost", "vendor_fee", "vendorFee"):
+        raw = _booth_value(booth, key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(str(raw).replace("$", "").replace(",", "").strip())
+            if value >= 0:
+                return value
+        except Exception:
+            continue
+
+    for key in ("price_cents", "priceCents", "amount_cents", "amountCents", "booth_price_cents", "boothPriceCents"):
+        raw = _booth_value(booth, key)
+        try:
+            value = float(raw)
+            if value >= 0:
+                return round(value / 100, 2)
+        except Exception:
+            continue
+
+    return 0.0
+
+
+def _booth_category(booth: Dict[str, Any]) -> str:
+    return _clip(
+        _booth_value(
+            booth,
+            "category",
+            "booth_category",
+            "boothCategory",
+            "category_name",
+            "categoryName",
+            "vendor_category",
+            "vendorCategory",
+        )
+        or "",
+        120,
+    )
+
+
+def _iter_diagram_booths(diagram: Dict[str, Any]) -> List[Dict[str, Any]]:
+    booths: List[Dict[str, Any]] = []
+
+    if isinstance(diagram.get("booths"), list):
+        booths.extend([item for item in diagram.get("booths", []) if isinstance(item, dict)])
+
+    if isinstance(diagram.get("levels"), list):
+        for level in diagram.get("levels", []):
+            if not isinstance(level, dict):
+                continue
+            for booth in level.get("booths") or []:
+                if isinstance(booth, dict):
+                    copy = dict(booth)
+                    copy.setdefault("level_id", level.get("id"))
+                    copy.setdefault("level_name", level.get("name"))
+                    booths.append(copy)
+
+    seen = set()
+    clean: List[Dict[str, Any]] = []
+    for index, booth in enumerate(booths, start=1):
+        bid = _booth_id(booth, f"booth-{index}")
+        if not bid or bid in seen:
+            continue
+        seen.add(bid)
+        clean.append(booth)
+
+    return clean
+
+
+def _iter_diagram_elements(diagram: Dict[str, Any]) -> List[Dict[str, Any]]:
+    elements: List[Dict[str, Any]] = []
+
+    if isinstance(diagram.get("elements"), list):
+        elements.extend([item for item in diagram.get("elements", []) if isinstance(item, dict)])
+
+    if isinstance(diagram.get("levels"), list):
+        for level in diagram.get("levels", []):
+            if not isinstance(level, dict):
+                continue
+            for el in level.get("elements") or []:
+                if isinstance(el, dict):
+                    copy = dict(el)
+                    copy.setdefault("level_id", level.get("id"))
+                    copy.setdefault("level_name", level.get("name"))
+                    elements.append(copy)
+
+    out: List[Dict[str, Any]] = []
+    for item in elements[:60]:
+        out.append({
+            "id": _clip(item.get("id"), 80),
+            "type": _clip(item.get("type"), 80),
+            "label": _clip(item.get("label") or item.get("name"), 120),
+            "x": float(item.get("x") or 0),
+            "y": float(item.get("y") or 0),
+            "width": float(item.get("width") or 0),
+            "height": float(item.get("height") or 0),
+        })
+    return out
+
+
+def _compact_booths_for_ai(booths: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+
+    for index, booth in enumerate(booths[:150], start=1):
+        status = _booth_status(booth)
+        out.append({
+            "id": _booth_id(booth, f"booth-{index}"),
+            "label": _booth_label(booth, f"Booth {index}"),
+            "status": status or "available",
+            "is_available": status in {"", "available", "open"},
+            "category": _booth_category(booth),
+            "price": _booth_price(booth),
+            "x": float(_booth_value(booth, "x", "left") or 0),
+            "y": float(_booth_value(booth, "y", "top") or 0),
+            "width": float(_booth_value(booth, "width", "w") or 0),
+            "height": float(_booth_value(booth, "height", "h") or 0),
+            "level": _clip(booth.get("level_name") or booth.get("level_id"), 120),
+            "zone": _clip(_booth_value(booth, "zoneName", "zone", "area"), 120),
+            "tier": _clip(_booth_value(booth, "tierName", "tier", "pricing_tier", "pricingTier"), 120),
+            "premium": bool(_booth_value(booth, "isPremium", "is_premium", "premium")),
+            "power": bool(_booth_value(booth, "power", "has_power", "hasPower", "electricity")),
+            "water": bool(_booth_value(booth, "water", "has_water", "hasWater")),
+        })
+
+    return out
+
+
+def _diagram_payload(db: Session, event_id: int) -> Dict[str, Any]:
+    row = (
+        db.query(Diagram)
+        .filter(Diagram.event_id == int(event_id))
+        .order_by(Diagram.id.desc())
+        .first()
+    )
+
+    if row is None or not isinstance(row.diagram, dict):
+        raise HTTPException(status_code=404, detail="No booth layout found for this event.")
+
+    diagram = dict(row.diagram or {})
+    canvas = diagram.get("canvas") if isinstance(diagram.get("canvas"), dict) else {}
+    booths = _iter_diagram_booths(diagram)
+    elements = _iter_diagram_elements(diagram)
+    compact_booths = _compact_booths_for_ai(booths)
+
+    available = [booth for booth in compact_booths if booth.get("is_available")]
+    if not available:
+        raise HTTPException(status_code=400, detail="No available booths found for AI recommendation.")
+
+    return {
+        "canvas": {
+            "width": float(canvas.get("width") or 1400),
+            "height": float(canvas.get("height") or 900),
+            "gridSize": float(canvas.get("gridSize") or 20),
+        },
+        "booths": compact_booths,
+        "available_booths": available,
+        "elements": elements,
+        "booth_count": len(compact_booths),
+        "available_count": len(available),
+    }
+
+
 def _client() -> OpenAI:
     if OpenAI is None:
         raise HTTPException(status_code=500, detail="OpenAI SDK is not installed on the backend.")
@@ -806,6 +1099,83 @@ def generate_vendor_application_note(
         "event_id": int(event_id),
         "draft": result,
         "application_assist": result,
+    }
+
+
+
+
+@router.post("/vendor/ai/booth-advisor/{event_id}")
+def generate_vendor_booth_advisor(
+    event_id: int,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if _safe_lower(user.get("role")) != "vendor":
+        raise HTTPException(status_code=403, detail="Vendor account required.")
+
+    profile = _get_vendor_profile(db, user)
+    if not _active_paid_vendor(profile, user):
+        return _premium_required_response()
+
+    event_data = _event_payload(db, int(event_id))
+    vendor_data = _vendor_context(db, user, profile)
+    diagram_data = _diagram_payload(db, int(event_id))
+
+    system_prompt = (
+        "You are VendCore's AI Booth Advisor. Recommend booths for a vendor using only the provided event, vendor, booth, and map-element data. "
+        "Recommend only booth IDs that appear in available_booths. Do not invent booths. "
+        "Use practical reasoning: traffic potential from map position/elements, category fit, booth price/value, booth size, premium tiers, power/water needs when available, "
+        "and possible trade-offs. Do not guarantee sales or organizer approval."
+    )
+
+    result = _run_structured_ai(
+        schema_name="vendor_booth_advisor",
+        schema=BOOTH_ADVISOR_SCHEMA,
+        system_prompt=system_prompt,
+        payload={
+            "task": "recommend_booth_location",
+            "vendor": vendor_data,
+            "event": event_data,
+            "diagram": diagram_data,
+            "instructions": {
+                "recommend_only_available_booths": True,
+                "return_exact_booth_id_from_available_booths": True,
+                "include_best_value_highest_visibility_and_budget_friendly": True,
+                "include_booths_to_avoid_if_any": True,
+            },
+        },
+    )
+
+    available_ids = {str(booth.get("id")) for booth in diagram_data.get("available_booths", [])}
+    available_labels = {str(booth.get("label")) for booth in diagram_data.get("available_booths", [])}
+
+    def clean_pick(pick: Dict[str, Any]) -> Dict[str, Any]:
+        booth_id = str(pick.get("booth_id") or "").strip()
+        label = str(pick.get("label") or "").strip()
+
+        if booth_id not in available_ids and label in available_ids:
+            booth_id = label
+
+        if booth_id not in available_ids and booth_id not in available_labels:
+            pick["warning"] = "AI returned a booth that is not currently available; confirm before selecting."
+        return pick
+
+    if isinstance(result.get("top_recommendations"), list):
+        result["top_recommendations"] = [clean_pick(dict(item)) for item in result.get("top_recommendations", []) if isinstance(item, dict)]
+
+    for key in ("best_value", "highest_visibility", "budget_friendly"):
+        if isinstance(result.get(key), dict):
+            result[key] = clean_pick(dict(result[key]))
+
+    if isinstance(result.get("avoid"), list):
+        result["avoid"] = [dict(item) for item in result.get("avoid", []) if isinstance(item, dict)]
+
+    return {
+        "ok": True,
+        "premium_required": False,
+        "event_id": int(event_id),
+        "advisor": result,
+        "booth_advisor": result,
     }
 
 
