@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -1095,6 +1098,299 @@ def get_verification_status(email: str, role: str = ""):
         "verification": _public_record(record) if record else None,
     }
 
+
+
+
+def _require_admin_user(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if _safe_lower(user.get("role")) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+AI_REVIEW_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "overall_status": {"type": "string", "enum": ["pass", "caution", "fail", "needs_review", "unavailable"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "summary": {"type": "string"},
+        "recommended_action": {"type": "string", "enum": ["approve_ready", "human_review", "request_more_info", "reject"]},
+        "business_name_detected": {"type": ["string", "null"]},
+        "name_match": {"type": "string", "enum": ["match", "possible_match", "mismatch", "unknown"]},
+        "missing_documents": {"type": "array", "items": {"type": "string"}},
+        "issues": {"type": "array", "items": {"type": "string"}},
+        "documents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "submitted_label": {"type": ["string", "null"]},
+                    "submitted_type": {"type": ["string", "null"]},
+                    "detected_document_type": {"type": ["string", "null"]},
+                    "readable": {"type": "boolean"},
+                    "requirement_match": {"type": "string", "enum": ["match", "possible_match", "mismatch", "unknown"]},
+                    "vendor_name_detected": {"type": ["string", "null"]},
+                    "issuer_detected": {"type": ["string", "null"]},
+                    "policy_or_license_number": {"type": ["string", "null"]},
+                    "issue_date": {"type": ["string", "null"]},
+                    "expiration_date": {"type": ["string", "null"]},
+                    "is_expired": {"type": ["boolean", "null"]},
+                    "status_on_document": {"type": ["string", "null"]},
+                    "notes": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": [
+                    "submitted_label",
+                    "submitted_type",
+                    "detected_document_type",
+                    "readable",
+                    "requirement_match",
+                    "vendor_name_detected",
+                    "issuer_detected",
+                    "policy_or_license_number",
+                    "issue_date",
+                    "expiration_date",
+                    "is_expired",
+                    "status_on_document",
+                    "notes"
+                ]
+            }
+        }
+    },
+    "required": [
+        "overall_status",
+        "confidence",
+        "summary",
+        "recommended_action",
+        "business_name_detected",
+        "name_match",
+        "missing_documents",
+        "issues",
+        "documents"
+    ]
+}
+
+
+def _ai_unavailable_result(reason: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "overall_status": "unavailable",
+        "confidence": 0,
+        "summary": reason,
+        "recommended_action": "human_review",
+        "business_name_detected": None,
+        "name_match": "unknown",
+        "missing_documents": [],
+        "issues": [reason],
+        "documents": [],
+        "model": _safe_str(os.getenv("OPENAI_VERIFICATION_MODEL") or "gpt-4.1-mini"),
+        "reviewed_at": _now_iso(),
+        "record_email": _safe_lower(record.get("email")),
+        "record_role": _safe_lower(record.get("role")),
+    }
+
+
+def _document_mime_from_url(url: str) -> str:
+    lowered = _safe_lower(url)
+    if lowered.startswith("data:"):
+        header = lowered.split(",", 1)[0]
+        return header.replace("data:", "").split(";", 1)[0]
+    if ".pdf" in lowered:
+        return "application/pdf"
+    if any(ext in lowered for ext in [".jpg", ".jpeg"]):
+        return "image/jpeg"
+    if ".png" in lowered:
+        return "image/png"
+    if ".webp" in lowered:
+        return "image/webp"
+    if ".txt" in lowered:
+        return "text/plain"
+    return ""
+
+
+def _document_model_parts(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    max_chars = int(os.getenv("OPENAI_VERIFICATION_MAX_FILE_CHARS", "8000000"))
+    docs = _normalize_documents(record.get("documents"))
+    parts: List[Dict[str, Any]] = []
+
+    for index, doc in enumerate(docs[:10], start=1):
+        label = _safe_str(doc.get("label") or doc.get("name") or f"Document {index}")
+        doc_type = _safe_str(doc.get("type"))
+        filename = _safe_str(doc.get("name") or label or f"document-{index}")
+        expiration = _safe_str(doc.get("expiration_date"))
+        url = _safe_str(doc.get("url"))
+        mime = _document_mime_from_url(url)
+
+        parts.append({
+            "type": "input_text",
+            "text": (
+                f"Document {index} metadata:\n"
+                f"Submitted label: {label}\n"
+                f"Submitted type: {doc_type}\n"
+                f"Filename: {filename}\n"
+                f"Vendor-entered expiration date: {expiration or 'not provided'}\n"
+                f"Detected MIME hint: {mime or 'unknown'}"
+            ),
+        })
+
+        if not url:
+            parts.append({"type": "input_text", "text": f"Document {index} has no readable URL/file data."})
+            continue
+
+        if len(url) > max_chars:
+            parts.append({
+                "type": "input_text",
+                "text": f"Document {index} file data was too large for AI pre-check and must be reviewed manually.",
+            })
+            continue
+
+        try:
+            if mime.startswith("image/") or url.startswith("http"):
+                # Images can be reviewed by URL or data URL.
+                parts.append({"type": "input_image", "image_url": url})
+            elif mime in {"application/pdf", "text/plain", "application/rtf"} or url.startswith("data:"):
+                # Responses API supports file_data data URLs for PDFs and text-like files.
+                parts.append({"type": "input_file", "filename": filename, "file_data": url})
+            else:
+                parts.append({
+                    "type": "input_text",
+                    "text": f"Document {index} MIME type was not supported for AI file input. Manual review required.",
+                })
+        except Exception:
+            parts.append({
+                "type": "input_text",
+                "text": f"Document {index} could not be attached to AI input. Manual review required.",
+            })
+
+    return parts
+
+
+def _json_from_ai_text(text_value: str) -> Dict[str, Any]:
+    raw = _safe_str(text_value)
+    if not raw:
+        raise ValueError("AI returned no text")
+    try:
+        return json.loads(raw)
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(raw[start : end + 1])
+        raise
+
+
+def _run_openai_verification_review(record: Dict[str, Any]) -> Dict[str, Any]:
+    api_key = _safe_str(os.getenv("OPENAI_API_KEY"))
+    if not api_key:
+        return _ai_unavailable_result("OPENAI_API_KEY is not configured on the backend.", record)
+
+    docs = _normalize_documents(record.get("documents"))
+    if not docs:
+        return _ai_unavailable_result("No submitted documents were found on this verification record.", record)
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception:
+        return _ai_unavailable_result("The openai Python package is not installed. Add openai to requirements.txt and redeploy.", record)
+
+    client = OpenAI(api_key=api_key)
+    model = _safe_str(os.getenv("OPENAI_VERIFICATION_MODEL") or "gpt-4.1-mini")
+    business_name = _safe_str(record.get("business_name"))
+    role = _safe_lower(record.get("role"))
+    vendor_category = _safe_str(record.get("vendor_category"))
+
+    content: List[Dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": (
+                "You are VendCore's AI-assisted verification pre-reviewer. "
+                "You help an admin check whether submitted business documents appear complete, readable, current, and relevant. "
+                "You do not approve the account. You only provide a structured pre-check for a human admin. "
+                "Do not claim a document is authentic unless the document itself proves it. "
+                "Flag authenticity or authority checks as human_review when needed.\n\n"
+                f"Verification record email: {_safe_lower(record.get('email'))}\n"
+                f"Role: {role}\n"
+                f"Submitted business name: {business_name or 'not provided'}\n"
+                f"Vendor category: {vendor_category or 'not provided'}\n"
+                f"Submitted document count: {len(docs)}\n\n"
+                "Check for: document type, readable text, matching business/vendor name, issue date, expiration date, expired status, "
+                "policy/license/permit number, issuing agency/company, and whether the submitted file appears to match its labeled requirement. "
+                "Return only JSON that follows the provided schema."
+            ),
+        }
+    ]
+    content.extend(_document_model_parts(record))
+
+    try:
+        if hasattr(client, "responses"):
+            response = client.responses.create(
+                model=model,
+                input=[{"role": "user", "content": content}],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "vendcore_verification_precheck",
+                        "schema": AI_REVIEW_SCHEMA,
+                        "strict": True,
+                    }
+                },
+            )
+            parsed = _json_from_ai_text(getattr(response, "output_text", ""))
+        else:
+            # Compatibility fallback for older SDKs that do not expose Responses API.
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Return only valid JSON matching the VendCore verification pre-check schema.",
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({
+                            "task": "AI-assisted verification pre-check",
+                            "record": {
+                                "email": _safe_lower(record.get("email")),
+                                "role": role,
+                                "business_name": business_name,
+                                "vendor_category": vendor_category,
+                                "documents": docs,
+                            },
+                            "schema": AI_REVIEW_SCHEMA,
+                        })[:120000],
+                    },
+                ],
+                response_format={"type": "json_object"},
+            )
+            parsed = _json_from_ai_text(response.choices[0].message.content or "")
+    except Exception as exc:
+        return _ai_unavailable_result(f"AI pre-check failed: {exc}", record)
+
+    parsed["model"] = model
+    parsed["reviewed_at"] = _now_iso()
+    parsed["record_email"] = _safe_lower(record.get("email"))
+    parsed["record_role"] = _safe_lower(record.get("role"))
+    parsed["human_final_approval_required"] = True
+    return parsed
+
+
+@router.post("/admin/verifications/{verification_id}/ai-review")
+def ai_review_verification(verification_id: int, user: Dict[str, Any] = Depends(_require_admin_user)):
+    record = _verification_store().get(verification_id)
+
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=404, detail="Verification not found")
+
+    result = _run_openai_verification_review(record)
+    record["ai_review"] = result
+    record["ai_reviewed_at"] = result.get("reviewed_at") or _now_iso()
+    record["ai_review_status"] = result.get("overall_status")
+    store_module.save_store()
+
+    return {
+        "ok": result.get("overall_status") != "unavailable",
+        "ai_review": result,
+        "verification": _public_record(record),
+    }
 
 @router.get("/admin/verifications")
 def get_admin_verifications(role: str = "all", status: str = "all"):
