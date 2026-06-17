@@ -1009,6 +1009,80 @@ def submit_verification(payload: Dict[str, Any]):
     }
 
 
+@router.post("/verification/cancel")
+def cancel_my_verification(payload: Optional[Dict[str, Any]] = None, current_user: dict = Depends(get_current_user)):
+    """Allow the signed-in user to withdraw/cancel their public verification.
+
+    This does not issue a refund or delete historical records. It removes the
+    public verified state, keeps the payment/document history for support/admin
+    review, and mirrors the canceled state into the Profile row used by public
+    pages and directories.
+    """
+    email, role = _current_identity(current_user)
+    payload = payload or {}
+    record = _find_latest_record(email, role) or _ensure_identity_record(email, role)
+
+    now = _now_iso()
+    record.update(
+        {
+            "email": email,
+            "role": role,
+            "status": "cancelled",
+            "verification_status": "cancelled",
+            "public_verification_status": "not_verified",
+            "publicVerificationStatus": "not_verified",
+            "review_status": "cancelled",
+            "reviewStatus": "cancelled",
+            "cancelled_at": now,
+            "canceled_at": now,
+            "cancel_reason": _safe_str(payload.get("reason") or payload.get("cancel_reason") or "Cancelled by user"),
+            "updated_at": now,
+        }
+    )
+    store_module.save_store()
+    _sync_verification_record_to_profile(record)
+
+    return {
+        "ok": True,
+        "message": "Verification has been cancelled for this account.",
+        "verification": _private_record(record, email, role),
+    }
+
+
+@router.post("/verification/reactivate")
+def reactivate_my_verification(payload: Optional[Dict[str, Any]] = None, current_user: dict = Depends(get_current_user)):
+    email, role = _current_identity(current_user)
+    record = _find_latest_record(email, role) or _ensure_identity_record(email, role)
+    paid = _record_fee_paid(record)
+    docs = _normalize_documents(record.get("documents")) if isinstance(record.get("documents"), list) else []
+    next_status = "pending" if paid or docs else "not_started"
+    now = _now_iso()
+
+    record.update(
+        {
+            "email": email,
+            "role": role,
+            "status": next_status,
+            "verification_status": "pending" if next_status == "pending" else "not_verified",
+            "public_verification_status": "pending" if next_status == "pending" else "not_verified",
+            "publicVerificationStatus": "pending" if next_status == "pending" else "not_verified",
+            "review_status": "pending" if next_status == "pending" else "not_started",
+            "reviewStatus": "pending" if next_status == "pending" else "not_started",
+            "cancelled_at": None,
+            "canceled_at": None,
+            "updated_at": now,
+        }
+    )
+    store_module.save_store()
+    _sync_verification_record_to_profile(record)
+
+    return {
+        "ok": True,
+        "message": "Verification has been reactivated. Finish any required documents if prompted.",
+        "verification": _private_record(record, email, role),
+    }
+
+
 @router.get("/verification/status")
 def get_verification_status(email: str, role: str = ""):
     normalized_role = _safe_lower(role) or "vendor"

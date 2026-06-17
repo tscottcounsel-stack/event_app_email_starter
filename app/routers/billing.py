@@ -851,6 +851,170 @@ def create_portal_session(
 
 
 
+def _subscription_status_payload(lookup: Dict[str, Any], *, stripe_error: str = "") -> Dict[str, Any]:
+    plan = str(lookup.get("subscription_plan") or lookup.get("subscriptionPlan") or lookup.get("plan") or "starter").strip().lower()
+    status_value = str(lookup.get("subscription_status") or lookup.get("subscriptionStatus") or "inactive").strip().lower()
+    if status_value == "paid":
+        status_value = "active"
+
+    cancel_at_period_end = bool(lookup.get("cancel_at_period_end") or lookup.get("cancelAtPeriodEnd"))
+    current_period_end = lookup.get("current_period_end") or lookup.get("currentPeriodEnd")
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+    customer_id = str(lookup.get("stripe_customer_id") or lookup.get("stripeCustomerId") or "").strip()
+
+    is_paid_plan = plan not in {"", "starter", "free", "inactive"}
+    is_active = status_value in {"active", "trialing", "paid"}
+
+    return {
+        "ok": True,
+        "plan": plan or "starter",
+        "subscription_plan": plan or "starter",
+        "subscriptionPlan": plan or "starter",
+        "subscription_status": status_value or "inactive",
+        "subscriptionStatus": status_value or "inactive",
+        "active": bool(is_active and is_paid_plan),
+        "is_paid_plan": bool(is_paid_plan),
+        "cancel_at_period_end": cancel_at_period_end,
+        "cancelAtPeriodEnd": cancel_at_period_end,
+        "current_period_end": current_period_end,
+        "currentPeriodEnd": current_period_end,
+        "stripe_subscription_id": subscription_id or None,
+        "stripeSubscriptionId": subscription_id or None,
+        "stripe_customer_id": customer_id or None,
+        "stripeCustomerId": customer_id or None,
+        "billing_portal_available": bool(customer_id),
+        "stripe_error": stripe_error,
+    }
+
+
+def _current_billing_lookup(user: Dict[str, Any]) -> Dict[str, Any]:
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role"))
+    if lookup is None:
+        lookup = dict(user or {})
+    return lookup
+
+
+def _refresh_lookup_from_stripe(lookup: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+    if not subscription_id:
+        return lookup, ""
+
+    if stripe is None or not (os.getenv("STRIPE_SECRET_KEY") or "").strip():
+        return lookup, ""
+
+    try:
+        stripe_sdk = _require_stripe()
+        subscription = stripe_sdk.Subscription.retrieve(subscription_id)
+        price_id = _extract_subscription_price_id(subscription)
+        plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+        status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "inactive"))
+        customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+        _apply_subscription_state(
+            lookup,
+            plan=plan,
+            subscription_status=status_value,
+            customer_id=customer_id,
+            subscription_id=subscription_id,
+            current_period_end=_stripe_get(subscription, "current_period_end", None),
+            cancel_at_period_end=bool(_stripe_get(subscription, "cancel_at_period_end", False)),
+        )
+        return lookup, ""
+    except Exception as exc:
+        return lookup, str(exc)
+
+
+@router.get("/subscription/status")
+def get_subscription_status(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    lookup, stripe_error = _refresh_lookup_from_stripe(lookup)
+    return _subscription_status_payload(lookup, stripe_error=stripe_error)
+
+
+@router.post("/customer-portal")
+def create_customer_portal_session(
+    payload: PortalSessionRequest,
+    user: dict = Depends(get_current_user),
+):
+    return create_portal_session(payload, user)
+
+
+@router.post("/subscription/cancel")
+def cancel_subscription(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+
+    if not subscription_id:
+        return {
+            **_subscription_status_payload(lookup),
+            "message": "No active Stripe subscription was found for this account.",
+        }
+
+    stripe_sdk = _require_stripe()
+    try:
+        subscription = stripe_sdk.Subscription.modify(subscription_id, cancel_at_period_end=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to cancel subscription: {exc}")
+
+    price_id = _extract_subscription_price_id(subscription)
+    plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+    status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "active"))
+    customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+
+    _apply_subscription_state(
+        lookup,
+        plan=plan,
+        subscription_status=status_value,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        current_period_end=_stripe_get(subscription, "current_period_end", None),
+        cancel_at_period_end=True,
+    )
+
+    return {
+        **_subscription_status_payload(lookup),
+        "message": "Subscription will cancel at the end of the current billing period.",
+    }
+
+
+@router.post("/subscription/resume")
+def resume_subscription(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+
+    if not subscription_id:
+        return {
+            **_subscription_status_payload(lookup),
+            "message": "No Stripe subscription was found for this account.",
+        }
+
+    stripe_sdk = _require_stripe()
+    try:
+        subscription = stripe_sdk.Subscription.modify(subscription_id, cancel_at_period_end=False)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to resume subscription: {exc}")
+
+    price_id = _extract_subscription_price_id(subscription)
+    plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+    status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "active"))
+    customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+
+    _apply_subscription_state(
+        lookup,
+        plan=plan,
+        subscription_status=status_value,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        current_period_end=_stripe_get(subscription, "current_period_end", None),
+        cancel_at_period_end=False,
+    )
+
+    return {
+        **_subscription_status_payload(lookup),
+        "message": "Subscription cancellation has been removed.",
+    }
+
+
+
 
 @router.get("/connect/status")
 def get_connect_status(user: dict = Depends(get_current_user)):
