@@ -327,29 +327,20 @@ def _normalize_vendor_menu_uploads(raw: Any) -> List[Dict[str, Any]]:
 
 
 
-def _normalize_video_urls(*values: Any) -> List[str]:
-    urls: List[str] = []
-    for value in values:
-        if isinstance(value, list):
-            urls.extend([_safe_str(item) for item in value if _safe_str(item)])
-        elif isinstance(value, str):
-            raw = value.strip()
-            if not raw:
-                continue
-            if "," in raw:
-                urls.extend([part.strip() for part in raw.split(",") if part.strip()])
-            else:
-                urls.append(raw)
+def _canonical_video_urls_from_data(data: Dict[str, Any]) -> List[str]:
+    """Return the authoritative video list without resurrecting stale aliases.
 
-    seen = set()
-    clean: List[str] = []
-    for url in urls:
-        key = url.lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        clean.append(url)
-    return clean[:6]
+    Older profile rows may have video_urls, videoUrls, and videos with different
+    contents. For public/profile reads, prefer the newest canonical key instead
+    of unioning all aliases. For writes, save all aliases to the exact same list.
+    """
+    if "video_urls" in data:
+        return _normalize_video_urls(data.get("video_urls"))
+    if "videoUrls" in data:
+        return _normalize_video_urls(data.get("videoUrls"))
+    if "videos" in data:
+        return _normalize_video_urls(data.get("videos"))
+    return []
 
 def _first_category(categories: Any, fallback: Any = "") -> str:
     values = _safe_list_of_str(categories)
@@ -428,8 +419,7 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "logo_url": payload.get("logoUrl", ""),
         "banner_url": payload.get("bannerUrl", ""),
         "image_urls": payload.get("imageUrls", []),
-        "video_urls": _normalize_video_urls(payload.get("videoUrls"), payload.get("video_urls"), payload.get("videos")),
-        "videoUrls": _normalize_video_urls(payload.get("videoUrls"), payload.get("video_urls"), payload.get("videos")),
+        "video_urls": payload.get("videoUrls", []),
         "offerings": offerings,
         "vendor_offerings": offerings,
         "menuUploads": menu_uploads,
@@ -461,9 +451,6 @@ def _profile_row_to_vendor(row: Profile) -> Dict[str, Any]:
         "vendor_offerings": _normalize_vendor_offerings(data.get("offerings") or data.get("vendor_offerings") or []),
         "menuUploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
         "menu_uploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
-        "video_urls": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
-        "videoUrls": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
-        "videos": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
         "verified": bool(row.verified),
         "verification_status": row.verification_status or data.get("verification_status") or "",
         "verificationStatus": row.verification_status or data.get("verificationStatus") or "",
@@ -538,6 +525,12 @@ def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, A
 
     existing_data = dict(row.data or {})
     merged_data = {**existing_data, **dict(data or {}), "email": email, "vendor_id": data.get("vendor_id") or existing_data.get("vendor_id") or email}
+
+    if any(key in data for key in ("video_urls", "videoUrls", "videos")):
+        canonical_video_urls = _canonical_video_urls_from_data(dict(data or {}))
+        merged_data["video_urls"] = canonical_video_urls
+        merged_data["videoUrls"] = canonical_video_urls
+        merged_data["videos"] = canonical_video_urls
 
     row.business_name = name or row.business_name
     row.display_name = display_name or row.display_name
@@ -1235,8 +1228,6 @@ class VendorProfileUpsert(BaseModel):
     bannerUrl: str = ""
     imageUrls: List[str] = Field(default_factory=list)
     videoUrls: List[str] = Field(default_factory=list)
-    video_urls: List[str] = Field(default_factory=list)
-    videos: List[str] = Field(default_factory=list)
     offerings: List[Dict[str, Any]] = Field(default_factory=list)
     vendor_offerings: List[Dict[str, Any]] = Field(default_factory=list)
     menuUploads: List[Dict[str, Any]] = Field(default_factory=list)
@@ -1313,6 +1304,10 @@ def save_my_vendor_profile(
     mapped = _map_payload(payload.model_dump())
 
     updated = {**existing, **mapped}
+    canonical_video_urls = _normalize_video_urls(mapped.get("video_urls"), mapped.get("videoUrls"), mapped.get("videos"))
+    updated["video_urls"] = canonical_video_urls
+    updated["videoUrls"] = canonical_video_urls
+    updated["videos"] = canonical_video_urls
     updated["vendor_id"] = key
     updated["email"] = key
 
