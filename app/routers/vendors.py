@@ -325,6 +325,32 @@ def _normalize_vendor_menu_uploads(raw: Any) -> List[Dict[str, Any]]:
 
     return normalized
 
+
+
+def _normalize_video_urls(*values: Any) -> List[str]:
+    urls: List[str] = []
+    for value in values:
+        if isinstance(value, list):
+            urls.extend([_safe_str(item) for item in value if _safe_str(item)])
+        elif isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                continue
+            if "," in raw:
+                urls.extend([part.strip() for part in raw.split(",") if part.strip()])
+            else:
+                urls.append(raw)
+
+    seen = set()
+    clean: List[str] = []
+    for url in urls:
+        key = url.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean.append(url)
+    return clean[:6]
+
 def _first_category(categories: Any, fallback: Any = "") -> str:
     values = _safe_list_of_str(categories)
     if values:
@@ -402,7 +428,8 @@ def _map_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "logo_url": payload.get("logoUrl", ""),
         "banner_url": payload.get("bannerUrl", ""),
         "image_urls": payload.get("imageUrls", []),
-        "video_urls": payload.get("videoUrls", []),
+        "video_urls": _normalize_video_urls(payload.get("videoUrls"), payload.get("video_urls"), payload.get("videos")),
+        "videoUrls": _normalize_video_urls(payload.get("videoUrls"), payload.get("video_urls"), payload.get("videos")),
         "offerings": offerings,
         "vendor_offerings": offerings,
         "menuUploads": menu_uploads,
@@ -434,6 +461,9 @@ def _profile_row_to_vendor(row: Profile) -> Dict[str, Any]:
         "vendor_offerings": _normalize_vendor_offerings(data.get("offerings") or data.get("vendor_offerings") or []),
         "menuUploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
         "menu_uploads": _normalize_vendor_menu_uploads(data.get("menuUploads") or data.get("menu_uploads") or []),
+        "video_urls": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
+        "videoUrls": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
+        "videos": _normalize_video_urls(data.get("video_urls"), data.get("videoUrls"), data.get("videos")),
         "verified": bool(row.verified),
         "verification_status": row.verification_status or data.get("verification_status") or "",
         "verificationStatus": row.verification_status or data.get("verificationStatus") or "",
@@ -1205,6 +1235,8 @@ class VendorProfileUpsert(BaseModel):
     bannerUrl: str = ""
     imageUrls: List[str] = Field(default_factory=list)
     videoUrls: List[str] = Field(default_factory=list)
+    video_urls: List[str] = Field(default_factory=list)
+    videos: List[str] = Field(default_factory=list)
     offerings: List[Dict[str, Any]] = Field(default_factory=list)
     vendor_offerings: List[Dict[str, Any]] = Field(default_factory=list)
     menuUploads: List[Dict[str, Any]] = Field(default_factory=list)
