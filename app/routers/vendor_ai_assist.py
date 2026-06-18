@@ -80,6 +80,17 @@ BOOTH_ADVISOR_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "strategy_summary": {"type": "string"},
+        "crowd_insights": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "summary": {"type": "string"},
+                "strongest_traffic_areas": {"type": "array", "items": {"type": "string"}},
+                "quiet_or_lower_traffic_areas": {"type": "array", "items": {"type": "string"}},
+                "layout_signals_used": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["summary", "strongest_traffic_areas", "quiet_or_lower_traffic_areas", "layout_signals_used"],
+        },
         "top_recommendations": {
             "type": "array",
             "items": {
@@ -89,12 +100,30 @@ BOOTH_ADVISOR_SCHEMA: Dict[str, Any] = {
                     "booth_id": {"type": "string"},
                     "label": {"type": "string"},
                     "score": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "crowd_score": {"type": "integer", "minimum": 0, "maximum": 100},
                     "tag": {"type": "string"},
                     "reason": {"type": "string"},
+                    "traffic_notes": {"type": "string"},
+                    "nearby_signals": {"type": "array", "items": {"type": "string"}},
+                    "visibility_notes": {"type": "string"},
+                    "convenience_notes": {"type": "array", "items": {"type": "string"}},
                     "tradeoffs": {"type": "array", "items": {"type": "string"}},
                     "best_for": {"type": "string"},
                 },
-                "required": ["booth_id", "label", "score", "tag", "reason", "tradeoffs", "best_for"],
+                "required": [
+                    "booth_id",
+                    "label",
+                    "score",
+                    "crowd_score",
+                    "tag",
+                    "reason",
+                    "traffic_notes",
+                    "nearby_signals",
+                    "visibility_notes",
+                    "convenience_notes",
+                    "tradeoffs",
+                    "best_for",
+                ],
             },
         },
         "best_value": {
@@ -146,6 +175,7 @@ BOOTH_ADVISOR_SCHEMA: Dict[str, Any] = {
     },
     "required": [
         "strategy_summary",
+        "crowd_insights",
         "top_recommendations",
         "best_value",
         "highest_visibility",
@@ -830,6 +860,82 @@ def _iter_diagram_booths(diagram: Dict[str, Any]) -> List[Dict[str, Any]]:
     return clean
 
 
+def _element_signal_type(item: Dict[str, Any]) -> str:
+    raw_type = _safe_lower(item.get("type") or item.get("element_type") or item.get("elementType"))
+    raw_signal = _safe_lower(item.get("aiSignal") or item.get("ai_signal") or item.get("signal") or item.get("signalType") or item.get("signal_type"))
+    label = _safe_lower(item.get("label") or item.get("name"))
+
+    combined = " ".join([raw_type, raw_signal, label])
+
+    if "entrance" in combined or "gate" in combined:
+        return "entrance"
+    if "high" in combined and "traffic" in combined:
+        return "high_traffic"
+    if "medium" in combined and "traffic" in combined:
+        return "medium_traffic"
+    if "low" in combined and "traffic" in combined:
+        return "low_traffic"
+    if "crowd" in combined or "hotspot" in combined:
+        return "crowd_hotspot"
+    if "food" in combined or "court" in combined or "seating" in combined:
+        return "foodcourt"
+    if "stage" in combined or "music" in combined or "audience" in combined:
+        return "stage"
+    if "restroom" in combined or "bathroom" in combined:
+        return "restrooms"
+    if "info" in combined or "help" in combined:
+        return "info"
+    if "family" in combined or "kid" in combined:
+        return "family_zone"
+    if "vip" in combined or "sponsor" in combined:
+        return "vip_zone"
+    if "quiet" in combined or "low_noise" in combined:
+        return "quiet_zone"
+    if "power" in combined or "electric" in combined:
+        return "power"
+    if "water" in combined:
+        return "water"
+    if raw_type in {"street", "walkway", "path"}:
+        return "walkway"
+    if raw_type in {"venue", "shape", "zone"}:
+        return "general_zone"
+    return raw_signal or raw_type or "map_element"
+
+
+def _element_traffic_level(item: Dict[str, Any], signal_type: str) -> str:
+    explicit = _safe_lower(item.get("trafficLevel") or item.get("traffic_level") or item.get("traffic") or item.get("crowdLevel") or item.get("crowd_level"))
+    if explicit in {"high", "medium", "low", "quiet"}:
+        return explicit
+    if signal_type in {"entrance", "high_traffic", "crowd_hotspot", "stage", "foodcourt"}:
+        return "high"
+    if signal_type in {"medium_traffic", "restrooms", "info", "family_zone", "vip_zone", "power", "water", "walkway"}:
+        return "medium"
+    if signal_type in {"low_traffic"}:
+        return "low"
+    if signal_type in {"quiet_zone"}:
+        return "quiet"
+    return "medium"
+
+
+def _element_crowd_score(item: Dict[str, Any], signal_type: str, traffic_level: str) -> int:
+    try:
+        explicit = int(float(item.get("crowdScore") or item.get("crowd_score") or item.get("trafficScore") or item.get("traffic_score") or 0))
+        if explicit > 0:
+            return max(0, min(100, explicit))
+    except Exception:
+        pass
+
+    if traffic_level == "high":
+        return 86 if signal_type != "crowd_hotspot" else 95
+    if traffic_level == "medium":
+        return 62
+    if traffic_level == "low":
+        return 36
+    if traffic_level == "quiet":
+        return 20
+    return 50
+
+
 def _iter_diagram_elements(diagram: Dict[str, Any]) -> List[Dict[str, Any]]:
     elements: List[Dict[str, Any]] = []
 
@@ -848,25 +954,105 @@ def _iter_diagram_elements(diagram: Dict[str, Any]) -> List[Dict[str, Any]]:
                     elements.append(copy)
 
     out: List[Dict[str, Any]] = []
-    for item in elements[:60]:
+    for item in elements[:90]:
+        signal_type = _element_signal_type(item)
+        traffic_level = _element_traffic_level(item, signal_type)
+        crowd_score = _element_crowd_score(item, signal_type, traffic_level)
         out.append({
             "id": _clip(item.get("id"), 80),
             "type": _clip(item.get("type"), 80),
             "label": _clip(item.get("label") or item.get("name"), 120),
+            "signal_type": signal_type,
+            "traffic_level": traffic_level,
+            "crowd_score": crowd_score,
+            "vendor_tip": _clip(item.get("vendorTip") or item.get("vendor_tip") or item.get("helper") or item.get("description"), 220),
             "x": float(item.get("x") or 0),
             "y": float(item.get("y") or 0),
             "width": float(item.get("width") or 0),
             "height": float(item.get("height") or 0),
+            "level": _clip(item.get("level_name") or item.get("level_id"), 120),
         })
     return out
 
 
-def _compact_booths_for_ai(booths: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _center_of_rect(item: Dict[str, Any]) -> tuple[float, float]:
+    x = float(item.get("x") or 0)
+    y = float(item.get("y") or 0)
+    w = float(item.get("width") or 0)
+    h = float(item.get("height") or 0)
+    return x + (w / 2), y + (h / 2)
+
+
+def _booth_nearby_signals(booth_payload: Dict[str, Any], elements: List[Dict[str, Any]]) -> tuple[int, List[Dict[str, Any]]]:
+    if not elements:
+        return 50, []
+
+    bx, by = _center_of_rect(booth_payload)
+    nearby: List[Dict[str, Any]] = []
+    weighted_total = 0.0
+    weight_total = 0.0
+
+    for el in elements:
+        ex, ey = _center_of_rect(el)
+        distance = ((bx - ex) ** 2 + (by - ey) ** 2) ** 0.5
+        influence_radius = max(180.0, min(520.0, max(float(el.get("width") or 0), float(el.get("height") or 0)) + 180.0))
+        if distance > influence_radius:
+            continue
+
+        proximity = max(0.0, 1.0 - (distance / influence_radius))
+        crowd_score = float(el.get("crowd_score") or 50)
+        weighted_total += crowd_score * max(0.18, proximity)
+        weight_total += max(0.18, proximity)
+
+        nearby.append({
+            "label": el.get("label") or el.get("signal_type") or el.get("type") or "Map signal",
+            "signal_type": el.get("signal_type") or el.get("type") or "map_signal",
+            "traffic_level": el.get("traffic_level") or "medium",
+            "crowd_score": int(el.get("crowd_score") or 50),
+            "distance": round(distance, 1),
+            "vendor_tip": el.get("vendor_tip") or "",
+        })
+
+    nearby.sort(key=lambda item: (str(item.get("traffic_level")) != "high", float(item.get("distance") or 999999)))
+
+    if weight_total <= 0:
+        return 50, []
+
+    traffic_score = int(max(0, min(100, round(weighted_total / weight_total))))
+    return traffic_score, nearby[:6]
+
+
+def _layout_signal_summary(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts: Dict[str, int] = {}
+    for el in elements:
+        key = str(el.get("signal_type") or el.get("type") or "map_signal")
+        counts[key] = counts.get(key, 0) + 1
+
+    strongest = [
+        el.get("label") or el.get("signal_type") or el.get("type")
+        for el in sorted(elements, key=lambda item: int(item.get("crowd_score") or 0), reverse=True)[:8]
+    ]
+    quiet = [
+        el.get("label") or el.get("signal_type") or el.get("type")
+        for el in elements
+        if str(el.get("traffic_level") or "").lower() in {"low", "quiet"}
+    ][:6]
+
+    return {
+        "signal_counts": counts,
+        "strongest_signals": [str(item) for item in strongest if item],
+        "quiet_or_lower_traffic_signals": [str(item) for item in quiet if item],
+        "signal_count": len(elements),
+    }
+
+
+def _compact_booths_for_ai(booths: List[Dict[str, Any]], elements: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
+    elements = elements or []
 
     for index, booth in enumerate(booths[:150], start=1):
         status = _booth_status(booth)
-        out.append({
+        booth_payload = {
             "id": _booth_id(booth, f"booth-{index}"),
             "label": _booth_label(booth, f"Booth {index}"),
             "status": status or "available",
@@ -883,7 +1069,11 @@ def _compact_booths_for_ai(booths: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "premium": bool(_booth_value(booth, "isPremium", "is_premium", "premium")),
             "power": bool(_booth_value(booth, "power", "has_power", "hasPower", "electricity")),
             "water": bool(_booth_value(booth, "water", "has_water", "hasWater")),
-        })
+        }
+        traffic_score, nearby = _booth_nearby_signals(booth_payload, elements)
+        booth_payload["traffic_score"] = traffic_score
+        booth_payload["nearby_signals"] = nearby
+        out.append(booth_payload)
 
     return out
 
@@ -903,7 +1093,7 @@ def _diagram_payload(db: Session, event_id: int) -> Dict[str, Any]:
     canvas = diagram.get("canvas") if isinstance(diagram.get("canvas"), dict) else {}
     booths = _iter_diagram_booths(diagram)
     elements = _iter_diagram_elements(diagram)
-    compact_booths = _compact_booths_for_ai(booths)
+    compact_booths = _compact_booths_for_ai(booths, elements)
 
     available = [booth for booth in compact_booths if booth.get("is_available")]
     if not available:
@@ -918,6 +1108,8 @@ def _diagram_payload(db: Session, event_id: int) -> Dict[str, Any]:
         "booths": compact_booths,
         "available_booths": available,
         "elements": elements,
+        "crowd_signals": elements,
+        "layout_signal_summary": _layout_signal_summary(elements),
         "booth_count": len(compact_booths),
         "available_count": len(available),
     }
@@ -1124,8 +1316,9 @@ def generate_vendor_booth_advisor(
     system_prompt = (
         "You are VendCore's AI Booth Advisor. Recommend booths for a vendor using only the provided event, vendor, booth, and map-element data. "
         "Recommend only booth IDs that appear in available_booths. Do not invent booths. "
-        "Use practical reasoning: traffic potential from map position/elements, category fit, booth price/value, booth size, premium tiers, power/water needs when available, "
-        "and possible trade-offs. Do not guarantee sales or organizer approval."
+        "Use practical reasoning: organizer-created crowd/traffic signals, entrances, stage areas, food courts, restrooms, quiet zones, power/water access, "
+        "traffic potential from map position/elements, category fit, booth price/value, booth size, premium tiers, power/water needs when available, "
+        "and possible trade-offs. Explicitly explain what crowd or layout signals influenced each recommendation. Do not guarantee sales or organizer approval."
     )
 
     result = _run_structured_ai(
@@ -1142,6 +1335,7 @@ def generate_vendor_booth_advisor(
                 "return_exact_booth_id_from_available_booths": True,
                 "include_best_value_highest_visibility_and_budget_friendly": True,
                 "include_booths_to_avoid_if_any": True,
+                "include_crowd_insights_and_nearby_signals": True,
             },
         },
     )
@@ -1155,6 +1349,7 @@ def generate_vendor_booth_advisor(
 
         if booth_id not in available_ids and label in available_ids:
             booth_id = label
+            pick["booth_id"] = booth_id
 
         if booth_id not in available_ids and booth_id not in available_labels:
             pick["warning"] = "AI returned a booth that is not currently available; confirm before selecting."
@@ -1197,5 +1392,7 @@ def get_vendor_ai_status(
             "event_fit_score": active,
             "application_note_assistant": active,
             "document_readiness_coach": active,
+            "booth_advisor": active,
+            "crowd_and_traffic_insights": active,
         },
     }
