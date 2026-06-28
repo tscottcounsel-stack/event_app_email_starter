@@ -128,6 +128,22 @@ class EventCreate(BaseModel):
     listing_only: Optional[bool] = None
     listingOnly: Optional[bool] = None
 
+    event_type: Optional[str] = None
+    eventType: Optional[str] = None
+    event_kind: Optional[str] = None
+    eventKind: Optional[str] = None
+    event_category: Optional[str] = None
+    eventCategory: Optional[str] = None
+    booking_flow_label: Optional[str] = None
+    service_categories: Optional[list[str]] = None
+    serviceCategories: Optional[list[str]] = None
+    is_private_event: Optional[bool] = None
+    privateEvent: Optional[bool] = None
+    service_event: Optional[bool] = None
+    serviceEvent: Optional[bool] = None
+    talent_event: Optional[bool] = None
+    talentEvent: Optional[bool] = None
+
     heroImageUrl: Optional[str] = None
     imageUrls: Optional[list[str]] = None
     videoUrls: Optional[list[str]] = None
@@ -214,6 +230,124 @@ def _norm_email(value: Any) -> str:
 
 LISTING_ONLY_MODE = "listing_only"
 FULL_EVENT_MODE = "full"
+
+MARKETPLACE_EVENT_KIND = "marketplace"
+PRIVATE_SERVICE_EVENT_KIND = "private_service"
+LIVE_ENTERTAINMENT_EVENT_KIND = "live_entertainment"
+CUSTOM_EVENT_KIND = "custom"
+PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS = 2900
+PRO_ORGANIZER_PLAN_KEYS = {"enterprise_organizer", "pro_organizer", "organizer_pro", "enterprise", "premium", "growth"}
+ACTIVE_SUBSCRIPTION_STATUSES = {"active", "trialing", "paid", "current", "subscribed"}
+
+
+def _private_workspace_amount_cents() -> int:
+    raw = os.getenv("PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS") or os.getenv("STRIPE_PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS") or ""
+    try:
+        return max(50, int(raw)) if raw else PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
+    except Exception:
+        return PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
+
+
+def _safe_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def _normalize_event_kind(value: Any, event_type: Any = None) -> str:
+    raw = str(value or event_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"private_service", "private", "service", "wedding", "weddings", "reunion", "family_reunion", "party", "private_event"}:
+        return PRIVATE_SERVICE_EVENT_KIND
+    if raw in {"live_entertainment", "live", "entertainment", "concert", "concerts", "show", "showcase", "performance", "production"}:
+        return LIVE_ENTERTAINMENT_EVENT_KIND
+    if raw in {"custom", "other", "other_custom", "custom_event"}:
+        return CUSTOM_EVENT_KIND
+    return MARKETPLACE_EVENT_KIND
+
+
+def _event_kind_title(kind: str, explicit: Any = None) -> str:
+    explicit_text = _pick_first_value(explicit)
+    if kind == PRIVATE_SERVICE_EVENT_KIND:
+        return explicit_text or "Private / Service Event"
+    if kind == LIVE_ENTERTAINMENT_EVENT_KIND:
+        return explicit_text or "Live / Entertainment Event"
+    if kind == CUSTOM_EVENT_KIND:
+        return explicit_text or "Custom Event"
+    return explicit_text or "Vendor / Marketplace Event"
+
+
+def _user_has_pro_organizer_access(user: Optional[Dict[str, Any]]) -> bool:
+    user = user or {}
+    role = str(user.get("role") or "").strip().lower()
+    if role == "admin":
+        return True
+    if role != "organizer":
+        return False
+    plan = str(user.get("subscription_plan") or user.get("subscriptionPlan") or user.get("plan") or user.get("price_lookup_key") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    status = str(user.get("subscription_status") or user.get("subscriptionStatus") or user.get("status") or "").strip().lower()
+    return bool(plan in PRO_ORGANIZER_PLAN_KEYS and (not status or status in ACTIVE_SUBSCRIPTION_STATUSES))
+
+
+def _apply_event_kind_aliases(
+    target: Dict[str, Any],
+    *,
+    kind: Any = None,
+    event_type: Any = None,
+    service_categories: Any = None,
+    booking_flow_label: Any = None,
+    user: Optional[Dict[str, Any]] = None,
+    mode: Any = None,
+) -> Dict[str, Any]:
+    normalized = _normalize_event_kind(kind, event_type)
+    title = _event_kind_title(normalized, event_type)
+    categories = _safe_list(service_categories)
+    is_private = normalized == PRIVATE_SERVICE_EVENT_KIND
+    is_talent = normalized == LIVE_ENTERTAINMENT_EVENT_KIND
+    is_full_workspace = _normalize_event_mode(mode or target.get("event_mode") or target.get("eventMode"), target.get("listing_only") or target.get("listingOnly")) == FULL_EVENT_MODE
+    pro_included = _user_has_pro_organizer_access(user)
+    workspace_required = bool(is_full_workspace and normalized in {PRIVATE_SERVICE_EVENT_KIND, CUSTOM_EVENT_KIND} and not pro_included)
+
+    target["event_kind"] = normalized
+    target["eventKind"] = normalized
+    target["event_type"] = title
+    target["eventType"] = title
+    target["event_category"] = title
+    target["eventCategory"] = title
+    target["booking_flow_label"] = _pick_first_value(booking_flow_label, target.get("booking_flow_label"))
+    target["is_private_event"] = is_private
+    target["privateEvent"] = is_private
+    target["service_event"] = is_private
+    target["serviceEvent"] = is_private
+    target["talent_event"] = is_talent
+    target["talentEvent"] = is_talent
+
+    if categories:
+        target["service_categories"] = categories
+        target["serviceCategories"] = categories
+
+    target["private_workspace_required"] = workspace_required
+    target["privateWorkspaceRequired"] = workspace_required
+    target["private_workspace_price_cents"] = _private_workspace_amount_cents() if workspace_required else 0
+    target["privateWorkspacePriceCents"] = _private_workspace_amount_cents() if workspace_required else 0
+    target["private_workspace_included_with_pro"] = bool(pro_included and is_full_workspace and normalized in {PRIVATE_SERVICE_EVENT_KIND, CUSTOM_EVENT_KIND})
+    target["privateWorkspaceIncludedWithPro"] = target["private_workspace_included_with_pro"]
+
+    if target.get("private_workspace_included_with_pro"):
+        target["private_workspace_payment_status"] = "included_with_pro"
+        target["privateWorkspacePaymentStatus"] = "included_with_pro"
+        target["private_workspace_paid"] = True
+        target["privateWorkspacePaid"] = True
+    else:
+        paid = bool(target.get("private_workspace_paid") is True or target.get("privateWorkspacePaid") is True)
+        status = str(target.get("private_workspace_payment_status") or target.get("privateWorkspacePaymentStatus") or "").strip().lower()
+        if workspace_required and not paid and status != "paid":
+            target["private_workspace_payment_status"] = "unpaid"
+            target["privateWorkspacePaymentStatus"] = "unpaid"
+            target["private_workspace_paid"] = False
+            target["privateWorkspacePaid"] = False
+    return target
 
 
 def _normalize_event_mode(value: Any, listing_only: Any = None) -> str:
@@ -494,6 +628,33 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "tiktokUrl",
         "website_url",
         "websiteUrl",
+        "event_type",
+        "eventType",
+        "event_kind",
+        "eventKind",
+        "event_category",
+        "eventCategory",
+        "booking_flow_label",
+        "service_categories",
+        "serviceCategories",
+        "is_private_event",
+        "privateEvent",
+        "service_event",
+        "serviceEvent",
+        "talent_event",
+        "talentEvent",
+        "private_workspace_required",
+        "privateWorkspaceRequired",
+        "private_workspace_paid",
+        "privateWorkspacePaid",
+        "private_workspace_payment_status",
+        "privateWorkspacePaymentStatus",
+        "private_workspace_price_cents",
+        "privateWorkspacePriceCents",
+        "private_workspace_paid_at",
+        "privateWorkspacePaidAt",
+        "private_workspace_included_with_pro",
+        "privateWorkspaceIncludedWithPro",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
@@ -508,6 +669,14 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
     )
 
     _apply_public_listing_aliases(payload, store_payload)
+    _apply_event_kind_aliases(
+        payload,
+        kind=payload.get("event_kind") or payload.get("eventKind") or store_payload.get("event_kind") or store_payload.get("eventKind"),
+        event_type=payload.get("event_type") or payload.get("eventType") or store_payload.get("event_type") or store_payload.get("eventType"),
+        service_categories=payload.get("service_categories") or payload.get("serviceCategories") or store_payload.get("service_categories") or store_payload.get("serviceCategories"),
+        booking_flow_label=payload.get("booking_flow_label") or store_payload.get("booking_flow_label"),
+        mode=payload.get("event_mode") or payload.get("eventMode"),
+    )
 
     # Canonicalize the selected needs across old/new field names and both runtime stores.
     store_needs_payload = _event_needs_store_payload(int(ev.id or 0))
@@ -592,6 +761,15 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         merged.setdefault("created_by", organizer_id)
 
     _apply_public_listing_aliases(merged, merged)
+    _apply_event_kind_aliases(
+        merged,
+        kind=merged.get("event_kind") or merged.get("eventKind"),
+        event_type=merged.get("event_type") or merged.get("eventType"),
+        service_categories=merged.get("service_categories") or merged.get("serviceCategories"),
+        booking_flow_label=merged.get("booking_flow_label"),
+        user=user,
+        mode=merged.get("event_mode") or merged.get("eventMode"),
+    )
 
     # Preserve event mode across every event payload alias.
     mode_payload = _event_mode_store_payload(event_id)
@@ -1360,6 +1538,8 @@ _EVENT_NEEDS_KEYS = (
     "vendor_categories_needed",
     "looking_for_categories",
     "vendor_categories",
+    "service_categories",
+    "serviceCategories",
 )
 
 
@@ -1684,8 +1864,9 @@ def organizer_create_event(
     if not organizer_email:
         raise HTTPException(status_code=401, detail="Authenticated user email missing")
 
-    existing_event_count = len(_owned_events_for_user(db, user))
-    require_event_limit(user, existing_event_count)
+    owned_events = _owned_events_for_user(db, user)
+    published_event_count = sum(1 for ev in owned_events if bool(_serialize_event_model(ev).get("published")))
+    require_event_limit(user, published_event_count)
 
     organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
     organizer_id_str = None if organizer_id is None else str(organizer_id)
@@ -1737,6 +1918,17 @@ def organizer_create_event(
         "tiktok_url": payload.tiktok_url or payload.tiktokUrl,
         "website_url": payload.website_url or payload.websiteUrl,
     })
+    _apply_event_kind_aliases(
+        serialized,
+        kind=payload.event_kind or payload.eventKind,
+        event_type=payload.event_type or payload.eventType or payload.event_category or payload.eventCategory,
+        service_categories=payload.service_categories or payload.serviceCategories or payload.desired_vendor_categories or payload.desiredVendorCategories,
+        booking_flow_label=payload.booking_flow_label,
+        user=user,
+        mode=create_mode,
+    )
+    if payload.service_categories or payload.serviceCategories:
+        _apply_event_needs_aliases(serialized, _unique_categories([payload.service_categories or payload.serviceCategories]))
     _persist_public_listing_fields(int(event.id), serialized)
     serialized = _sync_event_to_store(serialized, user)
     return serialized
@@ -1790,6 +1982,26 @@ def organizer_patch_event(
 
     _persist_public_listing_fields(int(event_id), incoming)
     _apply_public_listing_aliases(serialized, incoming)
+    if any(key in incoming for key in (
+        "event_type",
+        "eventType",
+        "event_kind",
+        "eventKind",
+        "event_category",
+        "eventCategory",
+        "service_categories",
+        "serviceCategories",
+        "booking_flow_label",
+    )):
+        _apply_event_kind_aliases(
+            serialized,
+            kind=incoming.get("event_kind") or incoming.get("eventKind") or serialized.get("event_kind") or serialized.get("eventKind"),
+            event_type=incoming.get("event_type") or incoming.get("eventType") or incoming.get("event_category") or incoming.get("eventCategory") or serialized.get("event_type") or serialized.get("eventType"),
+            service_categories=incoming.get("service_categories") or incoming.get("serviceCategories") or serialized.get("service_categories") or serialized.get("serviceCategories"),
+            booking_flow_label=incoming.get("booking_flow_label") or serialized.get("booking_flow_label"),
+            user=user,
+            mode=incoming.get("event_mode") or incoming.get("eventMode") or serialized.get("event_mode") or serialized.get("eventMode"),
+        )
 
     if any(key in incoming for key in ("event_mode", "eventMode", "listing_only", "listingOnly")):
         mode = _persist_event_mode(
