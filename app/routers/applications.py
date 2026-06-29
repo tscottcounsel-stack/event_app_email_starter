@@ -2387,22 +2387,93 @@ def expire_reservations_if_needed() -> int:
     return expired_count
 
 
-def _can_access_messages(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
-    role = _as_str(user.get("role")).lower()
-    if role in {"admin", "organizer"}:
-        return True
+def _message_user_role(user: Dict[str, Any]) -> str:
+    return _as_str(user.get("role") or user.get("user_role") or user.get("account_type")).lower()
 
+
+def _message_user_email(user: Dict[str, Any]) -> str:
+    return _as_str(user.get("email") or user.get("sub") or user.get("username")).lower()
+
+
+def _message_user_id(user: Dict[str, Any]) -> str:
+    return _as_str(
+        user.get("organizer_id")
+        or user.get("vendor_id")
+        or user.get("user_id")
+        or user.get("id")
+        or user.get("sub")
+    )
+
+
+def _message_identity_matches_app_vendor(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
     vendor_id, vendor_email = _extract_vendor_identity(user)
     app_vendor_id = _normalize_id(
         app.get("vendor_id") or app.get("vendorId") or app.get("user_id") or app.get("userId")
     )
-    app_vendor_email = _as_str(app.get("vendor_email")).lower()
+    app_vendor_email = _as_str(app.get("vendor_email") or app.get("email")).lower()
 
     if vendor_id and app_vendor_id and vendor_id == app_vendor_id:
         return True
     if vendor_email and app_vendor_email and vendor_email == app_vendor_email:
         return True
 
+    return False
+
+
+def _message_identity_matches_event_organizer(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
+    """Return True only when the logged-in organizer owns the app's event.
+
+    This must never be a blanket organizer=True check. The messages inbox is
+    global across application records, so each row must be filtered by the event
+    owner. Otherwise a newly-created organizer can see another organizer's
+    conversations.
+    """
+    event = _get_event_for_app(app) or {}
+
+    user_email = _message_user_email(user)
+    user_id = _message_user_id(user)
+
+    organizer_emails = {
+        _as_str(app.get("organizer_email")).lower(),
+        _as_str(app.get("owner_email")).lower(),
+        _as_str(event.get("organizer_email")).lower(),
+        _as_str(event.get("owner_email")).lower(),
+        _as_str(event.get("email")).lower(),
+    }
+    organizer_ids = {
+        _as_str(app.get("organizer_id")),
+        _as_str(app.get("owner_id")),
+        _as_str(app.get("created_by")),
+        _as_str(event.get("organizer_id")),
+        _as_str(event.get("owner_id")),
+        _as_str(event.get("created_by")),
+    }
+
+    organizer_emails.discard("")
+    organizer_ids.discard("")
+
+    if user_email and user_email in organizer_emails:
+        return True
+    if user_id and user_id in organizer_ids:
+        return True
+
+    return False
+
+
+def _can_access_messages(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
+    role = _message_user_role(user)
+
+    if role == "admin":
+        return True
+
+    if role == "organizer":
+        return _message_identity_matches_event_organizer(app, user)
+
+    if role == "vendor":
+        return _message_identity_matches_app_vendor(app, user)
+
+    # Unknown/missing roles should not receive conversation data. This is safer
+    # than falling through to broad email matching.
     return False
 
 
@@ -3426,10 +3497,10 @@ def delete_vendor_application(
 @router.get("/messages/inbox")
 def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
     user = _extract_user_from_token(authorization)
-    user_email = _extract_vendor_email_from_user(user)
-    user_role = _as_str(user.get("role")).lower()
+    user_email = _message_user_email(user)
+    user_role = _message_user_role(user)
 
-    if not user_email and user_role != "organizer":
+    if user_role not in {"organizer", "vendor", "admin"}:
         return {"conversations": []}
 
     conversations = []
@@ -3475,7 +3546,7 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             or f"Event #{app.get('event_id')}"
         )
 
-        if user_role != "organizer" and user_email not in {vendor_email, organizer_email}:
+        if not _can_access_messages(app, user):
             continue
 
         last_message = messages[-1]
@@ -3535,19 +3606,29 @@ def mark_messages_read(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _extract_user_from_token(authorization)
-    user_email = _extract_vendor_email_from_user(user)
+    user_email = _message_user_email(user)
+    user_role = _message_user_role(user)
 
     app = _get_application_or_404(app_id)
+
+    if not _can_access_messages(app, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     messages = app.get("messages")
     if not isinstance(messages, list):
         return {"success": True}
 
+    read_markers = [marker for marker in (user_email, user_role) if marker]
     for msg in messages:
         read_by = msg.get("read_by", [])
-        if user_email not in read_by:
-            read_by.append(user_email)
-            msg["read_by"] = read_by
+        if not isinstance(read_by, list):
+            read_by = []
+        normalized_existing = {str(v).strip().lower() for v in read_by}
+        for marker in read_markers:
+            if marker not in normalized_existing:
+                read_by.append(marker)
+                normalized_existing.add(marker)
+        msg["read_by"] = read_by
 
     _save_store()
     return {"success": True}
