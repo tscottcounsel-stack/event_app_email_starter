@@ -148,6 +148,17 @@ class EventCreate(BaseModel):
     imageUrls: Optional[list[str]] = None
     videoUrls: Optional[list[str]] = None
 
+    # Organizer-selected needs. These fields are intentionally accepted here
+    # because the create-event frontend sends them and the event serializer
+    # already persists these aliases to the runtime store. Without these fields,
+    # Pydantic extra=ignore drops them and direct payload access can raise a
+    # 500 during POST /organizer/events.
+    desired_vendor_categories: Optional[list[str]] = None
+    desiredVendorCategories: Optional[list[str]] = None
+    vendor_categories_needed: Optional[list[str]] = None
+    looking_for_categories: Optional[list[str]] = None
+    vendor_categories: Optional[list[str]] = None
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1918,17 +1929,28 @@ def organizer_create_event(
         "tiktok_url": payload.tiktok_url or payload.tiktokUrl,
         "website_url": payload.website_url or payload.websiteUrl,
     })
+    selected_service_categories = (
+        payload.service_categories
+        or payload.serviceCategories
+        or payload.desired_vendor_categories
+        or payload.desiredVendorCategories
+        or payload.vendor_categories_needed
+        or payload.looking_for_categories
+        or payload.vendor_categories
+        or []
+    )
+
     _apply_event_kind_aliases(
         serialized,
         kind=payload.event_kind or payload.eventKind,
         event_type=payload.event_type or payload.eventType or payload.event_category or payload.eventCategory,
-        service_categories=payload.service_categories or payload.serviceCategories or payload.desired_vendor_categories or payload.desiredVendorCategories,
+        service_categories=selected_service_categories,
         booking_flow_label=payload.booking_flow_label,
         user=user,
         mode=create_mode,
     )
-    if payload.service_categories or payload.serviceCategories:
-        _apply_event_needs_aliases(serialized, _unique_categories([payload.service_categories or payload.serviceCategories]))
+    if selected_service_categories:
+        _apply_event_needs_aliases(serialized, _unique_categories([selected_service_categories]))
     _persist_public_listing_fields(int(event.id), serialized)
     serialized = _sync_event_to_store(serialized, user)
     return serialized
