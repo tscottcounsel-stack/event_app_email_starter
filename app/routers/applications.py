@@ -2073,6 +2073,55 @@ def _compute_requirement_status(app: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
+def _normalize_service_quote_payload(raw: Any, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    quote = raw if isinstance(raw, dict) else {}
+
+    def q(*keys: str) -> Any:
+        for key in keys:
+            if key in quote:
+                return quote.get(key)
+            if key in payload:
+                return payload.get(key)
+        return None
+
+    quote_amount = q("quote_amount", "quoteAmount")
+    deposit_amount = q("deposit_amount", "depositAmount")
+    quote_amount_cents = _price_to_cents(quote_amount)
+    deposit_amount_cents = _price_to_cents(deposit_amount)
+
+    quote_file_raw = q("quote_file", "quoteFile")
+    quote_file = quote_file_raw if isinstance(quote_file_raw, dict) else None
+
+    status = _as_str(q("status", "service_quote_status", "serviceQuoteStatus")).lower() or "draft"
+    if status not in {"draft", "submitted", "approved", "rejected", "needs_changes"}:
+        status = "draft"
+
+    now = _now_iso()
+    submitted_at = _as_str(q("submitted_at", "submittedAt"))
+    if status == "submitted" and not submitted_at:
+        submitted_at = now
+
+    normalized = {
+        "package_title": _as_str(q("package_title", "packageTitle")),
+        "quote_amount": _as_str(quote_amount),
+        "quote_amount_cents": quote_amount_cents,
+        "deposit_amount": _as_str(deposit_amount),
+        "deposit_amount_cents": deposit_amount_cents,
+        "hours_included": _as_str(q("hours_included", "hoursIncluded")),
+        "overtime_rate": _as_str(q("overtime_rate", "overtimeRate")),
+        "equipment_included": _as_str(q("equipment_included", "equipmentIncluded")),
+        "special_requirements": _as_str(q("special_requirements", "specialRequirements")),
+        "notes_to_organizer": _as_str(q("notes_to_organizer", "notesToOrganizer", "notes")),
+        "quote_file": quote_file,
+        "status": status,
+        "submitted_at": submitted_at,
+        "updated_at": now,
+    }
+    return normalized
+
+
+
 def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
     category = _persist_booth_category(app)
     cents = _persist_resolved_booth_price(app)
@@ -2123,6 +2172,13 @@ def _serialize_application(app: Dict[str, Any]) -> Dict[str, Any]:
 
     _merge_vendor_doc_vault(enriched)
     enriched["document_requests"] = _normalize_document_requests(enriched.get("document_requests"))
+
+    if isinstance(enriched.get("service_quote"), dict):
+        enriched["service_quote"] = _normalize_service_quote_payload(enriched.get("service_quote"), enriched)
+        enriched["serviceQuote"] = enriched["service_quote"]
+    elif isinstance(enriched.get("serviceQuote"), dict):
+        enriched["service_quote"] = _normalize_service_quote_payload(enriched.get("serviceQuote"), enriched)
+        enriched["serviceQuote"] = enriched["service_quote"]
 
     requirement_status = _compute_requirement_status(enriched)
     enriched["booth_selected"] = requirement_status["booth_selected"]
@@ -2218,6 +2274,14 @@ def _is_locked_for_vendor_edits(
             "documents",
             "docs",
             "notes",
+            "service_quote",
+            "serviceQuote",
+            "service_quote_status",
+            "quote_submitted",
+            "quote_amount",
+            "quote_amount_cents",
+            "deposit_amount",
+            "deposit_amount_cents",
             "vendor_category",
             "vendor_categories",
         }
@@ -2630,6 +2694,20 @@ def vendor_update_application(app_id: str, payload: Dict[str, Any] = Body(...)) 
     if "notes" in payload:
         app["notes"] = payload.get("notes") or ""
 
+    service_quote_raw = payload.get("service_quote") or payload.get("serviceQuote")
+    if isinstance(service_quote_raw, dict):
+        service_quote = _normalize_service_quote_payload(service_quote_raw, payload)
+        app["service_quote"] = service_quote
+        app["serviceQuote"] = service_quote
+        app["service_quote_status"] = service_quote.get("status")
+        app["quote_submitted"] = service_quote.get("status") == "submitted"
+        app["quote_amount"] = service_quote.get("quote_amount") or ""
+        app["quote_amount_cents"] = service_quote.get("quote_amount_cents")
+        app["deposit_amount"] = service_quote.get("deposit_amount") or ""
+        app["deposit_amount_cents"] = service_quote.get("deposit_amount_cents")
+        if service_quote.get("notes_to_organizer"):
+            app["notes"] = service_quote.get("notes_to_organizer") or app.get("notes") or ""
+
     if "documents" in payload and isinstance(payload.get("documents"), dict):
         normalized_docs = _normalize_documents_payload(payload["documents"])
         app["documents"] = normalized_docs
@@ -2904,6 +2982,13 @@ def create_vendor_application(
             # If a draft already exists, do not return it before applying the
             # incoming booth selection payload.
             _apply_booth_payload(app, payload)
+            service_quote_raw = payload.get("service_quote") or payload.get("serviceQuote")
+            if isinstance(service_quote_raw, dict):
+                service_quote = _normalize_service_quote_payload(service_quote_raw, payload)
+                app["service_quote"] = service_quote
+                app["serviceQuote"] = service_quote
+                app["service_quote_status"] = service_quote.get("status")
+                app["quote_submitted"] = service_quote.get("status") == "submitted"
 
             _persist_resolved_booth_price(app)
             if app.get("resolved_price_cents"):
