@@ -532,19 +532,57 @@ async def admin_accounts_create(
     return {"ok": True, "account": account}
 
 
-@router.delete("/accounts/{user_id}")
+def _resolve_admin_delete_account(user_key: str) -> Dict[str, Any]:
+    """Resolve an admin account delete target by auth id, email, or username.
+
+    The Admin dashboard normally sends the numeric auth id. This fallback keeps
+    Delete Everywhere working even if an account card is rendered from a row
+    that carries email/username but not a stable numeric id.
+    """
+    key = _safe_str(user_key)
+    key_lower = key.lower()
+    accounts = list_all_users()
+
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing account id or email.")
+
+    for account in accounts:
+        if _safe_str(account.get("id")) == key:
+            return account
+
+    for account in accounts:
+        if _safe_lower(account.get("email")) == key_lower:
+            return account
+
+    for account in accounts:
+        if _safe_lower(account.get("username")) == key_lower:
+            return account
+
+    raise HTTPException(status_code=404, detail="Account not found.")
+
+
+@router.delete("/accounts/{user_key}")
 async def admin_accounts_delete(
-    user_id: int,
+    user_key: str,
     user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    if int(user.get("id") or 0) == int(user_id):
+    account = _resolve_admin_delete_account(user_key)
+    target_id = int(account.get("id") or 0)
+    current_id = int(user.get("id") or user.get("user_id") or 0)
+
+    if current_id and current_id == target_id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+
+    target_email = _safe_lower(account.get("email"))
+    current_email = _safe_lower(user.get("email") or user.get("sub"))
+    if target_email and current_email and target_email == current_email:
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
 
     # Delete the auth record first, then aggressively remove every public/profile
     # surface tied to that account. This makes the Admin dashboard Delete button
     # mean "remove this user everywhere," not just "remove login access."
-    deleted = admin_delete_user(user_id)
+    deleted = admin_delete_user(target_id)
     cleanup = _cascade_delete_account_data(account=deleted, db=db)
 
     return {"ok": True, "account": deleted, "cleanup": cleanup}
