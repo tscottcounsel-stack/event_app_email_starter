@@ -4,9 +4,14 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func
 
+from app.db import SessionLocal
+from app.models.profile import Profile
+from app.models.event import Event
+from app.store import _EVENTS, save_store
 from app.routers.auth import _USERS, _USERS_BY_EMAIL, _persist_users, get_current_user
 
 try:
@@ -30,6 +35,153 @@ class PortalSessionRequest(BaseModel):
     return_url: str
 
 
+class ConfirmCheckoutSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    session_id: str
+
+
+class ConnectOnboardingLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    account_id: Optional[str] = None
+    refresh_url: str
+    return_url: str
+
+
+class PrivateEventWorkspaceCheckoutRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    event_id: Optional[int] = None
+    success_url: str
+    cancel_url: str
+
+
+PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY = "private_event_workspace"
+PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS = 2900
+PRO_ORGANIZER_CANONICAL_PLAN = "enterprise_organizer"
+PRO_ORGANIZER_ALIASES = {"enterprise_organizer", "pro_organizer", "organizer_pro"}
+
+
+def _get_profile_for_user(user: Dict[str, Any]) -> Optional[Profile]:
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+            db.commit()
+            db.refresh(profile)
+        db.expunge(profile)
+        return profile
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Stripe Connect profile lookup skipped:", str(exc))
+        return None
+    finally:
+        db.close()
+
+
+def _get_connect_account_id(user: Dict[str, Any]) -> str:
+    direct = str(
+        user.get("stripe_connect_account_id")
+        or user.get("stripe_account_id")
+        or user.get("stripeAccountId")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or SessionLocal is None:
+        return ""
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+        if not profile:
+            return ""
+        data = profile.data if isinstance(profile.data, dict) else {}
+        return str(
+            data.get("stripe_connect_account_id")
+            or data.get("stripe_account_id")
+            or data.get("stripeAccountId")
+            or ""
+        ).strip()
+    except Exception as exc:
+        print("⚠️ Stripe Connect account lookup skipped:", str(exc))
+        return ""
+    finally:
+        db.close()
+
+
+def _save_connect_account_id(user: Dict[str, Any], account_id: str) -> None:
+    clean = str(account_id or "").strip()
+    if not clean:
+        return
+
+    user["stripe_connect_account_id"] = clean
+    user["stripe_account_id"] = clean
+
+    try:
+        _save_user_updates(user)
+    except Exception as exc:
+        print("⚠️ Auth user Stripe Connect sync skipped:", str(exc))
+
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .one_or_none()
+        )
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+        profile.data = {
+            **data,
+            "stripe_connect_account_id": clean,
+            "stripe_account_id": clean,
+            "stripe_connect_status": data.get("stripe_connect_status") or "created",
+            "stripe_connect_updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Profile Stripe Connect sync skipped:", str(exc))
+    finally:
+        db.close()
+
+
+def _stripe_connect_account_status(account: Any) -> Dict[str, Any]:
+    return {
+        "charges_enabled": bool(_stripe_get(account, "charges_enabled", False)),
+        "payouts_enabled": bool(_stripe_get(account, "payouts_enabled", False)),
+        "details_submitted": bool(_stripe_get(account, "details_submitted", False)),
+        "requirements_due": list((_stripe_get(_stripe_get(account, "requirements", {}) or {}, "currently_due", []) or [])),
+    }
+
+
 def _require_stripe() -> Any:
     if stripe is None:
         raise HTTPException(status_code=500, detail="Stripe SDK missing. Install stripe.")
@@ -42,11 +194,45 @@ def _require_stripe() -> Any:
     return stripe
 
 
-def _plan_to_price_id(plan: str) -> str:
+def _canonical_plan_key(plan: str) -> str:
     normalized = str(plan or "").strip().lower()
+    if normalized in PRO_ORGANIZER_ALIASES:
+        return PRO_ORGANIZER_CANONICAL_PLAN
+    return normalized
+
+
+def _private_workspace_amount_cents() -> int:
+    raw = (
+        os.getenv("STRIPE_PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS")
+        or os.getenv("PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS")
+        or ""
+    ).strip()
+    try:
+        value = int(raw) if raw else PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
+    except Exception:
+        value = PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
+    return max(50, value)
+
+
+def _private_workspace_price_id() -> str:
+    return (
+        os.getenv("STRIPE_PRICE_PRIVATE_EVENT_WORKSPACE")
+        or os.getenv("STRIPE_PRIVATE_EVENT_WORKSPACE_PRICE_ID")
+        or ""
+    ).strip()
+
+
+def _plan_to_price_id(plan: str) -> str:
+    normalized = _canonical_plan_key(plan)
+    organizer_price = (
+        os.getenv("STRIPE_PRICE_PRO_ORGANIZER")
+        or os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER")
+        or ""
+    ).strip()
     mapping = {
         "pro_vendor": (os.getenv("STRIPE_PRICE_PRO_VENDOR") or "").strip(),
-        "enterprise_organizer": (os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER") or "").strip(),
+        PRO_ORGANIZER_CANONICAL_PLAN: organizer_price,
+        "pro_organizer": organizer_price,
     }
     price_id = mapping.get(normalized, "")
     if not price_id:
@@ -56,9 +242,16 @@ def _plan_to_price_id(plan: str) -> str:
 
 def _price_id_to_plan(price_id: Optional[str]) -> str:
     price_id = str(price_id or "").strip()
+    organizer_price = (
+        os.getenv("STRIPE_PRICE_PRO_ORGANIZER")
+        or os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER")
+        or ""
+    ).strip()
     mapping = {
         (os.getenv("STRIPE_PRICE_PRO_VENDOR") or "").strip(): "pro_vendor",
-        (os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER") or "").strip(): "enterprise_organizer",
+        organizer_price: PRO_ORGANIZER_CANONICAL_PLAN,
+        (os.getenv("STRIPE_PRICE_ENTERPRISE_ORGANIZER") or "").strip(): PRO_ORGANIZER_CANONICAL_PLAN,
+        (os.getenv("STRIPE_PRICE_PRO_ORGANIZER") or "").strip(): PRO_ORGANIZER_CANONICAL_PLAN,
     }
     return mapping.get(price_id, "starter")
 
@@ -72,7 +265,49 @@ def _to_iso(ts: Any) -> Optional[str]:
         return None
 
 
-def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _profile_user_from_postgres(*, email: Optional[str] = None, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    normalized_email = str(email or "").strip().lower()
+    normalized_role = str(role or "").strip().lower()
+    if not normalized_email or SessionLocal is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        query = db.query(Profile).filter(func.lower(Profile.email) == normalized_email)
+        if normalized_role in {"vendor", "organizer"}:
+            query = query.filter(Profile.role == normalized_role)
+        profile = query.order_by(Profile.updated_at.desc()).first()
+        if profile is None:
+            return None
+
+        data = profile.data if isinstance(profile.data, dict) else {}
+        plan = str(profile.subscription_plan or data.get("subscription_plan") or data.get("plan") or "starter").strip().lower()
+        status_value = str(profile.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus") or "inactive").strip().lower()
+        user: Dict[str, Any] = {
+            "id": data.get("user_id") or data.get("id"),
+            "email": normalized_email,
+            "role": profile.role,
+            "full_name": data.get("full_name") or data.get("contactName") or data.get("contact_name"),
+            "plan": plan,
+            "subscription_plan": plan,
+            "subscription_status": status_value,
+            "subscriptionStatus": status_value,
+            "visibility_tier": profile.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier"),
+            "featured": bool(profile.featured or data.get("featured")),
+            "promoted": bool(profile.promoted or data.get("promoted")),
+        }
+        for key in ("stripe_customer_id", "stripe_subscription_id", "current_period_end", "cancel_at_period_end"):
+            if data.get(key) not in (None, ""):
+                user[key] = data.get(key)
+        return user
+    except Exception as exc:
+        print("⚠️ Billing profile lookup skipped:", str(exc))
+        return None
+    finally:
+        db.close()
+
+
+def _lookup_user(*, user_id: Any = None, email: Optional[str] = None, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if user_id not in (None, ""):
         try:
             found = _USERS.get(int(user_id))
@@ -89,12 +324,83 @@ def _lookup_user(*, user_id: Any = None, email: Optional[str] = None) -> Optiona
             if isinstance(found, dict):
                 return found
 
-    return None
+    return _profile_user_from_postgres(email=email, role=role)
 
+
+def _sync_profile_subscription_from_user(user: Dict[str, Any]) -> None:
+    """Mirror billing subscription state into the persistent Profile row.
+
+    The auth user JSON is still used for login/session data, but marketplace
+    status badges and admin tools read Profile from Postgres. This function keeps
+    those two layers aligned without touching verification fields.
+    """
+    email = str(user.get("email") or "").strip().lower()
+    role = str(user.get("role") or "").strip().lower()
+
+    if not email or role not in {"vendor", "organizer"} or SessionLocal is None:
+        return
+
+    plan = str(user.get("plan") or "starter").strip().lower()
+    status = str(user.get("subscription_status") or "inactive").strip().lower()
+    is_active_paid = status in {"active", "trialing", "paid"}
+    is_premium_plan = (
+        (role == "vendor" and plan == "pro_vendor")
+        or (role == "organizer" and plan == "enterprise_organizer")
+        or any(token in plan for token in ["premium", "pro", "growth", "enterprise"])
+    )
+
+    db = SessionLocal()
+    try:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .one_or_none()
+        )
+
+        if profile is None:
+            profile = Profile(email=email, role=role)
+            db.add(profile)
+
+        existing_data = profile.data if isinstance(profile.data, dict) else {}
+        subscription_data = {
+            "email": email,
+            "plan": plan,
+            "subscription_plan": plan,
+            "subscription_status": status,
+            "subscriptionStatus": status,
+        }
+        for key in (
+            "id",
+            "user_id",
+            "stripe_customer_id",
+            "stripe_subscription_id",
+            "current_period_end",
+            "cancel_at_period_end",
+        ):
+            source_key = "id" if key == "user_id" else key
+            value = user.get(source_key)
+            if value not in (None, ""):
+                subscription_data[key] = value
+        profile.data = {**existing_data, **subscription_data}
+        profile.subscription_plan = plan
+        profile.subscription_status = status
+
+        # Billing subscriptions do not control marketplace placement.
+        # Premium placement is an admin-controlled profile field handled by /vendors/admin/set-premium.
+        if profile.visibility_tier in (None, ""):
+            profile.visibility_tier = "standard"
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("⚠️ Profile subscription sync skipped:", str(exc))
+    finally:
+        db.close()
 
 def _save_user_updates(user: Dict[str, Any]) -> None:
     user["updated_at"] = int(datetime.now(tz=timezone.utc).timestamp())
     _persist_users()
+    _sync_profile_subscription_from_user(user)
 
 
 def _set_customer_fields(
@@ -123,7 +429,10 @@ def _apply_subscription_state(
     normalized_status = str(subscription_status or "inactive").strip().lower()
 
     user["plan"] = normalized_plan
+    user["subscription_plan"] = normalized_plan
+    user["subscriptionPlan"] = normalized_plan
     user["subscription_status"] = normalized_status
+    user["subscriptionStatus"] = normalized_status
     user["stripe_customer_id"] = customer_id or user.get("stripe_customer_id")
     user["stripe_subscription_id"] = subscription_id
     user["current_period_end"] = _to_iso(current_period_end)
@@ -131,9 +440,42 @@ def _apply_subscription_state(
 
     if normalized_status in {"canceled", "cancelled", "unpaid", "incomplete_expired", "inactive"}:
         user["plan"] = "starter"
+        user["subscription_plan"] = "starter"
+        user["subscriptionPlan"] = "starter"
         user["subscription_status"] = "inactive"
+        user["subscriptionStatus"] = "inactive"
         user["stripe_subscription_id"] = None
         user["cancel_at_period_end"] = False
+
+    _save_user_updates(user)
+
+
+def _force_paid_checkout_premium_state(user: Dict[str, Any], *, plan: str) -> None:
+    """Immediately persist paid checkout access for premium subscriptions.
+
+    Webhooks can arrive late or fail during early production testing. After a
+    checkout session is confirmed complete, this mirrors the premium state into
+    both the auth user object and the Profile row so /me, /vendors/me, badges,
+    and feature gates all agree after refresh/login.
+    """
+    role = str(user.get("role") or "").strip().lower()
+    normalized_plan = str(plan or user.get("plan") or "").strip().lower()
+
+    if role == "vendor":
+        normalized_plan = "pro_vendor"
+        # Do not auto-grant public premium placement from billing.
+        user["visibility_tier"] = user.get("visibility_tier") or "standard"
+        user["visibilityTier"] = user.get("visibilityTier") or user["visibility_tier"]
+    elif role == "organizer":
+        normalized_plan = "enterprise_organizer"
+    else:
+        return
+
+    user["plan"] = normalized_plan
+    user["subscription_plan"] = normalized_plan
+    user["subscriptionPlan"] = normalized_plan
+    user["subscription_status"] = "active"
+    user["subscriptionStatus"] = "active"
 
     _save_user_updates(user)
 
@@ -179,6 +521,234 @@ def _extract_metadata(obj: Any) -> Dict[str, Any]:
         return {}
 
 
+def _is_verification_checkout(metadata: Dict[str, Any]) -> bool:
+    payment_type = str(metadata.get("payment_type") or "").strip().lower()
+    verification_flag = str(metadata.get("verification") or "").strip().lower()
+    purpose = str(metadata.get("purpose") or "").strip().lower()
+
+    return (
+        payment_type == "verification_fee"
+        or verification_flag == "true"
+        or purpose == "verification"
+    )
+
+
+def _mark_verification_checkout_paid(session: Any) -> bool:
+    """Route verification-fee Stripe events to verifications.py, not subscription billing.
+
+    This prevents a one-time verification payment from being treated as a paid
+    subscription and accidentally granting premium vendor/organizer placement.
+    """
+    metadata = _extract_metadata(session)
+    if not _is_verification_checkout(metadata):
+        return False
+
+    email = str(metadata.get("email") or "").strip().lower()
+    role = str(metadata.get("role") or "vendor").strip().lower()
+    if role not in {"vendor", "organizer"}:
+        role = "vendor"
+
+    if not email:
+        customer_details = _stripe_get(session, "customer_details", {}) or {}
+        if isinstance(customer_details, dict):
+            email = str(customer_details.get("email") or "").strip().lower()
+        else:
+            email = str(getattr(customer_details, "email", "") or "").strip().lower()
+
+    if not email:
+        print("⚠️ Verification checkout ignored: missing email metadata")
+        return True
+
+    payment_status = str(_stripe_get(session, "payment_status", "") or "").strip().lower()
+    session_status = str(_stripe_get(session, "status", "") or "").strip().lower()
+    if payment_status != "paid" and session_status != "complete":
+        print("⚠️ Verification checkout not complete yet", {"payment_status": payment_status, "status": session_status})
+        return True
+
+    session_id = str(_stripe_get(session, "id", "") or "").strip()
+    payment_intent_id = str(_stripe_get(session, "payment_intent", "") or "").strip()
+    amount_paid = _stripe_get(session, "amount_total", None)
+
+    try:
+        from app.routers.verifications import mark_verification_paid
+
+        mark_verification_paid(
+            email=email,
+            role=role,
+            stripe_session_id=session_id,
+            stripe_payment_intent_id=payment_intent_id,
+            amount_paid=amount_paid,
+        )
+        print("✅ Verification payment synced without granting premium", {"email": email, "role": role, "session_id": session_id})
+    except Exception as exc:
+        print("🔥 Verification checkout sync failed:", str(exc))
+
+    return True
+
+
+def _is_private_workspace_checkout(metadata: Dict[str, Any]) -> bool:
+    payment_type = str(metadata.get("payment_type") or "").strip().lower()
+    product = str(metadata.get("product") or metadata.get("product_key") or "").strip().lower()
+    purpose = str(metadata.get("purpose") or "").strip().lower()
+    return (
+        payment_type == PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY
+        or product == PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY
+        or purpose == PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY
+    )
+
+
+def _event_store_payload(event_id: Any) -> Dict[str, Any]:
+    try:
+        eid = int(event_id or 0)
+    except Exception:
+        eid = 0
+    if not eid:
+        return {}
+
+    payload = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
+    if not payload:
+        payload = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
+    payload = dict(payload or {})
+    payload["id"] = eid
+    return payload
+
+
+def _user_is_pro_organizer(user: Dict[str, Any]) -> bool:
+    role = str(user.get("role") or "").strip().lower()
+    if role != "organizer":
+        return False
+    plan = str(user.get("subscription_plan") or user.get("subscriptionPlan") or user.get("plan") or "").strip().lower()
+    status = str(user.get("subscription_status") or user.get("subscriptionStatus") or "").strip().lower()
+    return bool(plan in PRO_ORGANIZER_ALIASES and status in {"active", "trialing", "paid", "current"})
+
+
+def _event_owned_by_user(event_id: Any, user: Dict[str, Any]) -> Optional[Event]:
+    try:
+        eid = int(event_id or 0)
+    except Exception:
+        eid = 0
+    email = str(user.get("email") or "").strip().lower()
+    if not eid or not email or SessionLocal is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        row = db.query(Event).filter(Event.id == eid).first()
+        if not row:
+            return None
+        owner_email = str(row.organizer_email or row.owner_email or "").strip().lower()
+        if owner_email and owner_email != email:
+            raise HTTPException(status_code=403, detail="Not allowed to manage this event workspace payment")
+        db.expunge(row)
+        return row
+    finally:
+        db.close()
+
+
+def _private_workspace_paid_for_event(event_id: Any) -> bool:
+    payload = _event_store_payload(event_id)
+    status = str(
+        payload.get("private_workspace_payment_status")
+        or payload.get("privateWorkspacePaymentStatus")
+        or ""
+    ).strip().lower()
+    return bool(
+        payload.get("private_workspace_paid") is True
+        or payload.get("privateWorkspacePaid") is True
+        or status == "paid"
+        or payload.get("private_workspace_included_with_pro") is True
+        or payload.get("privateWorkspaceIncludedWithPro") is True
+    )
+
+
+def _mark_private_workspace_paid(session: Any) -> bool:
+    metadata = _extract_metadata(session)
+    if not _is_private_workspace_checkout(metadata):
+        return False
+
+    payment_status = str(_stripe_get(session, "payment_status", "") or "").strip().lower()
+    session_status = str(_stripe_get(session, "status", "") or "").strip().lower()
+    if payment_status != "paid" and session_status != "complete":
+        print("⚠️ Private Event Workspace checkout not complete yet", {"payment_status": payment_status, "status": session_status})
+        return True
+
+    email = str(metadata.get("email") or "").strip().lower()
+    role = str(metadata.get("role") or "organizer").strip().lower()
+    event_id = str(metadata.get("event_id") or metadata.get("eventId") or "").strip()
+    session_id = str(_stripe_get(session, "id", "") or "").strip()
+    payment_intent_id = str(_stripe_get(session, "payment_intent", "") or "").strip()
+    amount_paid = _stripe_get(session, "amount_total", None)
+
+    if role != "organizer":
+        print("⚠️ Private Event Workspace checkout ignored: role is not organizer", {"role": role, "email": email})
+        return True
+
+    if event_id:
+        payload = _event_store_payload(event_id)
+        if payload:
+            now = datetime.now(tz=timezone.utc).isoformat()
+            payload.update({
+                "private_workspace_required": True,
+                "privateWorkspaceRequired": True,
+                "private_workspace_paid": True,
+                "privateWorkspacePaid": True,
+                "private_workspace_payment_status": "paid",
+                "privateWorkspacePaymentStatus": "paid",
+                "private_workspace_paid_at": now,
+                "privateWorkspacePaidAt": now,
+                "private_workspace_price_cents": int(amount_paid or _private_workspace_amount_cents()),
+                "privateWorkspacePriceCents": int(amount_paid or _private_workspace_amount_cents()),
+                "private_workspace_stripe_session_id": session_id,
+                "privateWorkspaceStripeSessionId": session_id,
+                "private_workspace_payment_intent_id": payment_intent_id,
+                "privateWorkspacePaymentIntentId": payment_intent_id,
+            })
+            try:
+                eid = int(event_id)
+                _EVENTS[eid] = dict(payload)
+                _EVENTS[str(eid)] = dict(payload)
+                save_store()
+            except Exception as exc:
+                print("⚠️ Private Event Workspace event-store sync failed:", str(exc))
+
+    # Also keep a lightweight account-level audit/credit trail in the organizer profile.
+    if email and SessionLocal is not None:
+        db = SessionLocal()
+        try:
+            profile = (
+                db.query(Profile)
+                .filter(func.lower(Profile.email) == email, Profile.role == "organizer")
+                .one_or_none()
+            )
+            if profile is None:
+                profile = Profile(email=email, role="organizer")
+                db.add(profile)
+
+            data = profile.data if isinstance(profile.data, dict) else {}
+            payments = list(data.get("private_event_workspace_payments") or [])
+            payments.append({
+                "event_id": event_id,
+                "stripe_session_id": session_id,
+                "payment_intent_id": payment_intent_id,
+                "amount_cents": int(amount_paid or _private_workspace_amount_cents()),
+                "paid_at": datetime.now(tz=timezone.utc).isoformat(),
+            })
+            profile.data = {
+                **data,
+                "private_event_workspace_payments": payments[-25:],
+                "last_private_event_workspace_paid_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            print("⚠️ Private Event Workspace profile sync failed:", str(exc))
+        finally:
+            db.close()
+
+    print("✅ Private Event Workspace payment synced", {"email": email, "event_id": event_id, "session_id": session_id})
+    return True
+
+
 def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
     try:
         metadata = _extract_metadata(session)
@@ -188,13 +758,13 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             client_reference_id = session.get("client_reference_id")
 
         if client_reference_id:
-            user = _lookup_user(user_id=client_reference_id)
+            user = _lookup_user(user_id=client_reference_id, role=metadata.get("role"))
             if user:
                 return user
 
         user_id = metadata.get("user_id")
         if user_id:
-            user = _lookup_user(user_id=user_id)
+            user = _lookup_user(user_id=user_id, role=metadata.get("role"))
             if user:
                 return user
 
@@ -216,7 +786,7 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
             email = metadata.get("email")
 
         if email:
-            user = _lookup_user(email=email)
+            user = _lookup_user(email=email, role=metadata.get("role"))
             if user:
                 return user
 
@@ -233,6 +803,26 @@ def _find_user_from_checkout_session(session: Any) -> Optional[Dict[str, Any]]:
 def _sync_from_subscription_object(subscription: Any) -> bool:
     metadata = _extract_metadata(subscription)
 
+    if _is_verification_checkout(metadata):
+        # Verification can now be an annual Stripe subscription. Do NOT sync it
+        # through the premium subscription pipeline, because that would overwrite
+        # plan/subscription fields or accidentally affect marketplace placement.
+        status = str(getattr(subscription, "status", None) or "").strip().lower()
+        if status in {"active", "trialing", "past_due"}:
+            try:
+                from app.routers.verifications import mark_verification_paid
+
+                mark_verification_paid(
+                    email=str(metadata.get("email") or "").strip().lower(),
+                    role=str(metadata.get("role") or "vendor").strip().lower(),
+                    stripe_session_id="",
+                    stripe_payment_intent_id=str(getattr(subscription, "id", None) or ""),
+                    amount_paid=None,
+                )
+            except Exception as exc:
+                print("🔥 Verification subscription sync failed:", str(exc))
+        return True
+
     customer_id = str(
         getattr(subscription, "customer", None) or metadata.get("customer") or ""
     ).strip() or None
@@ -241,7 +831,7 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     cancel_at_period_end = bool(getattr(subscription, "cancel_at_period_end", False))
     current_period_end = getattr(subscription, "current_period_end", None)
 
-    user = _lookup_user(user_id=metadata.get("user_id"), email=metadata.get("email"))
+    user = _lookup_user(user_id=metadata.get("user_id"), email=metadata.get("email"), role=metadata.get("role"))
 
     if user is None and customer_id:
         for candidate in _USERS.values():
@@ -267,6 +857,115 @@ def _sync_from_subscription_object(subscription: Any) -> bool:
     return True
 
 
+def _stripe_get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _ensure_success_url_has_session_id(url: str) -> str:
+    clean = str(url or "").strip()
+    if not clean or "{CHECKOUT_SESSION_ID}" in clean:
+        return clean
+    separator = "&" if "?" in clean else "?"
+    return f"{clean}{separator}upgrade=success&session_id={{CHECKOUT_SESSION_ID}}"
+
+
+def _normalize_subscription_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"active", "trialing"}:
+        return status
+    if status == "paid":
+        return "active"
+    if status in {"past_due", "unpaid", "canceled", "cancelled", "incomplete_expired", "inactive"}:
+        return "inactive"
+    return status or "inactive"
+
+
+def _apply_checkout_session_to_user(session: Any, *, user_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    stripe_sdk = _require_stripe()
+    metadata = _extract_metadata(session)
+    if _is_verification_checkout(metadata):
+        _mark_verification_checkout_paid(session)
+        raise HTTPException(status_code=400, detail="This checkout session is for verification, not a subscription upgrade")
+    if _is_private_workspace_checkout(metadata):
+        _mark_private_workspace_paid(session)
+        return {
+            "ok": True,
+            "payment_type": PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY,
+            "event_id": metadata.get("event_id") or metadata.get("eventId"),
+            "private_workspace_paid": True,
+            "privateWorkspacePaid": True,
+        }
+
+    payment_status = str(_stripe_get(session, "payment_status", "") or "").strip().lower()
+    session_status = str(_stripe_get(session, "status", "") or "").strip().lower()
+    if payment_status not in {"paid", "no_payment_required"} and session_status != "complete":
+        raise HTTPException(status_code=400, detail="Stripe checkout is not complete yet")
+
+    user = user_hint or _find_user_from_checkout_session(session)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Could not match Stripe checkout to a VendCore account")
+
+    customer_id = str(_stripe_get(session, "customer", "") or "").strip() or None
+    subscription_id = str(_stripe_get(session, "subscription", "") or "").strip() or None
+    plan = str(metadata.get("plan") or user.get("plan") or "starter").strip().lower()
+    subscription_status = "active"
+    current_period_end = None
+    cancel_at_period_end = False
+
+    if subscription_id:
+        try:
+            subscription = stripe_sdk.Subscription.retrieve(subscription_id)
+            price_id = _extract_subscription_price_id(subscription)
+            plan = _price_id_to_plan(price_id) or plan
+            subscription_status = _normalize_subscription_status(_stripe_get(subscription, "status", "active"))
+            current_period_end = _stripe_get(subscription, "current_period_end", None)
+            cancel_at_period_end = bool(_stripe_get(subscription, "cancel_at_period_end", False))
+            customer_id = str(_stripe_get(subscription, "customer", "") or customer_id or "").strip() or customer_id
+        except Exception as exc:
+            print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
+
+    if plan == "starter":
+        metadata_plan = str(metadata.get("plan") or "").strip().lower()
+        if metadata_plan in {"pro_vendor", "enterprise_organizer"}:
+            plan = metadata_plan
+        elif str(user.get("role") or "").strip().lower() == "organizer":
+            plan = "enterprise_organizer"
+        elif str(user.get("role") or "").strip().lower() == "vendor":
+            plan = "pro_vendor"
+
+    _apply_subscription_state(
+        user,
+        plan=plan,
+        subscription_status=subscription_status,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        current_period_end=current_period_end,
+        cancel_at_period_end=cancel_at_period_end,
+    )
+
+    # Checkout has been verified as complete above. Persist premium immediately
+    # so the vendor/organizer dashboard updates even before Stripe webhook retry.
+    if subscription_status in {"active", "trialing", "paid"}:
+        _force_paid_checkout_premium_state(user, plan=plan)
+
+    return {
+        "ok": True,
+        "plan": user.get("plan"),
+        "subscription_plan": user.get("subscription_plan") or user.get("plan"),
+        "subscriptionPlan": user.get("subscriptionPlan") or user.get("subscription_plan") or user.get("plan"),
+        "subscription_status": user.get("subscription_status"),
+        "subscriptionStatus": user.get("subscriptionStatus") or user.get("subscription_status"),
+        "visibility_tier": user.get("visibility_tier"),
+        "visibilityTier": user.get("visibilityTier") or user.get("visibility_tier"),
+        "featured": bool(user.get("featured")),
+        "promoted": bool(user.get("promoted")),
+        "stripe_customer_id": user.get("stripe_customer_id"),
+        "stripe_subscription_id": user.get("stripe_subscription_id"),
+    }
+
+
 @router.post("/create-checkout-session")
 def create_checkout_session(
     payload: CheckoutSessionRequest,
@@ -274,8 +973,8 @@ def create_checkout_session(
 ):
     stripe_sdk = _require_stripe()
 
-    plan = str(payload.plan or "").strip().lower()
-    if plan not in {"pro_vendor", "enterprise_organizer"}:
+    plan = _canonical_plan_key(payload.plan)
+    if plan not in {"pro_vendor", PRO_ORGANIZER_CANONICAL_PLAN}:
         raise HTTPException(status_code=400, detail="Unsupported plan")
 
     price_id = _plan_to_price_id(plan)
@@ -283,20 +982,21 @@ def create_checkout_session(
     if plan == "pro_vendor" and str(user.get("role") or "").strip().lower() != "vendor":
         raise HTTPException(status_code=403, detail="Pro Vendor checkout is only for vendor accounts")
 
-    if plan == "enterprise_organizer" and str(user.get("role") or "").strip().lower() != "organizer":
-        raise HTTPException(status_code=403, detail="Enterprise Organizer checkout is only for organizer accounts")
+    if plan == PRO_ORGANIZER_CANONICAL_PLAN and str(user.get("role") or "").strip().lower() != "organizer":
+        raise HTTPException(status_code=403, detail="Pro Organizer checkout is only for organizer accounts")
 
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role"))
     if lookup is None:
         raise HTTPException(status_code=404, detail="Account not found")
 
     session_kwargs = {
         "mode": "subscription",
-        "success_url": payload.success_url,
+        "success_url": _ensure_success_url_has_session_id(payload.success_url),
         "cancel_url": payload.cancel_url,
         "line_items": [{"price": price_id, "quantity": 1}],
         "client_reference_id": str(lookup.get("id")),
         "metadata": {
+            "payment_type": "subscription",
             "user_id": str(lookup.get("id")),
             "email": str(lookup.get("email") or ""),
             "plan": plan,
@@ -327,6 +1027,162 @@ def create_checkout_session(
     return {"ok": True, "url": session.url, "session_id": session.id}
 
 
+@router.post("/create-private-event-workspace-checkout")
+def create_private_event_workspace_checkout(
+    payload: PrivateEventWorkspaceCheckoutRequest,
+    user: dict = Depends(get_current_user),
+):
+    stripe_sdk = _require_stripe()
+
+    role = str(user.get("role") or "").strip().lower()
+    if role != "organizer":
+        raise HTTPException(status_code=403, detail="Private Event Workspace checkout is only for organizer accounts")
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role")) or user
+    if lookup is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if _user_is_pro_organizer(lookup):
+        return {
+            "ok": True,
+            "included_with_pro": True,
+            "includedWithPro": True,
+            "private_workspace_paid": True,
+            "privateWorkspacePaid": True,
+        }
+
+    event_id = payload.event_id
+    if event_id:
+        _event_owned_by_user(event_id, lookup)
+        if _private_workspace_paid_for_event(event_id):
+            return {
+                "ok": True,
+                "event_id": event_id,
+                "private_workspace_paid": True,
+                "privateWorkspacePaid": True,
+            }
+
+    metadata = {
+        "payment_type": PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY,
+        "product": PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY,
+        "purpose": PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY,
+        "user_id": str(lookup.get("id") or ""),
+        "email": str(lookup.get("email") or user.get("email") or ""),
+        "role": "organizer",
+        "event_id": str(event_id or ""),
+        "amount_cents": str(_private_workspace_amount_cents()),
+    }
+
+    price_id = _private_workspace_price_id()
+    if price_id:
+        line_item = {"price": price_id, "quantity": 1}
+    else:
+        line_item = {
+            "price_data": {
+                "currency": "usd",
+                "unit_amount": _private_workspace_amount_cents(),
+                "product_data": {
+                    "name": "Private Event Workspace",
+                    "description": "One-time workspace for weddings, reunions, private parties, and service-provider planning.",
+                },
+            },
+            "quantity": 1,
+        }
+
+    session_kwargs = {
+        "mode": "payment",
+        "success_url": _ensure_success_url_has_session_id(payload.success_url),
+        "cancel_url": payload.cancel_url,
+        "line_items": [line_item],
+        "client_reference_id": str(lookup.get("id") or ""),
+        "metadata": metadata,
+        "payment_intent_data": {"metadata": metadata},
+        "allow_promotion_codes": True,
+    }
+
+    existing_customer_id = str(lookup.get("stripe_customer_id") or "").strip()
+    if existing_customer_id:
+        session_kwargs["customer"] = existing_customer_id
+    else:
+        session_kwargs["customer_email"] = str(lookup.get("email") or user.get("email") or "")
+
+    try:
+        session = stripe_sdk.checkout.Session.create(**session_kwargs)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe checkout session failed: {exc}")
+
+    return {
+        "ok": True,
+        "url": session.url,
+        "session_id": session.id,
+        "event_id": event_id,
+        "amount_cents": _private_workspace_amount_cents(),
+    }
+
+
+@router.get("/private-event-workspace/status")
+def private_event_workspace_status(
+    event_id: Optional[int] = Query(default=None),
+    user: dict = Depends(get_current_user),
+):
+    role = str(user.get("role") or "").strip().lower()
+    if role != "organizer":
+        raise HTTPException(status_code=403, detail="Private Event Workspace status is only for organizer accounts")
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role")) or user
+    included = _user_is_pro_organizer(lookup)
+    paid = bool(included)
+
+    if event_id:
+        _event_owned_by_user(event_id, lookup)
+        paid = paid or _private_workspace_paid_for_event(event_id)
+
+    return {
+        "ok": True,
+        "event_id": event_id,
+        "amount_cents": _private_workspace_amount_cents(),
+        "included_with_pro": included,
+        "includedWithPro": included,
+        "private_workspace_paid": paid,
+        "privateWorkspacePaid": paid,
+    }
+
+
+@router.post("/confirm-checkout-session")
+def confirm_checkout_session(
+    payload: ConfirmCheckoutSessionRequest,
+    user: dict = Depends(get_current_user),
+):
+    stripe_sdk = _require_stripe()
+    session_id = str(payload.session_id or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    try:
+        session = stripe_sdk.checkout.Session.retrieve(session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe checkout lookup failed: {exc}")
+
+    metadata = _extract_metadata(session)
+    session_email = str(metadata.get("email") or _stripe_get(session, "customer_email", "") or "").strip().lower()
+    current_email = str(user.get("email") or "").strip().lower()
+    if session_email and current_email and session_email != current_email:
+        raise HTTPException(status_code=403, detail="This checkout session belongs to a different account")
+
+    if _is_private_workspace_checkout(metadata):
+        _mark_private_workspace_paid(session)
+        return {
+            "ok": True,
+            "payment_type": PRIVATE_EVENT_WORKSPACE_PRODUCT_KEY,
+            "event_id": metadata.get("event_id") or metadata.get("eventId"),
+            "private_workspace_paid": True,
+            "privateWorkspacePaid": True,
+        }
+
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role")) or user
+    return _apply_checkout_session_to_user(session, user_hint=lookup)
+
+
 @router.post("/create-portal-session")
 def create_portal_session(
     payload: PortalSessionRequest,
@@ -334,7 +1190,7 @@ def create_portal_session(
 ):
     stripe_sdk = _require_stripe()
 
-    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"))
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role"))
     if lookup is None:
         raise HTTPException(status_code=404, detail="Account not found")
 
@@ -351,6 +1207,315 @@ def create_portal_session(
         raise HTTPException(status_code=400, detail=f"Stripe billing portal failed: {exc}")
 
     return {"ok": True, "url": session.url}
+
+
+
+def _subscription_status_payload(lookup: Dict[str, Any], *, stripe_error: str = "") -> Dict[str, Any]:
+    plan = str(lookup.get("subscription_plan") or lookup.get("subscriptionPlan") or lookup.get("plan") or "starter").strip().lower()
+    status_value = str(lookup.get("subscription_status") or lookup.get("subscriptionStatus") or "inactive").strip().lower()
+    if status_value == "paid":
+        status_value = "active"
+
+    cancel_at_period_end = bool(lookup.get("cancel_at_period_end") or lookup.get("cancelAtPeriodEnd"))
+    current_period_end = lookup.get("current_period_end") or lookup.get("currentPeriodEnd")
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+    customer_id = str(lookup.get("stripe_customer_id") or lookup.get("stripeCustomerId") or "").strip()
+
+    is_paid_plan = plan not in {"", "starter", "free", "inactive"}
+    is_active = status_value in {"active", "trialing", "paid"}
+
+    return {
+        "ok": True,
+        "plan": plan or "starter",
+        "subscription_plan": plan or "starter",
+        "subscriptionPlan": plan or "starter",
+        "subscription_status": status_value or "inactive",
+        "subscriptionStatus": status_value or "inactive",
+        "active": bool(is_active and is_paid_plan),
+        "is_paid_plan": bool(is_paid_plan),
+        "cancel_at_period_end": cancel_at_period_end,
+        "cancelAtPeriodEnd": cancel_at_period_end,
+        "current_period_end": current_period_end,
+        "currentPeriodEnd": current_period_end,
+        "stripe_subscription_id": subscription_id or None,
+        "stripeSubscriptionId": subscription_id or None,
+        "stripe_customer_id": customer_id or None,
+        "stripeCustomerId": customer_id or None,
+        "billing_portal_available": bool(customer_id),
+        "stripe_error": stripe_error,
+    }
+
+
+def _current_billing_lookup(user: Dict[str, Any]) -> Dict[str, Any]:
+    lookup = _lookup_user(user_id=user.get("id"), email=user.get("email"), role=user.get("role"))
+    if lookup is None:
+        lookup = dict(user or {})
+    return lookup
+
+
+def _refresh_lookup_from_stripe(lookup: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+    if not subscription_id:
+        return lookup, ""
+
+    if stripe is None or not (os.getenv("STRIPE_SECRET_KEY") or "").strip():
+        return lookup, ""
+
+    try:
+        stripe_sdk = _require_stripe()
+        subscription = stripe_sdk.Subscription.retrieve(subscription_id)
+        price_id = _extract_subscription_price_id(subscription)
+        plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+        status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "inactive"))
+        customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+        _apply_subscription_state(
+            lookup,
+            plan=plan,
+            subscription_status=status_value,
+            customer_id=customer_id,
+            subscription_id=subscription_id,
+            current_period_end=_stripe_get(subscription, "current_period_end", None),
+            cancel_at_period_end=bool(_stripe_get(subscription, "cancel_at_period_end", False)),
+        )
+        return lookup, ""
+    except Exception as exc:
+        return lookup, str(exc)
+
+
+@router.get("/subscription/status")
+def get_subscription_status(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    lookup, stripe_error = _refresh_lookup_from_stripe(lookup)
+    return _subscription_status_payload(lookup, stripe_error=stripe_error)
+
+
+@router.post("/customer-portal")
+def create_customer_portal_session(
+    payload: PortalSessionRequest,
+    user: dict = Depends(get_current_user),
+):
+    return create_portal_session(payload, user)
+
+
+@router.post("/subscription/cancel")
+def cancel_subscription(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+
+    if not subscription_id:
+        return {
+            **_subscription_status_payload(lookup),
+            "message": "No active Stripe subscription was found for this account.",
+        }
+
+    stripe_sdk = _require_stripe()
+    try:
+        subscription = stripe_sdk.Subscription.modify(subscription_id, cancel_at_period_end=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to cancel subscription: {exc}")
+
+    price_id = _extract_subscription_price_id(subscription)
+    plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+    status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "active"))
+    customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+
+    _apply_subscription_state(
+        lookup,
+        plan=plan,
+        subscription_status=status_value,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        current_period_end=_stripe_get(subscription, "current_period_end", None),
+        cancel_at_period_end=True,
+    )
+
+    return {
+        **_subscription_status_payload(lookup),
+        "message": "Subscription will cancel at the end of the current billing period.",
+    }
+
+
+@router.post("/subscription/resume")
+def resume_subscription(user: dict = Depends(get_current_user)):
+    lookup = _current_billing_lookup(user)
+    subscription_id = str(lookup.get("stripe_subscription_id") or lookup.get("stripeSubscriptionId") or "").strip()
+
+    if not subscription_id:
+        return {
+            **_subscription_status_payload(lookup),
+            "message": "No Stripe subscription was found for this account.",
+        }
+
+    stripe_sdk = _require_stripe()
+    try:
+        subscription = stripe_sdk.Subscription.modify(subscription_id, cancel_at_period_end=False)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to resume subscription: {exc}")
+
+    price_id = _extract_subscription_price_id(subscription)
+    plan = _price_id_to_plan(price_id) or str(lookup.get("plan") or "starter")
+    status_value = _normalize_subscription_status(_stripe_get(subscription, "status", "active"))
+    customer_id = str(_stripe_get(subscription, "customer", lookup.get("stripe_customer_id") or "") or "").strip() or None
+
+    _apply_subscription_state(
+        lookup,
+        plan=plan,
+        subscription_status=status_value,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        current_period_end=_stripe_get(subscription, "current_period_end", None),
+        cancel_at_period_end=False,
+    )
+
+    return {
+        **_subscription_status_payload(lookup),
+        "message": "Subscription cancellation has been removed.",
+    }
+
+
+
+
+@router.get("/connect/status")
+def get_connect_status(user: dict = Depends(get_current_user)):
+    account_id = _get_connect_account_id(user)
+    if not account_id:
+        return {"ok": True, "connected": False, "account_id": None}
+
+    stripe_sdk = _require_stripe()
+    try:
+        account = stripe_sdk.Account.retrieve(account_id)
+        return {
+            "ok": True,
+            "connected": True,
+            "account_id": account_id,
+            **_stripe_connect_account_status(account),
+        }
+    except Exception as exc:
+        return {
+            "ok": True,
+            "connected": False,
+            "account_id": account_id,
+            "error": str(exc),
+        }
+
+
+
+@router.post("/connect/account")
+def create_connect_account(user: dict = Depends(get_current_user)):
+    stripe_sdk = _require_stripe()
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
+
+    existing = _get_connect_account_id(user)
+    if existing:
+        try:
+            account = stripe_sdk.Account.retrieve(existing)
+            return {
+                "ok": True,
+                "account_id": existing,
+                "accountId": existing,
+                "connected": True,
+                **_stripe_connect_account_status(account),
+            }
+        except Exception as exc:
+            print("⚠️ Stored Stripe Connect account is invalid for current Stripe mode; creating fresh account:", str(exc))
+
+    try:
+        account = stripe_sdk.Account.create(
+            type="express",
+            email=str(user.get("email") or "").strip() or None,
+            business_type="company",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+            metadata={
+                "vendcore_user_id": str(user.get("id") or ""),
+                "vendcore_email": str(user.get("email") or ""),
+                "vendcore_role": role,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stripe Connect account creation failed: {exc}")
+
+    account_id = str(_stripe_get(account, "id", "") or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=500, detail="Stripe did not return an account ID")
+
+    _save_connect_account_id(user, account_id)
+
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "accountId": account_id,
+        "connected": True,
+        **_stripe_connect_account_status(account),
+    }
+
+
+@router.post("/connect/onboarding-link")
+def create_connect_onboarding_link(
+    payload: ConnectOnboardingLinkRequest,
+    user: dict = Depends(get_current_user),
+):
+    stripe_sdk = _require_stripe()
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Stripe Connect setup is only available to organizer accounts")
+
+    account_id = str(payload.account_id or "").strip() or _get_connect_account_id(user)
+
+    def create_fresh_account() -> str:
+        account = stripe_sdk.Account.create(
+            type="express",
+            email=str(user.get("email") or "").strip() or None,
+            business_type="company",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+            metadata={
+                "vendcore_user_id": str(user.get("id") or ""),
+                "vendcore_email": str(user.get("email") or ""),
+                "vendcore_role": role,
+            },
+        )
+        fresh_id = str(_stripe_get(account, "id", "") or "").strip()
+        if not fresh_id:
+            raise HTTPException(status_code=500, detail="Stripe did not return an account ID")
+        _save_connect_account_id(user, fresh_id)
+        return fresh_id
+
+    if account_id:
+        try:
+            stripe_sdk.Account.retrieve(account_id)
+            _save_connect_account_id(user, account_id)
+        except Exception as exc:
+            print("⚠️ Stripe Connect account invalid during onboarding; creating fresh account:", str(exc))
+            account_id = create_fresh_account()
+    else:
+        account_id = create_fresh_account()
+
+    try:
+        link = stripe_sdk.AccountLink.create(
+            account=account_id,
+            refresh_url=payload.refresh_url,
+            return_url=payload.return_url,
+            type="account_onboarding",
+        )
+    except Exception as exc:
+        message = str(exc)
+        print("🔥 Stripe onboarding failed:", message)
+        raise HTTPException(status_code=400, detail=f"Stripe onboarding failed: {message}")
+
+    return {
+        "ok": True,
+        "url": link.url,
+        "onboarding_url": link.url,
+        "account_id": account_id,
+        "accountId": account_id,
+    }
 
 
 @router.post("/webhook")
@@ -387,41 +1552,21 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         try:
-            user = _find_user_from_checkout_session(data_object)
-
-            customer_id = str(getattr(data_object, "customer", None) or "").strip() or None
-            subscription_id = str(getattr(data_object, "subscription", None) or "").strip() or None
-
-            if isinstance(data_object, dict):
-                customer_id = str(data_object.get("customer") or "").strip() or customer_id
-                subscription_id = str(data_object.get("subscription") or "").strip() or subscription_id
-
-            if user:
-                _set_customer_fields(user, customer_id=customer_id, subscription_id=subscription_id)
-                _save_user_updates(user)
-
-                if subscription_id:
-                    try:
-                        subscription = stripe_sdk.Subscription.retrieve(subscription_id)
-                        price_id = _extract_subscription_price_id(subscription)
-                        plan = _price_id_to_plan(price_id)
-
-                        if plan and plan != "starter":
-                            user["plan"] = plan
-                            user["subscription_status"] = "active"
-                            _save_user_updates(user)
-                    except Exception as exc:
-                        print("🔥 SUBSCRIPTION LOOKUP ERROR:", str(exc))
-                else:
-                    metadata = _extract_metadata(data_object)
-                    plan = str(metadata.get("plan") or "").strip().lower()
-
-                    if plan:
-                        user["plan"] = plan
-                        user["subscription_status"] = "active"
-                        _save_user_updates(user)
+            metadata = _extract_metadata(data_object)
+            if _is_verification_checkout(metadata):
+                _mark_verification_checkout_paid(data_object)
+            elif _is_private_workspace_checkout(metadata):
+                _mark_private_workspace_paid(data_object)
             else:
-                print("⚠️ No user found for checkout session")
+                subscription_id = str(_stripe_get(data_object, "subscription", "") or "").strip()
+                if not subscription_id:
+                    print("⚠️ Non-subscription checkout ignored by billing webhook")
+                else:
+                    user = _find_user_from_checkout_session(data_object)
+                    if user:
+                        _apply_checkout_session_to_user(data_object, user_hint=user)
+                    else:
+                        print("⚠️ No user found for checkout session")
         except Exception as exc:
             print("🔥 WEBHOOK ERROR (checkout.session.completed):", str(exc))
 
