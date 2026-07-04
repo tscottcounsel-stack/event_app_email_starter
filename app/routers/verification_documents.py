@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import mimetypes
 import os
+import json
+import secrets
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -361,6 +363,156 @@ def _frontend_origin(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
 
 
+def _ensure_share_token_schema(db: Session) -> None:
+    """Add random-token support for shared document links without requiring Alembic.
+
+    Older builds used /shared-documents/{grant.id}. That makes links easier to
+    enumerate. This adds document_access_grants.access_token and an index, then
+    all new share links use a high-entropy token instead of the numeric grant id.
+    """
+    try:
+        db.execute(text("ALTER TABLE document_access_grants ADD COLUMN IF NOT EXISTS access_token VARCHAR(160)"))
+        db.execute(text("ALTER TABLE document_access_grants ADD COLUMN IF NOT EXISTS granted_to_name VARCHAR(255)"))
+        db.execute(text("ALTER TABLE document_access_grants ADD COLUMN IF NOT EXISTS organization_name VARCHAR(255)"))
+        db.execute(text("ALTER TABLE document_access_grants ADD COLUMN IF NOT EXISTS public_note TEXT"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_document_access_grants_access_token ON document_access_grants(access_token)"))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Unable to prepare secure document sharing: {exc}")
+
+
+def _new_share_token(db: Session) -> str:
+    _ensure_share_token_schema(db)
+    for _ in range(10):
+        token = f"vc_share_{secrets.token_urlsafe(32)}"
+        existing = db.execute(
+            text("SELECT id FROM document_access_grants WHERE access_token = :token LIMIT 1"),
+            {"token": token},
+        ).first()
+        if existing is None:
+            return token
+    raise HTTPException(status_code=500, detail="Unable to create secure share token")
+
+
+def _grant_token(db: Session, grant: DocumentAccessGrant) -> str:
+    _ensure_share_token_schema(db)
+    direct = _safe_str(getattr(grant, "access_token", ""))
+    if direct:
+        return direct
+
+    row = db.execute(
+        text("SELECT access_token FROM document_access_grants WHERE id = :id LIMIT 1"),
+        {"id": int(grant.id)},
+    ).mappings().first()
+    existing = _safe_str(row.get("access_token") if row else "")
+    if existing:
+        try:
+            setattr(grant, "access_token", existing)
+        except Exception:
+            pass
+        return existing
+
+    token = _new_share_token(db)
+    db.execute(
+        text("UPDATE document_access_grants SET access_token = :token WHERE id = :id"),
+        {"token": token, "id": int(grant.id)},
+    )
+    try:
+        setattr(grant, "access_token", token)
+    except Exception:
+        pass
+    return token
+
+
+def _set_grant_token(db: Session, grant: DocumentAccessGrant, token: str) -> str:
+    _ensure_share_token_schema(db)
+    clean = _safe_str(token)
+    if not clean:
+        clean = _new_share_token(db)
+    db.execute(
+        text("UPDATE document_access_grants SET access_token = :token WHERE id = :id"),
+        {"token": clean, "id": int(grant.id)},
+    )
+    try:
+        setattr(grant, "access_token", clean)
+    except Exception:
+        pass
+    return clean
+
+
+def _set_grant_public_metadata(
+    db: Session,
+    grant: DocumentAccessGrant,
+    *,
+    granted_to_name: str = "",
+    organization_name: str = "",
+    public_note: str = "",
+) -> None:
+    _ensure_share_token_schema(db)
+    db.execute(
+        text(
+            """
+            UPDATE document_access_grants
+            SET granted_to_name = COALESCE(NULLIF(:granted_to_name, ''), granted_to_name),
+                organization_name = COALESCE(NULLIF(:organization_name, ''), organization_name),
+                public_note = COALESCE(NULLIF(:public_note, ''), public_note)
+            WHERE id = :id
+            """
+        ),
+        {
+            "id": int(grant.id),
+            "granted_to_name": _safe_str(granted_to_name),
+            "organization_name": _safe_str(organization_name),
+            "public_note": _safe_str(public_note),
+        },
+    )
+
+
+def _share_url(origin: str, token: str) -> str:
+    clean = _safe_str(token)
+    if not clean:
+        return ""
+    return f"{origin.rstrip('/')}/shared-documents/{clean}"
+
+
+def _metadata_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _document_public_from_mapping(row: Dict[str, Any]) -> Dict[str, Any]:
+    def iso(value: Any) -> Any:
+        try:
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+        except Exception:
+            pass
+        return value
+
+    return {
+        "id": row.get("doc_id") or row.get("id"),
+        "document_type": _safe_str(row.get("document_type")),
+        "display_name": _safe_str(row.get("display_name")),
+        "original_filename": _safe_str(row.get("original_filename")),
+        "mime_type": _safe_str(row.get("mime_type")),
+        "file_size": row.get("file_size"),
+        "status": _safe_str(row.get("status")),
+        "review_status": _safe_str(row.get("review_status")),
+        "scan_status": _safe_str(row.get("scan_status")),
+        "expires_at": iso(row.get("expires_at")),
+        "uploaded_at": iso(row.get("uploaded_at")),
+        "reviewed_at": iso(row.get("reviewed_at")),
+    }
+
+
 def _can_view_document(db: Session, row: VerificationDocument, user: Dict[str, Any]) -> bool:
     email = _safe_lower(user.get("email"))
     role = _safe_lower(user.get("role"))
@@ -576,6 +728,7 @@ def create_verification_document_view_url(document_id: int, request: Request, us
 
 @router.post("/verification-documents/{document_id}/grant-access")
 def grant_verification_document_access(document_id: int, payload: Dict[str, Any], request: Request, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    _ensure_share_token_schema(db)
     row = db.query(VerificationDocument).filter(VerificationDocument.id == int(document_id), VerificationDocument.deleted_at.is_(None)).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Verification document not found")
@@ -597,10 +750,30 @@ def grant_verification_document_access(document_id: int, payload: Dict[str, Any]
         created_by=email,
     )
     db.add(grant)
-    _audit(db, request, user, "verification_document_access_granted", row.id, {"granted_to_email": granted_to_email, "expires_at": expires_at.isoformat()})
+    db.flush()
+    token = _set_grant_token(db, grant, _new_share_token(db))
+    _set_grant_public_metadata(
+        db,
+        grant,
+        granted_to_name=payload.get("recipient_name") or payload.get("granted_to_name"),
+        organization_name=payload.get("organization_name") or payload.get("organization"),
+        public_note=payload.get("note") or payload.get("message"),
+    )
+    origin = _frontend_origin(request)
+    _audit(db, request, user, "verification_document_access_granted", row.id, {"granted_to_email": granted_to_email, "expires_at": expires_at.isoformat(), "share_token_created": True})
     db.commit()
     db.refresh(grant)
-    return {"ok": True, "grant": {"id": grant.id, "document_id": grant.document_id, "granted_to_email": grant.granted_to_email, "expires_at": grant.expires_at.isoformat()}}
+    return {
+        "ok": True,
+        "grant": {
+            "id": grant.id,
+            "document_id": grant.document_id,
+            "granted_to_email": grant.granted_to_email,
+            "expires_at": grant.expires_at.isoformat(),
+            "share_token": token,
+            "share_url": _share_url(origin, token),
+        },
+    }
 
 
 @router.get("/verification-documents/grants/mine")
@@ -619,16 +792,19 @@ def list_my_verification_document_grants(request: Request, user: dict = Depends(
         .limit(100)
         .all()
     )
+    _ensure_share_token_schema(db)
     origin = _frontend_origin(request)
-    grants = [
-        _grant_public(grant, doc, f"{origin}/shared-documents/{grant.id}")
-        for grant, doc in rows
-    ]
+    grants = []
+    for grant, doc in rows:
+        token = _grant_token(db, grant)
+        grants.append(_grant_public(grant, doc, _share_url(origin, token)))
+    db.commit()
     return {"ok": True, "grants": grants}
 
 
 @router.post("/verification-documents/share-bundle")
 def create_verification_document_share_bundle(payload: Dict[str, Any], request: Request, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    _ensure_share_token_schema(db)
     email = _safe_lower(user.get("email"))
     role = _require_role(user.get("role"))
     if not email:
@@ -656,6 +832,10 @@ def create_verification_document_share_bundle(payload: Dict[str, Any], request: 
 
     grants: List[DocumentAccessGrant] = []
     origin = _frontend_origin(request)
+    bundle_token = _new_share_token(db)
+    recipient_name = _safe_str(payload.get("recipient_name") or payload.get("organizer_name") or payload.get("granted_to_name"))
+    organization_name = _safe_str(payload.get("organization_name") or payload.get("organization") or payload.get("event_name"))
+    public_note = _safe_str(payload.get("note") or payload.get("message"))
 
     for raw_id in document_ids:
         try:
@@ -687,6 +867,8 @@ def create_verification_document_share_bundle(payload: Dict[str, Any], request: 
         )
         db.add(grant)
         db.flush()
+        _set_grant_token(db, grant, bundle_token)
+        _set_grant_public_metadata(db, grant, granted_to_name=recipient_name, organization_name=organization_name, public_note=public_note)
         grants.append(grant)
         _audit(
             db,
@@ -707,14 +889,131 @@ def create_verification_document_share_bundle(payload: Dict[str, Any], request: 
     for grant in grants:
         db.refresh(grant)
 
-    share_url = f"{origin}/shared-documents/{grants[0].id}" if grants else ""
+    share_url = _share_url(origin, bundle_token) if grants else ""
     return {
         "ok": True,
         "share_url": share_url,
-        "grants": [_grant_public(grant, None, f"{origin}/shared-documents/{grant.id}") for grant in grants],
+        "share_token": bundle_token if grants else "",
+        "grants": [_grant_public(grant, None, _share_url(origin, bundle_token)) for grant in grants],
         "expires_at": expires_at.isoformat(),
         "emailed": False,
         "message": "Secure document access created.",
+    }
+
+
+@router.get("/shared-documents/{token}")
+def get_public_shared_documents(token: str, request: Request, db: Session = Depends(get_db)):
+    _ensure_share_token_schema(db)
+    cleaned = _safe_str(token)
+    # Block old numeric IDs. Shared links must be random, unguessable tokens.
+    if not cleaned or cleaned.isdigit():
+        raise HTTPException(status_code=404, detail="Shared document link not found")
+
+    now = _now()
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                g.id AS grant_id,
+                g.document_id AS document_id,
+                g.owner_email AS grant_owner_email,
+                g.granted_to_email AS granted_to_email,
+                g.granted_to_name AS granted_to_name,
+                g.organization_name AS organization_name,
+                g.public_note AS public_note,
+                g.purpose AS purpose,
+                g.expires_at AS grant_expires_at,
+                g.access_token AS access_token,
+                d.id AS doc_id,
+                d.document_type AS document_type,
+                d.display_name AS display_name,
+                d.original_filename AS original_filename,
+                d.mime_type AS mime_type,
+                d.file_size AS file_size,
+                d.status AS status,
+                d.review_status AS review_status,
+                d.scan_status AS scan_status,
+                d.expires_at AS expires_at,
+                d.uploaded_at AS uploaded_at,
+                d.reviewed_at AS reviewed_at,
+                d.bucket AS bucket,
+                d.storage_key AS storage_key,
+                d.metadata_json AS metadata_json
+            FROM document_access_grants g
+            JOIN verification_documents d ON d.id = g.document_id
+            WHERE g.access_token = :token
+              AND g.revoked_at IS NULL
+              AND g.expires_at > :now
+              AND d.deleted_at IS NULL
+            ORDER BY d.document_type ASC, d.created_at DESC
+            """
+        ),
+        {"token": cleaned, "now": now},
+    ).mappings().all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Shared document link is expired, revoked, or unavailable")
+
+    first = rows[0]
+    documents: List[Dict[str, Any]] = []
+    for row in rows:
+        metadata = _metadata_dict(row.get("metadata_json"))
+        external_url = _safe_str(metadata.get("external_url") or metadata.get("legacy_url"))
+
+        if external_url and not external_url.startswith("legacy-profile-doc:"):
+            view_url = external_url
+            view_url_expires = None
+        else:
+            bucket = _safe_str(row.get("bucket"))
+            storage_key = _safe_str(row.get("storage_key"))
+            if not bucket or not storage_key or storage_key.startswith("legacy-profile-doc:"):
+                raise HTTPException(status_code=404, detail="Shared document file is unavailable")
+            try:
+                view_url = _s3_client().generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={
+                        "Bucket": bucket,
+                        "Key": storage_key,
+                        "ResponseContentDisposition": f'inline; filename="{_clean_filename(row.get("original_filename") or row.get("document_type") or "document")}"',
+                        "ResponseContentType": _safe_str(row.get("mime_type")) or "application/octet-stream",
+                    },
+                    ExpiresIn=DEFAULT_VIEW_URL_SECONDS,
+                )
+                view_url_expires = DEFAULT_VIEW_URL_SECONDS
+            except (BotoCoreError, ClientError) as exc:
+                raise HTTPException(status_code=500, detail=f"Unable to create S3 view URL: {exc}")
+
+        _audit(
+            db,
+            request,
+            {"email": _safe_lower(first.get("granted_to_email")), "role": "external_organizer"},
+            "shared_document_public_view_url_created",
+            int(row.get("doc_id")),
+            {"token_prefix": cleaned[:18]},
+        )
+        public_doc = _document_public_from_mapping(row)
+        public_doc["view_url"] = view_url
+        public_doc["view_url_expires_in_seconds"] = view_url_expires
+        documents.append(public_doc)
+
+    db.commit()
+
+    def iso(value: Any) -> Any:
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    return {
+        "ok": True,
+        "share": {
+            "token": cleaned,
+            "owner_email": _safe_lower(first.get("grant_owner_email")),
+            "granted_to_email": _safe_lower(first.get("granted_to_email")),
+            "granted_to_name": _safe_str(first.get("granted_to_name")),
+            "organization_name": _safe_str(first.get("organization_name")),
+            "note": _safe_str(first.get("public_note")),
+            "purpose": _safe_str(first.get("purpose")),
+            "expires_at": iso(first.get("grant_expires_at")),
+        },
+        "documents": documents,
     }
 
 
