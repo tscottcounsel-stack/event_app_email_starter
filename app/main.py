@@ -119,6 +119,7 @@ for module_name in [
     "app.routers.vendor_notifications",
     "app.routers.vendor_ai_assist",
     "app.routers.vendor_profiles",
+    "app.routers.public_vendor_safe",
     "app.routers.verification_documents",
     "app.routers.verifications",
     "app.routers.requirements",
