@@ -1108,7 +1108,145 @@ PUBLIC_VENDOR_PRIVATE_FIELDS = {
     "paymentStatus",
     "verification_payment_status",
     "verificationPaymentStatus",
+    # Public directory visitors do not need internal account workflow fields.
+    "contact_name",
+    "contactName",
+    "review_status",
+    "reviewStatus",
+    "profile_complete",
+    "profileComplete",
+    "profile_complete_percent",
+    "profileCompletePercent",
+    "subscription_plan",
+    "subscriptionPlan",
+    "subscription_status",
+    "subscriptionStatus",
 }
+
+
+PRIVATE_VERIFICATION_URL_MARKERS = (
+    "verification-documents",
+    "verification_documents",
+    "/verification/",
+    "verification_document",
+    "legacy-profile-doc:",
+    "view-url",
+    "signed_url",
+    "s3.amazonaws.com",
+    "amazonaws.com/",
+)
+
+
+def _is_private_verification_media_url(value: Any) -> bool:
+    raw = _safe_str(value).lower()
+    if not raw:
+        return False
+
+    return any(marker in raw for marker in PRIVATE_VERIFICATION_URL_MARKERS)
+
+
+def _public_media_url(value: Any) -> str:
+    raw = _safe_str(value)
+    if not raw or _is_private_verification_media_url(raw):
+        return ""
+    return raw
+
+
+def _public_media_list(value: Any, *, limit: int = 24) -> List[str]:
+    if not isinstance(value, list):
+        return []
+
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for item in value:
+        url = ""
+        if isinstance(item, str):
+            url = _public_media_url(item)
+        elif isinstance(item, dict):
+            url = _public_media_url(
+                item.get("url")
+                or item.get("secure_url")
+                or item.get("src")
+                or item.get("image_url")
+                or item.get("imageUrl")
+            )
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        cleaned.append(url)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _public_media_object_list(value: Any, *, limit: int = 24) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    cleaned: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        safe_item = dict(item)
+        for key in ("url", "secure_url", "src", "image_url", "imageUrl", "file_url", "fileUrl", "signed_url", "signedUrl"):
+            if key in safe_item:
+                new_url = _public_media_url(safe_item.get(key))
+                if new_url:
+                    safe_item[key] = new_url
+                else:
+                    safe_item.pop(key, None)
+        cleaned.append(safe_item)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _scrub_public_vendor_media_fields(safe: Dict[str, Any]) -> None:
+    """Remove verification-document media accidentally stored as profile/gallery media.
+
+    Legacy rows may have Cloudinary URLs under vendcore/verification-documents
+    inside image_urls/imageUrls. Those files are not public profile media and
+    must never be returned by public directory/profile endpoints.
+    """
+    for snake_key, camel_key in (
+        ("logo_url", "logoUrl"),
+        ("logo_data_url", "logoDataUrl"),
+        ("banner_url", "bannerUrl"),
+        ("image_url", "imageUrl"),
+        ("profile_image_url", "profileImageUrl"),
+    ):
+        value = _public_media_url(safe.get(snake_key) or safe.get(camel_key))
+        if value:
+            safe[snake_key] = value
+            safe[camel_key] = value
+        else:
+            safe.pop(snake_key, None)
+            safe.pop(camel_key, None)
+
+    public_images = _public_media_list(
+        safe.get("image_urls") or safe.get("imageUrls") or safe.get("images") or []
+    )
+    safe["image_urls"] = public_images
+    safe["imageUrls"] = public_images
+    safe["images"] = public_images
+
+    public_videos = _public_media_list(
+        safe.get("video_urls") or safe.get("videoUrls") or safe.get("videos") or [],
+        limit=12,
+    )
+    safe["video_urls"] = public_videos
+    safe["videoUrls"] = public_videos
+    safe["videos"] = public_videos
+
+    if "menuUploads" in safe or "menu_uploads" in safe:
+        menu_uploads = _public_media_object_list(safe.get("menuUploads") or safe.get("menu_uploads") or [], limit=12)
+        safe["menuUploads"] = menu_uploads
+        safe["menu_uploads"] = menu_uploads
+
+    if "offerings" in safe or "vendor_offerings" in safe:
+        offerings = _public_media_object_list(safe.get("offerings") or safe.get("vendor_offerings") or [], limit=60)
+        safe["offerings"] = offerings
+        safe["vendor_offerings"] = offerings
 
 
 def _public_document_count(value: Any) -> int:
@@ -1154,6 +1292,8 @@ def _sanitize_public_vendor_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     for key in list(PUBLIC_VENDOR_PRIVATE_FIELDS):
         safe.pop(key, None)
+
+    _scrub_public_vendor_media_fields(safe)
 
     # Keep only a count-level trust signal on public vendor/profile responses.
     # The public verification page has its own sanitized document-summary endpoint.

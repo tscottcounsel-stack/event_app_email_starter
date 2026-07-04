@@ -162,6 +162,33 @@ def _public_safe_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     }
 
 
+PRIVATE_VERIFICATION_URL_MARKERS = (
+    "verification-documents",
+    "verification_documents",
+    "/verification/",
+    "verification_document",
+    "legacy-profile-doc:",
+    "view-url",
+    "signed_url",
+    "s3.amazonaws.com",
+    "amazonaws.com/",
+)
+
+
+def _is_private_verification_media_url(value: Any) -> bool:
+    raw = _safe_str(value).lower()
+    if not raw:
+        return False
+    return any(marker in raw for marker in PRIVATE_VERIFICATION_URL_MARKERS)
+
+
+def _public_media_url(value: Any) -> str:
+    raw = _safe_str(value)
+    if not raw or _is_private_verification_media_url(raw):
+        return ""
+    return raw
+
+
 def _first_media_url(value: Any) -> str:
     """Return the first usable media URL from a string/list/dict payload."""
     if isinstance(value, str):
@@ -229,6 +256,7 @@ def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> st
         or data.get("image_url")
         or data.get("imageUrl")
     )
+    direct = _public_media_url(direct)
     if direct:
         return direct
 
@@ -247,6 +275,7 @@ def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> st
         "image_url",
         "imageUrl",
     )
+    row_direct = _public_media_url(row_direct)
     if row_direct:
         return row_direct
 
@@ -265,10 +294,11 @@ def _profile_logo_url(data: Dict[str, Any], row: Optional[Profile] = None) -> st
         "photoUrls",
     ):
         found = _first_media_url(data.get(key))
+        found = _public_media_url(found)
         if found:
             return found
 
-    row_media = _profile_attr(row, "image_urls", "imageUrls", "images", "media", "gallery", "photos")
+    row_media = _public_media_url(_profile_attr(row, "image_urls", "imageUrls", "images", "media", "gallery", "photos"))
     if row_media:
         return row_media
 
