@@ -1036,6 +1036,133 @@ def _get_vendor_or_404(vendor_id: Any) -> Dict[str, Any]:
     raise HTTPException(status_code=404, detail="Vendor not found")
 
 
+PUBLIC_VENDOR_PRIVATE_FIELDS = {
+    "documents",
+    "document",
+    "verification_documents",
+    "verificationDocuments",
+    "verification_record",
+    "verificationRecord",
+    "verification",
+    "verification_id",
+    "verificationId",
+    "document_url",
+    "documentUrl",
+    "document_urls",
+    "documentUrls",
+    "file_url",
+    "fileUrl",
+    "file_urls",
+    "fileUrls",
+    "signed_url",
+    "signedUrl",
+    "signed_urls",
+    "signedUrls",
+    "s3_url",
+    "s3Url",
+    "s3_key",
+    "s3Key",
+    "s3_bucket",
+    "s3Bucket",
+    "bucket",
+    "storage_key",
+    "storageKey",
+    "expiration_date",
+    "expirationDate",
+    "expires_at",
+    "expiresAt",
+    "uploaded_at",
+    "uploadedAt",
+    "reviewed_by",
+    "reviewedBy",
+    "admin_notes",
+    "adminNotes",
+    "internal_notes",
+    "internalNotes",
+    "notes",
+    "ai_review",
+    "aiReview",
+    "tax_id",
+    "taxId",
+    "tax_id_masked",
+    "taxIdMasked",
+    "ein",
+    "ssn",
+    "insurance_policy_number",
+    "insurancePolicyNumber",
+    "stripe_customer_id",
+    "stripeCustomerId",
+    "stripe_session_id",
+    "stripeSessionId",
+    "checkout_session_id",
+    "checkoutSessionId",
+    "stripe_payment_intent_id",
+    "stripePaymentIntentId",
+    "fee_paid",
+    "feePaid",
+    "fee_amount",
+    "feeAmount",
+    "paid_at",
+    "paidAt",
+    "payment_status",
+    "paymentStatus",
+    "verification_payment_status",
+    "verificationPaymentStatus",
+}
+
+
+def _public_document_count(value: Any) -> int:
+    if not isinstance(value, list):
+        return 0
+
+    count = 0
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        has_document_marker = bool(
+            _safe_str(item.get("label") or item.get("name") or item.get("type") or item.get("document_type") or item.get("category"))
+            or _safe_str(item.get("url") or item.get("file_url") or item.get("fileUrl") or item.get("signed_url") or item.get("signedUrl"))
+        )
+        if has_document_marker:
+            count += 1
+
+    return count
+
+
+def _sanitize_public_vendor_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the public vendor/profile payload with private verification data removed.
+
+    Public pages are intentionally inspectable in the browser Network tab. HTTPS
+    protects the response in transit, but it does not hide returned JSON from the
+    visitor. This serializer therefore strips document URLs, signed-url routes,
+    expiration dates, internal IDs, payment state, review notes, and other private
+    verification metadata before any public vendor endpoint responds.
+    """
+    if not isinstance(payload, dict):
+        return {}
+
+    safe = dict(payload)
+
+    raw_documents = (
+        safe.get("documents")
+        or safe.get("verification_documents")
+        or safe.get("verificationDocuments")
+        or []
+    )
+    reviewed_document_count = _public_document_count(raw_documents)
+
+    for key in list(PUBLIC_VENDOR_PRIVATE_FIELDS):
+        safe.pop(key, None)
+
+    # Keep only a count-level trust signal on public vendor/profile responses.
+    # The public verification page has its own sanitized document-summary endpoint.
+    safe["reviewed_document_count"] = reviewed_document_count
+    safe["reviewedDocumentCount"] = reviewed_document_count
+
+    return safe
+
+
 def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
     categories = _safe_list_of_str(
         vendor.get("categories")
@@ -1084,7 +1211,7 @@ def _vendor_public_payload(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str,
     canonical = _canonical_vendor_state(payload, verification)
     payload.update(canonical)
 
-    return payload
+    return _sanitize_public_vendor_payload(payload)
 
 
 def _sync_vendor_category_to_applications(vendor_key: str, vendor: Dict[str, Any]) -> None:

@@ -105,6 +105,63 @@ def _normalize_documents(value: Any) -> List[Dict[str, Any]]:
     return docs
 
 
+def _normalize_public_documents(value: Any) -> List[Dict[str, Any]]:
+    """Sanitize verification documents for public trust pages.
+
+    Public verification pages may show which document categories were reviewed,
+    but must never expose document IDs, file URLs, signed URL routes, storage
+    keys, uploaded timestamps, or expiration dates.
+    """
+    if not isinstance(value, list):
+        return []
+
+    documents: List[Dict[str, Any]] = []
+    seen = set()
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        label = _safe_str(item.get("label") or item.get("name") or item.get("document_name") or item.get("requirement_name") or item.get("type") or "Reviewed document")
+        doc_type = _safe_str(item.get("type") or item.get("document_type") or item.get("category") or item.get("requirement_name") or label or "Document")
+        status = _safe_str(item.get("public_status") or item.get("review_status") or item.get("status") or item.get("approval_status") or "Reviewed")
+        key = f"{label}|{doc_type}".lower()
+
+        if key in seen:
+            continue
+        seen.add(key)
+
+        documents.append({
+            "label": label or "Reviewed document",
+            "name": label or "Reviewed document",
+            "type": doc_type or "Document",
+            "status": status or "Reviewed",
+            "reviewed": _safe_lower(status) not in {"pending", "rejected", "missing"},
+        })
+
+    return documents
+
+
+def _public_safe_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(record, dict):
+        return None
+
+    status = _compute_lifecycle_status(record)
+    documents = _normalize_public_documents(record.get("documents"))
+
+    return {
+        "id": record.get("id"),
+        "email": _safe_lower(record.get("email")),
+        "role": _safe_lower(record.get("role")),
+        "status": status,
+        "verification_status": status,
+        "public_verification_status": "verified" if status in {"verified", "expiring_soon"} else "not_verified",
+        "review_status": _safe_str(record.get("review_status") or record.get("status")),
+        "business_name": _safe_str(record.get("business_name")),
+        "documents": documents,
+    }
+
+
 def _first_media_url(value: Any) -> str:
     """Return the first usable media URL from a string/list/dict payload."""
     if isinstance(value, str):
@@ -549,7 +606,7 @@ def _profile_public_payload_from_row(row: Profile, *, email: str, role: str) -> 
 
     documents = []
     if isinstance(data.get("documents"), list):
-        documents = _normalize_documents(data.get("documents"))
+        documents = _normalize_public_documents(data.get("documents"))
 
     verified = bool(
         row.verified
@@ -728,6 +785,8 @@ def get_public_verification(role: str, email: str):
         )
         if db_documents:
             profile["documents"] = db_documents
+        else:
+            profile["documents"] = _normalize_public_documents(profile.get("documents"))
 
         verification = {
             **profile,
@@ -1090,12 +1149,13 @@ def reactivate_my_verification(payload: Optional[Dict[str, Any]] = None, current
 def get_verification_status(email: str, role: str = ""):
     normalized_role = _safe_lower(role) or "vendor"
     record = _find_latest_record(email, normalized_role) or _profile_row_to_verification_record(email, normalized_role)
+    public_record = _public_safe_record(record)
     return {
         "ok": True,
         "email": _safe_lower(email),
         "role": normalized_role,
-        "verification_status": _compute_lifecycle_status(record),
-        "verification": _public_record(record) if record else None,
+        "verification_status": public_record.get("verification_status") if public_record else "unverified",
+        "verification": public_record,
     }
 
 
