@@ -27,6 +27,35 @@ router = APIRouter(tags=["Event Wall"])
 ALLOWED_REACTIONS = {"fire": "🔥", "love": "❤️", "clap": "👏", "eyes": "👀"}
 ALLOWED_REACTION_VALUES = set(ALLOWED_REACTIONS.values())
 
+# Anything containing one of these markers should never be placed into a public
+# event-wall response. Legacy data previously allowed verification-document
+# Cloudinary/S3 URLs to drift into public-facing media fields.
+PRIVATE_PUBLIC_URL_MARKERS = (
+    "verification-documents",
+    "verification_documents",
+    "verification_document",
+    "identity_verification",
+    "government_id",
+    "certificate_of_insurance",
+    "insurance_certificate",
+    "business_license",
+    "w9_document",
+    "sales_tax_permit",
+    "health_permit",
+    "food_handler_permit",
+    "legacy-profile-doc:",
+    "view-url",
+    "signed_url",
+    "signedurl",
+    "presigned",
+    "x-amz-",
+    "s3.amazonaws.com",
+    "amazonaws.com/",
+    "storage_key",
+    "file_url",
+    "fileurl",
+)
+
 
 class EventWallPostCreate(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -63,6 +92,38 @@ def _event_exists(event_id: int) -> bool:
         return False
 
 
+def _is_private_public_url(value: Any) -> bool:
+    raw = _safe_str(value)
+    if not raw:
+        return False
+    lowered = raw.lower()
+    return any(marker in lowered for marker in PRIVATE_PUBLIC_URL_MARKERS)
+
+
+def _public_media_url(value: Any) -> str:
+    """Return a safe public media URL or an empty string.
+
+    This intentionally rejects verification-document paths, signed/S3 URLs,
+    javascript/data URLs, and any non-http(s) URL. Event-wall media is public,
+    so private file URLs must not be echoed back to browsers.
+    """
+    url = _safe_str(value)
+    if not url:
+        return ""
+
+    lowered = url.lower()
+    if not lowered.startswith(("https://", "http://")):
+        return ""
+    if lowered.startswith(("javascript:", "data:", "blob:")):
+        return ""
+    if _is_private_public_url(url):
+        return ""
+    if len(url) > 1500:
+        return ""
+
+    return url
+
+
 def _is_verified(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -88,6 +149,14 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
+def _first_public_media_url(*values: Any) -> str:
+    for value in values:
+        url = _public_media_url(value)
+        if url:
+            return url
+    return ""
+
+
 def _first_list_value(value: Any) -> str:
     if isinstance(value, list):
         for item in value:
@@ -102,7 +171,21 @@ def _first_list_value(value: Any) -> str:
     return ""
 
 
+def _safe_categories(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [_safe_str(item)[:80] for item in value if _safe_str(item)][:12]
+    if isinstance(value, str):
+        return [_safe_str(part)[:80] for part in value.split(",") if _safe_str(part)][:12]
+    return []
+
+
 def _profile_for_user(db: Session, email: str, role: str) -> Dict[str, Any]:
+    """Load only the fields needed to identify an event-wall author.
+
+    The prior implementation returned **data from Profile.data. That was too
+    broad for a public/social surface because Profile.data can contain private
+    verification, subscription, or document metadata.
+    """
     if not email or role not in {"vendor", "organizer"}:
         return {}
 
@@ -115,24 +198,59 @@ def _profile_for_user(db: Session, email: str, role: str) -> Dict[str, Any]:
         return {}
 
     data = row.data if isinstance(row.data, dict) else {}
+    categories = row.categories or data.get("categories") or data.get("vendor_categories") or []
+
     return {
-        **data,
         "email": row.email,
         "role": row.role,
-        "business_name": row.business_name or data.get("business_name") or data.get("businessName") or "",
-        "display_name": row.display_name or data.get("display_name") or data.get("contactName") or "",
-        "categories": row.categories or data.get("categories") or data.get("vendor_categories") or [],
-        "city": row.city or data.get("city") or "",
-        "state": row.state or data.get("state") or "",
+        "business_name": _safe_str(
+            row.business_name
+            or data.get("business_name")
+            or data.get("businessName")
+            or data.get("organizationName")
+            or data.get("company_name")
+        ),
+        "businessName": _safe_str(
+            row.business_name
+            or data.get("businessName")
+            or data.get("business_name")
+            or data.get("organizationName")
+            or data.get("company_name")
+        ),
+        "organizationName": _safe_str(data.get("organizationName")),
+        "company_name": _safe_str(data.get("company_name")),
+        "display_name": _safe_str(row.display_name or data.get("display_name") or data.get("contactName")),
+        "contact_name": _safe_str(data.get("contact_name")),
+        "contactName": _safe_str(data.get("contactName")),
+        "categories": _safe_categories(categories),
+        "vendor_categories": _safe_categories(data.get("vendor_categories") or categories),
+        "category": _safe_str(data.get("category"))[:80],
+        "vendor_category": _safe_str(data.get("vendor_category"))[:80],
+        "business_category": _safe_str(data.get("business_category"))[:80],
+        "business_type": _safe_str(data.get("business_type"))[:80],
         "verified": bool(row.verified),
+        "is_verified": bool(row.verified),
         "verification_status": row.verification_status or data.get("verification_status") or "",
         "public_verification_status": row.public_verification_status or data.get("public_verification_status") or "",
         "review_status": row.review_status or data.get("review_status") or "",
-        "visibility_tier": row.visibility_tier or data.get("visibility_tier") or "",
-        "subscription_plan": row.subscription_plan or data.get("subscription_plan") or data.get("plan") or "",
-        "subscription_status": row.subscription_status or data.get("subscription_status") or "",
-        "featured": bool(row.featured),
-        "promoted": bool(row.promoted),
+        "logo_url": _first_public_media_url(
+            data.get("logo_url"),
+            data.get("logoUrl"),
+            data.get("logo_data_url"),
+            data.get("logoDataUrl"),
+            data.get("avatar_url"),
+            data.get("avatarUrl"),
+        ),
+        "logoUrl": _first_public_media_url(
+            data.get("logoUrl"),
+            data.get("logo_url"),
+            data.get("logo_data_url"),
+            data.get("logoDataUrl"),
+            data.get("avatar_url"),
+            data.get("avatarUrl"),
+        ),
+        "avatar_url": _first_public_media_url(data.get("avatar_url"), data.get("avatarUrl")),
+        "avatarUrl": _first_public_media_url(data.get("avatarUrl"), data.get("avatar_url")),
     }
 
 
@@ -164,7 +282,24 @@ def _vendor_application_for_event(email: str, event_id: int) -> Dict[str, Any]:
         )
 
     matches.sort(key=sort_key, reverse=True)
-    return dict(matches[0])
+    latest = dict(matches[0])
+
+    # Return only public placement context. Do not pass application documents,
+    # notes, payment data, or internal workflow status to a public wall post.
+    return {
+        "vendor_category": _safe_str(latest.get("vendor_category"))[:80],
+        "category": _safe_str(latest.get("category"))[:80],
+        "booth_label": _safe_str(latest.get("booth_label"))[:80],
+        "boothLabel": _safe_str(latest.get("boothLabel"))[:80],
+        "booth_number": _safe_str(latest.get("booth_number"))[:80],
+        "boothNumber": _safe_str(latest.get("boothNumber"))[:80],
+        "booth_id": _safe_str(latest.get("booth_id"))[:80],
+        "boothId": _safe_str(latest.get("boothId"))[:80],
+        "requested_booth_label": _safe_str(latest.get("requested_booth_label"))[:80],
+        "requestedBoothLabel": _safe_str(latest.get("requestedBoothLabel"))[:80],
+        "requested_booth_id": _safe_str(latest.get("requested_booth_id"))[:80],
+        "requestedBoothId": _safe_str(latest.get("requestedBoothId"))[:80],
+    }
 
 
 def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[str, Any]:
@@ -174,10 +309,13 @@ def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[st
 
     profile: Dict[str, Any] = {}
     if role == "vendor":
+        # Legacy store data is no longer spread into the public author payload.
+        # It can contain stale/private fields. Use it only as fallback for name/logo
+        # after sanitizing exact fields.
         stored_vendor = _VENDORS.get(email) if email else None
-        profile = dict(stored_vendor) if isinstance(stored_vendor, dict) else {}
+        stored = dict(stored_vendor) if isinstance(stored_vendor, dict) else {}
         db_profile = _profile_for_user(db, email, "vendor")
-        profile = {**profile, **db_profile}
+        profile = {**stored, **db_profile}
     elif role == "organizer":
         profile = _profile_for_user(db, email, "organizer")
 
@@ -192,11 +330,10 @@ def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[st
         profile.get("contact_name"),
         profile.get("contactName"),
         full_name,
-        email,
         "VendCore User",
-    )
+    )[:120]
 
-    author_logo_url = _first_non_empty(
+    author_logo_url = _first_public_media_url(
         profile.get("logo_url"),
         profile.get("logoUrl"),
         profile.get("logo_data_url"),
@@ -213,7 +350,7 @@ def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[st
         profile.get("business_category"),
         profile.get("business_type"),
         _first_list_value(profile.get("categories") or profile.get("vendor_categories")),
-    )
+    )[:80]
 
     booth_label = _first_non_empty(
         app.get("booth_label"),
@@ -226,13 +363,15 @@ def _author_payload(user: Dict[str, Any], db: Session, event_id: int) -> Dict[st
         app.get("requestedBoothLabel"),
         app.get("requested_booth_id"),
         app.get("requestedBoothId"),
-    )
+    )[:80]
 
     if role not in {"vendor", "organizer", "admin"}:
         role = "vendor"
 
     return {
         "author_name": author_name,
+        # Keep author_email stored privately so delete permissions keep working.
+        # _public_post strips it from every API response.
         "author_email": email,
         "author_role": role,
         "verified": _is_verified(profile),
@@ -297,10 +436,46 @@ def _normalize_reactions(post: Dict[str, Any]) -> Dict[str, int]:
 
 
 def _public_post(post: Dict[str, Any]) -> Dict[str, Any]:
+    """Whitelist event-wall response fields.
+
+    Existing stored wall posts may contain author_email, pinned_by, reaction
+    user IDs, or stale raw profile data. Never return a full dict(post) to a
+    public wall response.
+    """
     item = dict(post)
     _normalize_reactions(item)
-    item.pop("reaction_users", None)
-    return item
+
+    author_logo_url = _first_public_media_url(item.get("author_logo_url"), item.get("authorLogoUrl"))
+    image_url = _public_media_url(item.get("image_url") or item.get("imageUrl"))
+
+    public = {
+        "id": _safe_str(item.get("id")),
+        "event_id": item.get("event_id"),
+        "eventId": item.get("event_id"),
+        "author_name": _safe_str(item.get("author_name") or "VendCore User")[:120],
+        "authorName": _safe_str(item.get("author_name") or "VendCore User")[:120],
+        "author_role": _safe_str(item.get("author_role") or "vendor")[:40],
+        "authorRole": _safe_str(item.get("author_role") or "vendor")[:40],
+        "verified": bool(item.get("verified") is True),
+        "author_logo_url": author_logo_url,
+        "authorLogoUrl": author_logo_url,
+        "author_category": _safe_str(item.get("author_category") or item.get("authorCategory"))[:80],
+        "authorCategory": _safe_str(item.get("author_category") or item.get("authorCategory"))[:80],
+        "author_booth_label": _safe_str(item.get("author_booth_label") or item.get("authorBoothLabel"))[:80],
+        "authorBoothLabel": _safe_str(item.get("author_booth_label") or item.get("authorBoothLabel"))[:80],
+        "message": _safe_str(item.get("message"))[:500],
+        "image_url": image_url,
+        "imageUrl": image_url,
+        "pinned": bool(item.get("pinned") is True),
+        "pinned_at": _safe_str(item.get("pinned_at")) or None,
+        "pinnedAt": _safe_str(item.get("pinned_at")) or None,
+        "reactions": item.get("reactions") if isinstance(item.get("reactions"), dict) else {},
+        "created_at": _safe_str(item.get("created_at")) or None,
+        "createdAt": _safe_str(item.get("created_at")) or None,
+        "updated_at": _safe_str(item.get("updated_at")) or None,
+        "updatedAt": _safe_str(item.get("updated_at")) or None,
+    }
+    return public
 
 
 def _clean_posts(posts: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
@@ -360,14 +535,15 @@ def create_event_wall_post(
         raise HTTPException(status_code=403, detail="Vendor, organizer, or admin account required")
 
     message = _safe_str(payload.message)
-    image_url = _safe_str(payload.image_url)
+    raw_image_url = _safe_str(payload.image_url)
+    image_url = _public_media_url(raw_image_url)
 
+    if raw_image_url and not image_url:
+        raise HTTPException(status_code=400, detail="Image URL cannot be used on the public event wall")
     if not message and not image_url:
         raise HTTPException(status_code=400, detail="Message or image is required")
     if len(message) > 500:
         raise HTTPException(status_code=400, detail="Wall post must be 500 characters or fewer")
-    if image_url and not image_url.lower().startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="Image URL must be a valid public URL")
 
     author = _author_payload(user, db, int(event_id))
     post = {
@@ -410,6 +586,7 @@ def pin_event_wall_post(
     target["pinned"] = bool(payload.pinned)
     if payload.pinned:
         target["pinned_at"] = _now_iso()
+        # Keep stored privately for moderation/auditing; _public_post strips it.
         target["pinned_by"] = email
     else:
         target.pop("pinned_at", None)
