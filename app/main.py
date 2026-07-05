@@ -124,7 +124,24 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        # Legacy VendCore admin/frontend headers. Keep origins strict, but allow
+        # older deployed screens that still send these custom headers so browser
+        # preflight does not fail with "Failed to fetch".
+        "X-User-Email",
+        "X-User-Role",
+        "X-Admin-Email",
+        "X-Role",
+        "x-user-email",
+        "x-user-role",
+        "x-admin-email",
+        "x-role",
+    ],
     expose_headers=["Content-Disposition"],
     max_age=600,
 )

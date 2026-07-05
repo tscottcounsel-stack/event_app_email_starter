@@ -163,6 +163,29 @@ def _cors_check_blocked() -> AuditResult:
     return AuditResult("CORS blocked origin", False, f"blocked origin was allowed with HTTP {status}")
 
 
+def _cors_check_admin_headers() -> AuditResult:
+    status, headers = _request(
+        "OPTIONS",
+        f"{API_BASE}/health",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization,Content-Type,X-User-Email,X-User-Role,X-Admin-Email,X-Role",
+        },
+    )
+    allow_origin = headers.get("access-control-allow-origin", "")
+    allow_headers = headers.get("access-control-allow-headers", "").lower()
+    required = ["authorization", "content-type", "x-user-email", "x-user-role", "x-admin-email", "x-role"]
+    missing = [name for name in required if name not in allow_headers]
+    if 200 <= status < 300 and allow_origin == ALLOWED_ORIGIN and not missing:
+        return AuditResult("CORS admin legacy headers", True, "legacy admin headers accepted")
+    return AuditResult(
+        "CORS admin legacy headers",
+        False,
+        f"HTTP {status}, allow-origin={allow_origin!r}, missing={missing}, allow-headers={allow_headers!r}",
+    )
+
+
 def main() -> int:
     public_paths = [
         "/vendors/public?limit=100",
@@ -178,6 +201,7 @@ def main() -> int:
     results.append(_protected_check("/shared-documents/1", {404}))
     results.append(_protected_check("/verification-documents/1/view-url", {401, 403, 404}))
     results.append(_cors_check_allowed())
+    results.append(_cors_check_admin_headers())
     results.append(_cors_check_blocked())
 
     print(f"VendCore public leak audit against {API_BASE}\n")
