@@ -164,7 +164,7 @@ def _cors_check_blocked() -> AuditResult:
 
 
 def _cors_check_admin_headers() -> AuditResult:
-    status, headers = _request(
+    status, _body, headers = _request(
         "OPTIONS",
         f"{API_BASE}/health",
         headers={
