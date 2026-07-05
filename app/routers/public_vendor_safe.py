@@ -201,9 +201,9 @@ def _marketplace_state(row: Profile, data: Dict[str, Any], verified: bool) -> Di
     """Return public marketplace placement without trusting stale promo flags alone.
 
     Premium placement is intentionally strict: a vendor must be both verified
-    and backed by an active premium/pro/growth/enterprise subscription state.
-    This prevents stale featured/promoted flags or old test data from placing a
-    vendor in the public Premium + Verified section.
+    and backed by an active premium/pro/growth/enterprise subscription plan.
+    Visibility tier, featured, promoted, or old marketplace flags are ignored
+    for public premium placement because they can be stale admin/test data.
     """
     raw_visibility = _safe_lower(row.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier"))
     raw_plan = _safe_lower(row.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan"))
@@ -211,8 +211,12 @@ def _marketplace_state(row: Profile, data: Dict[str, Any], verified: bool) -> Di
 
     active_subscription = raw_subscription_status in {"active", "trialing", "paid"}
     premium_plan = any(token in raw_plan for token in ("premium", "pro", "growth", "enterprise"))
-    explicit_premium_tier = raw_visibility in {"premium", "premium_verified"}
-    active_premium_account = bool(active_subscription and (premium_plan or explicit_premium_tier))
+
+    # Public premium placement must be backed by an active paid premium-style plan.
+    # Do NOT trust visibility_tier, featured, promoted, or old marketplace flags here:
+    # those values can be stale from admin tests and should not place a verified-only
+    # vendor such as Top Tech in the Premium + Verified section.
+    active_premium_account = bool(active_subscription and premium_plan)
 
     premium_verified = bool(verified and active_premium_account)
 
