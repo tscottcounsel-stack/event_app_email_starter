@@ -44,6 +44,35 @@ PUBLIC_HIDDEN_STATUSES = {
     "suspended",
 }
 
+PUBLIC_DEMO_EMAIL_MARKERS = (
+    "@example.com",
+    "example.com",
+    "topvendor@",
+    "test@",
+    "demo@",
+    "admin@",
+    "sample@",
+)
+
+PUBLIC_DEMO_NAME_EXACT = {
+    "topvendor@example.com",
+    "top vendor",
+    "test",
+    "test vendor",
+    "demo",
+    "demo vendor",
+    "admin",
+    "admin vendor",
+    "vend more",
+    "12/12 management",
+}
+
+DEFAULT_PLACEHOLDER_MEDIA_MARKERS = (
+    "/logo/vendcore-logo",
+    "vendcore-logo.png",
+    "vendcore-icon.png",
+)
+
 
 def _safe_str(value: Any) -> str:
     return "" if value is None else str(value).strip()
@@ -169,19 +198,33 @@ def _is_verified(row: Profile, data: Dict[str, Any]) -> bool:
 
 
 def _marketplace_state(row: Profile, data: Dict[str, Any], verified: bool) -> Dict[str, Any]:
+    """Return public marketplace placement without trusting stale promo flags alone.
+
+    Premium placement is intentionally strict: a vendor must be both verified
+    and backed by an active premium/pro/growth/enterprise subscription state.
+    This prevents stale featured/promoted flags or old test data from placing a
+    vendor in the public Premium + Verified section.
+    """
     raw_visibility = _safe_lower(row.visibility_tier or data.get("visibility_tier") or data.get("visibilityTier"))
     raw_plan = _safe_lower(row.subscription_plan or data.get("subscription_plan") or data.get("subscriptionPlan") or data.get("plan"))
     raw_subscription_status = _safe_lower(row.subscription_status or data.get("subscription_status") or data.get("subscriptionStatus"))
+
     active_subscription = raw_subscription_status in {"active", "trialing", "paid"}
     premium_plan = any(token in raw_plan for token in ("premium", "pro", "growth", "enterprise"))
-    premium = bool((raw_visibility == "premium" and active_subscription) or (premium_plan and active_subscription) or ((row.featured or row.promoted or data.get("featured") is True or data.get("promoted") is True) and active_subscription))
+    explicit_premium_tier = raw_visibility in {"premium", "premium_verified"}
+    active_premium_account = bool(active_subscription and (premium_plan or explicit_premium_tier))
 
-    if premium:
+    premium_verified = bool(verified and active_premium_account)
+
+    if premium_verified:
         tier = "premium"
+        marketplace_tier = "premium_verified"
     elif verified:
         tier = "verified"
+        marketplace_tier = "verified"
     else:
         tier = "standard"
+        marketplace_tier = "standard"
 
     label = row.public_verification_label or data.get("public_verification_label") or data.get("publicVerificationLabel") or ("Verified" if verified else "Not verified")
 
@@ -196,12 +239,12 @@ def _marketplace_state(row: Profile, data: Dict[str, Any], verified: bool) -> Di
         "publicVerificationLabel": label,
         "visibility_tier": tier,
         "visibilityTier": tier,
-        "marketplace_tier": "premium_verified" if premium and verified else tier,
-        "marketplaceTier": "premium_verified" if premium and verified else tier,
-        "premium_placement": premium,
-        "premiumPlacement": premium,
-        "featured": premium,
-        "promoted": premium,
+        "marketplace_tier": marketplace_tier,
+        "marketplaceTier": marketplace_tier,
+        "premium_placement": premium_verified,
+        "premiumPlacement": premium_verified,
+        "featured": premium_verified,
+        "promoted": premium_verified,
     }
 
 
@@ -324,16 +367,73 @@ def _public_profile_payload(row: Profile) -> Dict[str, Any]:
     return payload
 
 
+def _is_demo_or_placeholder_vendor(row: Profile, data: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    email = _safe_lower(row.email or data.get("email") or payload.get("email") or payload.get("vendor_id"))
+    name = _safe_lower(
+        row.business_name
+        or row.display_name
+        or data.get("business_name")
+        or data.get("businessName")
+        or data.get("name")
+        or payload.get("business_name")
+        or payload.get("name")
+    )
+
+    if not email and not name:
+        return True
+
+    if any(marker in email for marker in PUBLIC_DEMO_EMAIL_MARKERS):
+        return True
+
+    if name in PUBLIC_DEMO_NAME_EXACT:
+        return True
+
+    if name.endswith("@example.com"):
+        return True
+
+    if "test vendor" in name or "demo vendor" in name:
+        return True
+
+    return False
+
+
+def _has_real_profile_media(payload: Dict[str, Any]) -> bool:
+    media_values: List[str] = []
+
+    for key in ("logo_url", "logoUrl", "banner_url", "bannerUrl"):
+        value = _safe_str(payload.get(key))
+        if value:
+            media_values.append(value)
+
+    for key in ("image_urls", "imageUrls", "video_urls", "videoUrls"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            media_values.extend([_safe_str(item) for item in raw if _safe_str(item)])
+
+    for value in media_values:
+        lowered = _safe_lower(value)
+        if lowered and not any(marker in lowered for marker in DEFAULT_PLACEHOLDER_MEDIA_MARKERS):
+            return True
+
+    return False
+
+
 def _is_public_visible(payload: Dict[str, Any]) -> bool:
     if not _safe_str(payload.get("business_name") or payload.get("businessName") or payload.get("name")):
         return False
+
     if payload.get("verified") is True or payload.get("premium_placement") is True:
         return True
+
+    description = _safe_str(payload.get("description"))
+    categories = _safe_list(payload.get("categories") or payload.get("vendor_categories"))
+    location = _safe_str(payload.get("city") or payload.get("state"))
+
+    # Standard public profiles should have enough real content to avoid showing
+    # empty/test-looking rows with only a name and a default VendCore logo.
     return bool(
-        _safe_str(payload.get("description"))
-        or _safe_str(payload.get("logo_url") or payload.get("logoUrl"))
-        or _safe_str(payload.get("city"))
-        or _safe_str(payload.get("state"))
+        len(description) >= 20
+        and (categories or location or _has_real_profile_media(payload))
     )
 
 
@@ -370,6 +470,8 @@ def get_safe_public_vendors(
             continue
 
         payload = _public_profile_payload(row)
+        if _is_demo_or_placeholder_vendor(row, data, payload):
+            continue
         if _is_public_visible(payload):
             results.append(payload)
 
@@ -409,7 +511,11 @@ def get_safe_public_vendor_profile(vendor_id: str, db: Session = Depends(get_db)
     row = _load_vendor_by_key(db, vendor_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    return _public_profile_payload(row)
+    payload = _public_profile_payload(row)
+    data = _profile_data(row)
+    if _is_demo_or_placeholder_vendor(row, data, payload) or not _is_public_visible(payload):
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return payload
 
 
 @router.get("/vendors/by-email/{email}")
@@ -417,7 +523,11 @@ def get_safe_public_vendor_by_email(email: str, db: Session = Depends(get_db)):
     row = _load_vendor_by_key(db, email)
     if row is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    return _public_profile_payload(row)
+    payload = _public_profile_payload(row)
+    data = _profile_data(row)
+    if _is_demo_or_placeholder_vendor(row, data, payload) or not _is_public_visible(payload):
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return payload
 
 
 def _public_doc_summaries(db: Session, *, email: str, role: str, profile_id: Any = None) -> List[Dict[str, Any]]:
