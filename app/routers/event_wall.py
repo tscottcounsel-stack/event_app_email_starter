@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.profile import Profile
 from app.routers.auth import get_current_user
+from app.routers.safety import block_user_pair, create_report_record
 from app.store import (
     _APPLICATIONS,
     _EVENTS,
@@ -71,6 +72,12 @@ class EventWallPinPayload(BaseModel):
 class EventWallReactionPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
     reaction: str = ""
+
+
+class EventWallReportPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    reason: str = "other"
+    details: str = ""
 
 
 def _now_iso() -> str:
@@ -651,6 +658,49 @@ def toggle_event_wall_reaction(
         "reactions": target["reactions"],
         "post": _public_post(target),
     }
+
+
+@router.post("/events/{event_id}/wall/{post_id}/report")
+def report_event_wall_post(
+    event_id: int,
+    post_id: str,
+    payload: EventWallReportPayload,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    target = _find_wall_post(event_id, post_id)
+    reporter_email = _norm(user.get("email") or user.get("sub"))
+    author_email = _norm(target.get("author_email"))
+
+    if author_email and author_email == reporter_email:
+        raise HTTPException(status_code=400, detail="You cannot report your own wall post.")
+
+    report = create_report_record(
+        reporter_email=reporter_email,
+        reporter_role=_norm(user.get("role")),
+        target_email=author_email,
+        context_type="event_wall_post",
+        context_id=str(event_id),
+        content_id=str(post_id),
+        reason=payload.reason,
+        details=payload.details,
+    )
+    return {"ok": True, "report": report}
+
+
+@router.post("/events/{event_id}/wall/{post_id}/block-author")
+def block_event_wall_author(
+    event_id: int,
+    post_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    target = _find_wall_post(event_id, post_id)
+    blocker_email = _norm(user.get("email") or user.get("sub"))
+    author_email = _norm(target.get("author_email"))
+
+    if not author_email:
+        raise HTTPException(status_code=400, detail="Unable to identify the wall-post author.")
+    block_user_pair(blocker_email, author_email)
+    return {"ok": True, "blocked": True}
 
 
 @router.delete("/events/{event_id}/wall/{post_id}")

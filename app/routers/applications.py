@@ -19,6 +19,12 @@ except Exception:
 
 router = APIRouter(tags=["applications"])
 
+try:
+    from app.routers.safety import are_users_blocked
+except Exception:
+    def are_users_blocked(email_a: str, email_b: str) -> bool:
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Shared auth decode import / fallback
@@ -2541,6 +2547,25 @@ def _can_access_messages(app: Dict[str, Any], user: Dict[str, Any]) -> bool:
     return False
 
 
+def _message_counterparty_email(app: Dict[str, Any], user: Dict[str, Any]) -> str:
+    role = _message_user_role(user)
+    event = _get_event_for_app(app) or {}
+
+    if role == "vendor":
+        return _as_str(
+            event.get("organizer_email")
+            or event.get("owner_email")
+            or event.get("email")
+            or app.get("organizer_email")
+            or app.get("owner_email")
+        ).lower()
+
+    if role in {"organizer", "admin"}:
+        return _as_str(app.get("vendor_email") or app.get("email")).lower()
+
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -2573,7 +2598,15 @@ def get_application_messages(
             }
         )
 
-    return {"messages": cleaned}
+    current_email = _message_user_email(user)
+    counterparty_email = _message_counterparty_email(app, user)
+    blocked = are_users_blocked(current_email, counterparty_email)
+
+    return {
+        "messages": cleaned,
+        "blocked": blocked,
+        "counterparty_email": counterparty_email,
+    }
 
 
 @router.post("/applications/{app_id}/messages")
@@ -2587,6 +2620,14 @@ def post_application_message(
 
     if not _can_access_messages(app, user):
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    current_email = _message_user_email(user)
+    counterparty_email = _message_counterparty_email(app, user)
+    if are_users_blocked(current_email, counterparty_email):
+        raise HTTPException(
+            status_code=403,
+            detail="Messaging is unavailable because one of these users has blocked the other.",
+        )
 
     text = _as_str(payload.get("text"))
     if not text:
@@ -3669,6 +3710,13 @@ def get_messages_inbox(authorization: Optional[str] = Header(default=None)):
             "vendor_email": vendor_email,
             "organizer_name": organizer_name,
             "organizer_email": organizer_email,
+            "counterparty_email": (
+                vendor_email if user_role in {"organizer", "admin"} else organizer_email
+            ),
+            "blocked": are_users_blocked(
+                user_email,
+                vendor_email if user_role in {"organizer", "admin"} else organizer_email,
+            ),
             "booth_id": app.get("booth_id"),
             "status": app.get("status"),
             "payment_status": app.get("payment_status"),
