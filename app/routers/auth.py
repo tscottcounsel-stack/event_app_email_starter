@@ -16,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 from fastapi.responses import HTMLResponse
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from app.db import SessionLocal
 from app.models.profile import Profile
 
@@ -818,7 +818,7 @@ def _profile_subscription_snapshot(email: str, role: str) -> Dict[str, Any]:
     if not normalized_email or normalized_role not in {"vendor", "organizer"}:
         return {}
     try:
-        from sqlalchemy import func
+        from sqlalchemy import func, text
         from app.db import SessionLocal
         from app.models.profile import Profile
     except Exception:
@@ -1465,6 +1465,158 @@ def debug_force_premium(email: str):
         raise HTTPException(status_code=500, detail=f"Premium repair failed: {exc}")
     finally:
         db.close()
+
+
+def _delete_current_account_data(*, email: str, role: str, user_id: int) -> Dict[str, Any]:
+    """Delete private/profile data controlled by VendCore for self-service account deletion.
+
+    Shared business/transaction records may remain where VendCore has a legitimate
+    recordkeeping reason, but private verification documents, profile data, legacy
+    organizer profile data, and the authentication account are removed.
+    """
+    normalized_email = _norm(email)
+    normalized_role = _norm(role)
+    cleanup: Dict[str, Any] = {
+        "email": normalized_email,
+        "role": normalized_role,
+        "database": {},
+        "legacy": {},
+    }
+
+    if normalized_role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=403, detail="Only vendor and organizer accounts can use self-service deletion.")
+
+    # Remove protected verification-document data first so foreign-key grants/audit
+    # rows do not block document deletion. These statements are defensive because
+    # table availability may vary by deployment.
+    if SessionLocal is not None:
+        db = SessionLocal()
+        try:
+            def execute_optional(sql: str, params: Dict[str, Any], label: str) -> int:
+                try:
+                    result = db.execute(text(sql), params)
+                    db.commit()
+                    return int(result.rowcount or 0)
+                except Exception as exc:
+                    db.rollback()
+                    print(f"Account deletion skipped {label}: {exc}")
+                    return 0
+
+            cleanup["database"]["document_grants"] = execute_optional(
+                """
+                DELETE FROM document_access_grants
+                WHERE document_id IN (
+                    SELECT id FROM verification_documents
+                    WHERE lower(owner_email) = :email AND owner_role = :role
+                )
+                """,
+                {"email": normalized_email, "role": normalized_role},
+                "document access grants",
+            )
+
+            cleanup["database"]["document_audit_logs"] = execute_optional(
+                """
+                DELETE FROM document_audit_logs
+                WHERE document_id IN (
+                    SELECT id FROM verification_documents
+                    WHERE lower(owner_email) = :email AND owner_role = :role
+                )
+                """,
+                {"email": normalized_email, "role": normalized_role},
+                "document audit logs",
+            )
+
+            cleanup["database"]["verification_documents"] = execute_optional(
+                """
+                DELETE FROM verification_documents
+                WHERE lower(owner_email) = :email AND owner_role = :role
+                """,
+                {"email": normalized_email, "role": normalized_role},
+                "verification documents",
+            )
+
+            try:
+                count = (
+                    db.query(Profile)
+                    .filter(
+                        func.lower(Profile.email) == normalized_email,
+                        Profile.role == normalized_role,
+                    )
+                    .delete(synchronize_session=False)
+                )
+                db.commit()
+                cleanup["database"]["profiles"] = int(count or 0)
+            except Exception as exc:
+                db.rollback()
+                print(f"Account deletion skipped profile cleanup: {exc}")
+                cleanup["database"]["profiles"] = 0
+        finally:
+            db.close()
+
+    # Organizer public identity still has a lightweight legacy JSON store.
+    if normalized_role == "organizer":
+        try:
+            profiles = _read_public_json(ORGANIZER_PROFILE_STORE_PATH)
+            removed = 1 if normalized_email in profiles else 0
+            if removed:
+                profiles.pop(normalized_email, None)
+                _write_public_json(ORGANIZER_PROFILE_STORE_PATH, profiles)
+            cleanup["legacy"]["organizer_profile"] = removed
+        except Exception as exc:
+            print(f"Account deletion skipped organizer legacy profile cleanup: {exc}")
+            cleanup["legacy"]["organizer_profile"] = 0
+
+    # Delete the login account last. If private cleanup fails unexpectedly, the user
+    # keeps access so support can resolve the issue instead of leaving orphaned data.
+    deleted_account = admin_delete_user(int(user_id))
+    cleanup["account_deleted"] = True
+    cleanup["deleted_account"] = {
+        "id": deleted_account.get("id"),
+        "email": deleted_account.get("email"),
+        "role": deleted_account.get("role"),
+    }
+
+    return cleanup
+
+
+@router.delete("/account/me")
+def delete_my_account(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    email = _norm(user.get("email") or user.get("sub"))
+    role = _norm(user.get("role"))
+    raw_user_id = user.get("id") or user.get("user_id")
+
+    if role == "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin accounts cannot be deleted through self-service account deletion.",
+        )
+
+    if role not in {"vendor", "organizer"}:
+        raise HTTPException(status_code=403, detail="Unsupported account role.")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Account email is missing.")
+
+    if raw_user_id is None:
+        raw_user_id = _USERS_BY_EMAIL.get(email)
+
+    if raw_user_id is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+
+    cleanup = _delete_current_account_data(
+        email=email,
+        role=role,
+        user_id=int(raw_user_id),
+    )
+
+    return {
+        "ok": True,
+        "deleted": True,
+        "message": "Your VendCore account has been deleted.",
+        "cleanup": cleanup,
+    }
+
+
 
 @router.get("/me")
 def get_me(user: Dict[str, Any] = Depends(get_current_user)):
