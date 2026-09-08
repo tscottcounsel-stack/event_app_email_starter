@@ -43,7 +43,49 @@ EVENT_SCHEMA: dict[str, Any] = {
         },
         "confidence": {
             "type": "object",
-            "additionalProperties": {"type": "number"},
+            "additionalProperties": False,
+            "properties": {
+                "event_kind": {"type": ["number", "null"]},
+                "custom_event_kind": {"type": ["number", "null"]},
+                "title": {"type": ["number", "null"]},
+                "description": {"type": ["number", "null"]},
+                "host_name": {"type": ["number", "null"]},
+                "venue_name": {"type": ["number", "null"]},
+                "street_address": {"type": ["number", "null"]},
+                "city": {"type": ["number", "null"]},
+                "state": {"type": ["number", "null"]},
+                "start_date": {"type": ["number", "null"]},
+                "start_time": {"type": ["number", "null"]},
+                "end_date": {"type": ["number", "null"]},
+                "end_time": {"type": ["number", "null"]},
+                "website_url": {"type": ["number", "null"]},
+                "ticket_sales_url": {"type": ["number", "null"]},
+                "instagram_url": {"type": ["number", "null"]},
+                "facebook_url": {"type": ["number", "null"]},
+                "tiktok_url": {"type": ["number", "null"]},
+                "desired_vendor_categories": {"type": ["number", "null"]},
+            },
+            "required": [
+                "event_kind",
+                "custom_event_kind",
+                "title",
+                "description",
+                "host_name",
+                "venue_name",
+                "street_address",
+                "city",
+                "state",
+                "start_date",
+                "start_time",
+                "end_date",
+                "end_time",
+                "website_url",
+                "ticket_sales_url",
+                "instagram_url",
+                "facebook_url",
+                "tiktok_url",
+                "desired_vendor_categories",
+            ],
         },
         "needs_review": {
             "type": "array",
@@ -96,7 +138,7 @@ Formatting:
 - URLs/social fields: include only when shown or clearly encoded in readable flyer text.
 - desired_vendor_categories: include vendor/service categories explicitly requested or clearly advertised.
 - description: a short, useful summary based only on flyer content. Do not add marketing claims not shown.
-- confidence: provide 0.0 to 1.0 values only for fields you populated.
+- confidence: include every confidence key. Use 0.0 to 1.0 for populated fields and null for fields you did not populate.
 - needs_review: field names that are uncertain, ambiguous, partially obscured, or inferred.
 
 If multiple dates/times appear and it is unclear which belongs to the main event, put the most likely value only if confidence is reasonable and include that field in needs_review. Otherwise return null.
