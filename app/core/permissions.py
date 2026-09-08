@@ -42,15 +42,20 @@ def require_feature(user: dict, feature_name: str, upgrade_plan: str | None = No
 
 def require_event_limit(user: dict, current_count: int) -> None:
     plan = str(user.get("plan") or "starter").strip().lower()
-    features = get_plan_features(plan)
-    max_events = int(features.get("max_events", 1))
+    is_paid_active = bool(user.get("is_paid_active"))
 
-    # enterprise-style limits should require active status if not starter
-    if plan != "starter" and not is_paid_active(user):
-        max_events = 1
+    if plan != "starter" and is_paid_active:
+        return
+
+    max_events = 1
 
     if current_count >= max_events:
         raise HTTPException(
             status_code=403,
-            detail=f"Event limit reached for plan '{plan}'. Upgrade required.",
+            detail={
+                "code": "EVENT_LIMIT_REACHED",
+                "plan": plan,
+                "max_events": max_events,
+                "message": "Your Starter plan includes 1 live event at a time.",
+            },
         )

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# VENDCORE_REQUIREMENTS_SAVE_FIX_2026_06_05
-
 import hashlib
 import logging
 import os
@@ -18,6 +16,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.core.permissions import require_event_limit
+from app.services.flyer_ai import extract_event_from_flyer
 from app.db import get_db
 from app.models.event import Event
 from app.models.diagram import Diagram
@@ -73,6 +72,9 @@ def _pagination_payload(items: list[Dict[str, Any]], limit: int, offset: int) ->
 
 
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
+_ALLOWED_FLYER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
+_ALLOWED_FLYER_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+MAX_FLYER_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def _sanitize_upload_filename(filename: str) -> str:
@@ -110,54 +112,9 @@ class EventCreate(BaseModel):
     google_maps_url: Optional[str] = None
     category: Optional[str] = None
 
-    host_name: Optional[str] = None
-    hostName: Optional[str] = None
-    organizer_name: Optional[str] = None
-    organizerName: Optional[str] = None
-    facebook_url: Optional[str] = None
-    facebookUrl: Optional[str] = None
-    instagram_url: Optional[str] = None
-    instagramUrl: Optional[str] = None
-    tiktok_url: Optional[str] = None
-    tiktokUrl: Optional[str] = None
-    website_url: Optional[str] = None
-    websiteUrl: Optional[str] = None
-
-    event_mode: Optional[str] = None
-    eventMode: Optional[str] = None
-    listing_only: Optional[bool] = None
-    listingOnly: Optional[bool] = None
-
-    event_type: Optional[str] = None
-    eventType: Optional[str] = None
-    event_kind: Optional[str] = None
-    eventKind: Optional[str] = None
-    event_category: Optional[str] = None
-    eventCategory: Optional[str] = None
-    booking_flow_label: Optional[str] = None
-    service_categories: Optional[list[str]] = None
-    serviceCategories: Optional[list[str]] = None
-    is_private_event: Optional[bool] = None
-    privateEvent: Optional[bool] = None
-    service_event: Optional[bool] = None
-    serviceEvent: Optional[bool] = None
-    talent_event: Optional[bool] = None
-    talentEvent: Optional[bool] = None
-
     heroImageUrl: Optional[str] = None
     imageUrls: Optional[list[str]] = None
     videoUrls: Optional[list[str]] = None
-
-    # Organizer-selected needs. These fields are intentionally accepted here
-    # because the create-event frontend sends them and the event serializer
-    # already persists these aliases to the runtime store. Without these fields,
-    # Pydantic extra=ignore drops them and direct payload access can raise a
-    # 500 during POST /organizer/events.
-    desired_vendor_categories: Optional[list[str]] = None
-    desiredVendorCategories: Optional[list[str]] = None
-    vendor_categories_needed: Optional[list[str]] = None
-    looking_for_categories: Optional[list[str]] = None
-    vendor_categories: Optional[list[str]] = None
 
 
 def utc_now_iso() -> str:
@@ -237,254 +194,6 @@ def _event_is_active_marketplace_event(event_data: Dict[str, Any]) -> bool:
 
 def _norm_email(value: Any) -> str:
     return str(value or "").strip().lower()
-
-
-LISTING_ONLY_MODE = "listing_only"
-FULL_EVENT_MODE = "full"
-
-MARKETPLACE_EVENT_KIND = "marketplace"
-PRIVATE_SERVICE_EVENT_KIND = "private_service"
-LIVE_ENTERTAINMENT_EVENT_KIND = "live_entertainment"
-CUSTOM_EVENT_KIND = "custom"
-PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS = 2900
-PRO_ORGANIZER_PLAN_KEYS = {"enterprise_organizer", "pro_organizer", "organizer_pro", "enterprise", "premium", "growth"}
-ACTIVE_SUBSCRIPTION_STATUSES = {"active", "trialing", "paid", "current", "subscribed"}
-
-
-def _private_workspace_amount_cents() -> int:
-    raw = os.getenv("PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS") or os.getenv("STRIPE_PRIVATE_EVENT_WORKSPACE_AMOUNT_CENTS") or ""
-    try:
-        return max(50, int(raw)) if raw else PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
-    except Exception:
-        return PRIVATE_EVENT_WORKSPACE_DEFAULT_AMOUNT_CENTS
-
-
-def _safe_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return []
-
-
-def _normalize_event_kind(value: Any, event_type: Any = None) -> str:
-    raw = str(value or event_type or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if raw in {"private_service", "private", "service", "wedding", "weddings", "reunion", "family_reunion", "party", "private_event"}:
-        return PRIVATE_SERVICE_EVENT_KIND
-    if raw in {"live_entertainment", "live", "entertainment", "concert", "concerts", "show", "showcase", "performance", "production"}:
-        return LIVE_ENTERTAINMENT_EVENT_KIND
-    if raw in {"custom", "other", "other_custom", "custom_event"}:
-        return CUSTOM_EVENT_KIND
-    return MARKETPLACE_EVENT_KIND
-
-
-def _event_kind_title(kind: str, explicit: Any = None) -> str:
-    explicit_text = _pick_first_value(explicit)
-    if kind == PRIVATE_SERVICE_EVENT_KIND:
-        return explicit_text or "Private / Service Event"
-    if kind == LIVE_ENTERTAINMENT_EVENT_KIND:
-        return explicit_text or "Live / Entertainment Event"
-    if kind == CUSTOM_EVENT_KIND:
-        return explicit_text or "Custom Event"
-    return explicit_text or "Vendor / Marketplace Event"
-
-
-def _user_has_pro_organizer_access(user: Optional[Dict[str, Any]]) -> bool:
-    user = user or {}
-    role = str(user.get("role") or "").strip().lower()
-    if role == "admin":
-        return True
-    if role != "organizer":
-        return False
-    plan = str(user.get("subscription_plan") or user.get("subscriptionPlan") or user.get("plan") or user.get("price_lookup_key") or "").strip().lower().replace("-", "_").replace(" ", "_")
-    status = str(user.get("subscription_status") or user.get("subscriptionStatus") or user.get("status") or "").strip().lower()
-    return bool(plan in PRO_ORGANIZER_PLAN_KEYS and (not status or status in ACTIVE_SUBSCRIPTION_STATUSES))
-
-
-def _apply_event_kind_aliases(
-    target: Dict[str, Any],
-    *,
-    kind: Any = None,
-    event_type: Any = None,
-    service_categories: Any = None,
-    booking_flow_label: Any = None,
-    user: Optional[Dict[str, Any]] = None,
-    mode: Any = None,
-) -> Dict[str, Any]:
-    normalized = _normalize_event_kind(kind, event_type)
-    title = _event_kind_title(normalized, event_type)
-    categories = _safe_list(service_categories)
-    is_private = normalized == PRIVATE_SERVICE_EVENT_KIND
-    is_talent = normalized == LIVE_ENTERTAINMENT_EVENT_KIND
-    is_full_workspace = _normalize_event_mode(mode or target.get("event_mode") or target.get("eventMode"), target.get("listing_only") or target.get("listingOnly")) == FULL_EVENT_MODE
-    pro_included = _user_has_pro_organizer_access(user)
-    workspace_required = bool(is_full_workspace and normalized in {PRIVATE_SERVICE_EVENT_KIND, CUSTOM_EVENT_KIND} and not pro_included)
-
-    target["event_kind"] = normalized
-    target["eventKind"] = normalized
-    target["event_type"] = title
-    target["eventType"] = title
-    target["event_category"] = title
-    target["eventCategory"] = title
-    target["booking_flow_label"] = _pick_first_value(booking_flow_label, target.get("booking_flow_label"))
-    target["is_private_event"] = is_private
-    target["privateEvent"] = is_private
-    target["service_event"] = is_private
-    target["serviceEvent"] = is_private
-    target["talent_event"] = is_talent
-    target["talentEvent"] = is_talent
-
-    if categories:
-        target["service_categories"] = categories
-        target["serviceCategories"] = categories
-
-    target["private_workspace_required"] = workspace_required
-    target["privateWorkspaceRequired"] = workspace_required
-    target["private_workspace_price_cents"] = _private_workspace_amount_cents() if workspace_required else 0
-    target["privateWorkspacePriceCents"] = _private_workspace_amount_cents() if workspace_required else 0
-    target["private_workspace_included_with_pro"] = bool(pro_included and is_full_workspace and normalized in {PRIVATE_SERVICE_EVENT_KIND, CUSTOM_EVENT_KIND})
-    target["privateWorkspaceIncludedWithPro"] = target["private_workspace_included_with_pro"]
-
-    if target.get("private_workspace_included_with_pro"):
-        target["private_workspace_payment_status"] = "included_with_pro"
-        target["privateWorkspacePaymentStatus"] = "included_with_pro"
-        target["private_workspace_paid"] = True
-        target["privateWorkspacePaid"] = True
-    else:
-        paid = bool(target.get("private_workspace_paid") is True or target.get("privateWorkspacePaid") is True)
-        status = str(target.get("private_workspace_payment_status") or target.get("privateWorkspacePaymentStatus") or "").strip().lower()
-        if workspace_required and not paid and status != "paid":
-            target["private_workspace_payment_status"] = "unpaid"
-            target["privateWorkspacePaymentStatus"] = "unpaid"
-            target["private_workspace_paid"] = False
-            target["privateWorkspacePaid"] = False
-    return target
-
-
-def _normalize_event_mode(value: Any, listing_only: Any = None) -> str:
-    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if raw in {"listing_only", "listing", "quick_listing", "public_listing", "list_only"}:
-        return LISTING_ONLY_MODE
-    if listing_only is True or str(listing_only or "").strip().lower() in {"true", "1", "yes", "y"}:
-        return LISTING_ONLY_MODE
-    return FULL_EVENT_MODE
-
-
-def _event_mode_store_payload(event_id: int) -> Dict[str, Any]:
-    eid = int(event_id or 0)
-    if not eid:
-        return {}
-
-    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
-    if not event_store:
-        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
-
-    if not isinstance(event_store, dict):
-        return {}
-
-    return {
-        "event_mode": event_store.get("event_mode") or event_store.get("eventMode"),
-        "eventMode": event_store.get("eventMode") or event_store.get("event_mode"),
-        "listing_only": event_store.get("listing_only") or event_store.get("listingOnly"),
-        "listingOnly": event_store.get("listingOnly") or event_store.get("listing_only"),
-    }
-
-
-def _apply_event_mode_aliases(target: Dict[str, Any], mode: Any = None, listing_only: Any = None) -> Dict[str, Any]:
-    normalized = _normalize_event_mode(mode, listing_only)
-    is_listing = normalized == LISTING_ONLY_MODE
-    target["event_mode"] = normalized
-    target["eventMode"] = normalized
-    target["listing_only"] = is_listing
-    target["listingOnly"] = is_listing
-
-    if is_listing:
-        # Listing-only events are discovery pages. They should not look like
-        # booth/application workflows on public or organizer screens.
-        target["accepting_vendors"] = False
-        target["acceptingVendors"] = False
-        target["requirements_published"] = False
-        target["layout_published"] = False
-
-    return target
-
-
-def _persist_event_mode(event_id: int, mode: Any = None, listing_only: Any = None) -> str:
-    eid = int(event_id or 0)
-    normalized = _normalize_event_mode(mode, listing_only)
-    if not eid:
-        return normalized
-
-    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
-    if not event_store:
-        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
-    event_store = dict(event_store or {})
-    event_store["id"] = eid
-    _apply_event_mode_aliases(event_store, normalized)
-
-    _EVENTS[eid] = dict(event_store)
-    _EVENTS[str(eid)] = dict(event_store)
-    save_store()
-    return normalized
-
-
-def _pick_first_value(*values: Any) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _apply_public_listing_aliases(target: Dict[str, Any], source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    source = source or target
-
-    host_name = _pick_first_value(
-        source.get("host_name"),
-        source.get("hostName"),
-        source.get("organizer_name"),
-        source.get("organizerName"),
-        source.get("company_name"),
-    )
-    if host_name:
-        target["host_name"] = host_name
-        target["hostName"] = host_name
-        target["organizer_name"] = host_name
-        target["organizerName"] = host_name
-        target["company_name"] = host_name
-
-    social_pairs = (
-        ("facebook_url", "facebookUrl"),
-        ("instagram_url", "instagramUrl"),
-        ("tiktok_url", "tiktokUrl"),
-        ("website_url", "websiteUrl"),
-    )
-    for snake, camel in social_pairs:
-        value = _pick_first_value(source.get(snake), source.get(camel))
-        if value:
-            target[snake] = value
-            target[camel] = value
-
-    return target
-
-
-def _persist_public_listing_fields(event_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-    eid = int(event_id or 0)
-    if not eid:
-        return {}
-
-    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
-    if not event_store:
-        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
-
-    event_store = dict(event_store or {})
-    event_store["id"] = eid
-    _apply_public_listing_aliases(event_store, payload)
-
-    _EVENTS[eid] = dict(event_store)
-    _EVENTS[str(eid)] = dict(event_store)
-    save_store()
-    return event_store
 
 
 def _dt_to_iso(value: Any) -> Optional[str]:
@@ -614,86 +323,9 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "cancellation_reason",
         "cancellation_message",
         "canceled_by",
-        # Organizer-selected needs live in the runtime store until the
-        # Event model grows dedicated JSON columns. Keep these fields on every
-        # event payload so the public event page can show "What the organizer needs".
-        "desired_vendor_categories",
-        "desiredVendorCategories",
-        "vendor_categories_needed",
-        "looking_for_categories",
-        "vendor_categories",
-        "event_mode",
-        "eventMode",
-        "listing_only",
-        "listingOnly",
-        "host_name",
-        "hostName",
-        "organizer_name",
-        "organizerName",
-        "company_name",
-        "facebook_url",
-        "facebookUrl",
-        "instagram_url",
-        "instagramUrl",
-        "tiktok_url",
-        "tiktokUrl",
-        "website_url",
-        "websiteUrl",
-        "event_type",
-        "eventType",
-        "event_kind",
-        "eventKind",
-        "event_category",
-        "eventCategory",
-        "booking_flow_label",
-        "service_categories",
-        "serviceCategories",
-        "is_private_event",
-        "privateEvent",
-        "service_event",
-        "serviceEvent",
-        "talent_event",
-        "talentEvent",
-        "private_workspace_required",
-        "privateWorkspaceRequired",
-        "private_workspace_paid",
-        "privateWorkspacePaid",
-        "private_workspace_payment_status",
-        "privateWorkspacePaymentStatus",
-        "private_workspace_price_cents",
-        "privateWorkspacePriceCents",
-        "private_workspace_paid_at",
-        "privateWorkspacePaidAt",
-        "private_workspace_included_with_pro",
-        "privateWorkspaceIncludedWithPro",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
-
-    # Event mode currently lives in the runtime store until the SQL schema grows
-    # dedicated columns. Always expose both snake/camel aliases to the frontend.
-    store_mode_payload = _event_mode_store_payload(int(ev.id or 0))
-    _apply_event_mode_aliases(
-        payload,
-        store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode") or payload.get("event_mode"),
-        store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly") or payload.get("listing_only"),
-    )
-
-    _apply_public_listing_aliases(payload, store_payload)
-    _apply_event_kind_aliases(
-        payload,
-        kind=payload.get("event_kind") or payload.get("eventKind") or store_payload.get("event_kind") or store_payload.get("eventKind"),
-        event_type=payload.get("event_type") or payload.get("eventType") or store_payload.get("event_type") or store_payload.get("eventType"),
-        service_categories=payload.get("service_categories") or payload.get("serviceCategories") or store_payload.get("service_categories") or store_payload.get("serviceCategories"),
-        booking_flow_label=payload.get("booking_flow_label") or store_payload.get("booking_flow_label"),
-        mode=payload.get("event_mode") or payload.get("eventMode"),
-    )
-
-    # Canonicalize the selected needs across old/new field names and both runtime stores.
-    store_needs_payload = _event_needs_store_payload(int(ev.id or 0))
-    selected_needs = _extract_event_needs(payload, store_payload, store_needs_payload)
-    if selected_needs or _payload_contains_event_needs(store_needs_payload):
-        _apply_event_needs_aliases(payload, selected_needs)
 
     payload["is_past"] = _event_is_past(payload)
     payload["lifecycle_status"] = _event_lifecycle_status(payload)
@@ -725,8 +357,6 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         return event_data
 
     existing = _EVENTS.get(event_id, {}) if isinstance(_EVENTS.get(event_id), dict) else {}
-    if not existing:
-        existing = _EVENTS.get(str(event_id), {}) if isinstance(_EVENTS.get(str(event_id)), dict) else {}
     merged = {
         **existing,
         **dict(event_data or {}),
@@ -771,43 +401,7 @@ def _sync_event_to_store(event_data: Dict[str, Any], user: Optional[Dict[str, An
         merged.setdefault("owner_id", organizer_id)
         merged.setdefault("created_by", organizer_id)
 
-    _apply_public_listing_aliases(merged, merged)
-    _apply_event_kind_aliases(
-        merged,
-        kind=merged.get("event_kind") or merged.get("eventKind"),
-        event_type=merged.get("event_type") or merged.get("eventType"),
-        service_categories=merged.get("service_categories") or merged.get("serviceCategories"),
-        booking_flow_label=merged.get("booking_flow_label"),
-        user=user,
-        mode=merged.get("event_mode") or merged.get("eventMode"),
-    )
-
-    # Preserve event mode across every event payload alias.
-    mode_payload = _event_mode_store_payload(event_id)
-    mode = (
-        merged.get("event_mode")
-        or merged.get("eventMode")
-        or mode_payload.get("event_mode")
-        or mode_payload.get("eventMode")
-    )
-    listing_only = (
-        merged.get("listing_only")
-        if "listing_only" in merged
-        else merged.get("listingOnly")
-        if "listingOnly" in merged
-        else mode_payload.get("listing_only")
-        if "listing_only" in mode_payload
-        else mode_payload.get("listingOnly")
-    )
-    _apply_event_mode_aliases(merged, mode, listing_only)
-
-    # Preserve organizer-selected vendor/service needs across every event payload alias.
-    needs = _extract_event_needs(merged, existing, event_data)
-    if needs or _payload_contains_event_needs(event_data):
-        _apply_event_needs_aliases(merged, needs)
-
     _EVENTS[event_id] = merged
-    _EVENTS[str(event_id)] = merged
     save_store()
     return merged
 
@@ -863,187 +457,6 @@ def _safe_float(value: Any) -> float:
         return float(s or 0)
     except Exception:
         return 0.0
-
-
-# ---------------- Requirements public payload helpers ----------------
-
-def _req_as_list(value: Any) -> list[Dict[str, Any]]:
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    if isinstance(value, dict):
-        out: list[Dict[str, Any]] = []
-        for key, raw in value.items():
-            if isinstance(raw, dict):
-                out.append({"id": str(key), **raw})
-            elif raw:
-                out.append({"id": str(key), "text": str(raw)})
-        return out
-    return []
-
-
-def _req_bucket(raw: Any) -> Dict[str, list[Dict[str, Any]]]:
-    if not isinstance(raw, dict):
-        return {"compliance": [], "documents": []}
-    compliance: list[Dict[str, Any]] = []
-    documents: list[Dict[str, Any]] = []
-    for key in ("compliance", "compliance_items", "complianceItems", "items", "requirements"):
-        compliance.extend(_req_as_list(raw.get(key)))
-    for key in ("documents", "docs", "document_requirements", "documentRequirements", "required_documents", "requiredDocuments"):
-        documents.extend(_req_as_list(raw.get(key)))
-    return {"compliance": _dedupe_req_items(compliance), "documents": _dedupe_req_items(documents)}
-
-
-def _dedupe_req_items(items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-    seen: set[str] = set()
-    out: list[Dict[str, Any]] = []
-    for item in items:
-        key = str(item.get("id") or item.get("key") or item.get("name") or item.get("title") or item.get("label") or item.get("text") or "").strip().lower()
-        if key and key in seen:
-            continue
-        if key:
-            seen.add(key)
-        out.append(item)
-    return out
-
-
-def _merge_req_bucket(target: Dict[str, list[Dict[str, Any]]], raw: Any) -> None:
-    bucket = _req_bucket(raw)
-    target.setdefault("compliance", [])
-    target.setdefault("documents", [])
-    target["compliance"].extend(bucket.get("compliance") or [])
-    target["documents"].extend(bucket.get("documents") or [])
-    target["compliance"] = _dedupe_req_items(target["compliance"])
-    target["documents"] = _dedupe_req_items(target["documents"])
-
-def _event_wide_baseline_bucket() -> Dict[str, list[Dict[str, Any]]]:
-    """Baseline requirements that apply to every vendor.
-
-    The organizer requirements page uses these as the default global rules.
-    Keeping the same fallback here prevents the public/vendor endpoint from
-    returning an empty global bucket when the legacy runtime store has been
-    reset or the save payload arrives in an older shape.
-    """
-    return {
-        "compliance": [
-            {
-                "id": "event_rules",
-                "text": "Vendors must follow all event rules and staff instructions",
-                "required": True,
-            },
-            {
-                "id": "setup_teardown",
-                "text": "Vendors must comply with setup and teardown timing",
-                "required": True,
-            },
-        ],
-        "documents": [],
-    }
-
-
-def _ensure_event_wide_baseline(global_bucket: Dict[str, list[Dict[str, Any]]]) -> Dict[str, list[Dict[str, Any]]]:
-    bucket = {
-        "compliance": _dedupe_req_items(list((global_bucket or {}).get("compliance") or [])),
-        "documents": _dedupe_req_items(list((global_bucket or {}).get("documents") or [])),
-    }
-    if not bucket["compliance"] and not bucket["documents"]:
-        return _event_wide_baseline_bucket()
-    return bucket
-
-
-
-def _requirements_payload_for_event(event_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
-    """Return requirements in the vendor-facing shape.
-
-    Event-wide requirements are intentionally pulled from every legacy key we
-    have used so the vendor page does not show 0 global items when the organizer
-    actually saved all-vendor requirements.
-    """
-    sources: list[Dict[str, Any]] = []
-
-    for key in (event_id, str(event_id)):
-        value = _REQUIREMENTS.get(key)
-        if isinstance(value, dict):
-            sources.append(value)
-
-    store_event = _EVENTS.get(event_id) or _EVENTS.get(str(event_id))
-    if isinstance(store_event, dict):
-        if isinstance(store_event.get("requirements"), dict):
-            sources.append(store_event.get("requirements") or {})
-        for key in (
-            "global",
-            "globalRequirements",
-            "global_requirements",
-            "allVendorRequirements",
-            "all_vendor_requirements",
-            "appliesToAllVendors",
-            "applies_to_all_vendors",
-            "categories",
-            "categoryRequirements",
-            "category_requirements",
-        ):
-            if isinstance(store_event.get(key), (dict, list)):
-                sources.append({key: store_event.get(key)})
-
-    # Some deployments keep requirement JSON in the SQL event row data fields.
-    if db is not None:
-        try:
-            row = db.query(Event).filter(Event.id == int(event_id)).first()
-            if row:
-                for attr in ("requirements", "data", "settings", "metadata", "extra"):
-                    value = getattr(row, attr, None)
-                    if isinstance(value, dict):
-                        sources.append(value)
-        except Exception:
-            pass
-
-    global_bucket: Dict[str, list[Dict[str, Any]]] = {"compliance": [], "documents": []}
-    categories: Dict[str, Dict[str, list[Dict[str, Any]]]] = {}
-
-    for source in sources:
-        root = source.get("requirements") if isinstance(source.get("requirements"), dict) else source
-        if not isinstance(root, dict):
-            continue
-
-        for key in (
-            "global",
-            "globalRequirements",
-            "global_requirements",
-            "eventWide",
-            "event_wide",
-            "eventWideRequirements",
-            "event_wide_requirements",
-            "allVendors",
-            "all_vendors",
-            "allVendorRequirements",
-            "all_vendor_requirements",
-            "appliesToAllVendors",
-            "applies_to_all_vendors",
-            "appliesToAll",
-            "applies_to_all",
-        ):
-            _merge_req_bucket(global_bucket, root.get(key))
-
-        # Root-level compliance/documents are event-wide requirements.
-        _merge_req_bucket(global_bucket, root)
-
-        category_source = root.get("categories") or root.get("categoryRequirements") or root.get("category_requirements") or {}
-        if isinstance(category_source, dict):
-            for category_name, raw_bucket in category_source.items():
-                name = str(category_name or "").strip()
-                if not name:
-                    continue
-                target = categories.setdefault(name, {"compliance": [], "documents": []})
-                _merge_req_bucket(target, raw_bucket)
-
-    global_bucket = _ensure_event_wide_baseline(global_bucket)
-
-    return {
-        "requirements": {
-            "global": global_bucket,
-            "categories": categories,
-        },
-        "version": 1,
-    }
 
 
 def _is_bad_event_title(value: Any) -> bool:
@@ -1150,265 +563,8 @@ def _booth_is_sellable(booth: Dict[str, Any]) -> bool:
     return True
 
 
-
-# ---------------- Category availability helpers ----------------
-
-def _availability_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def _availability_slug(value: Any) -> str:
-    text = _availability_text(value).lower().replace("&", " and ")
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    aliases = {
-        "food": "food_vendors",
-        "food_vendor": "food_vendors",
-        "food_vendors": "food_vendors",
-        "food_and_beverage": "food_vendors",
-        "food_beverage": "food_vendors",
-        "coffee": "coffee_vendors",
-        "coffee_vendor": "coffee_vendors",
-        "coffee_vendors": "coffee_vendors",
-        "bakery": "bakery_desserts",
-        "desserts": "bakery_desserts",
-        "bakery_and_desserts": "bakery_desserts",
-        "mobile_catering": "mobile_catering",
-        "arts_crafts": "arts_crafts",
-        "arts_and_crafts": "arts_crafts",
-        "art": "arts_crafts",
-        "technology": "technology_electronics",
-        "tech": "technology_electronics",
-        "electronics": "technology_electronics",
-        "technology_electronics": "technology_electronics",
-        "technology_and_electronics": "technology_electronics",
-        "cleaning": "cleaning_crew",
-        "cleanup": "cleaning_crew",
-        "cleaning_crew": "cleaning_crew",
-        "audio_visual": "audio_visual",
-        "audio_and_visual": "audio_visual",
-        "generator_power": "generator_power",
-        "generator_and_power": "generator_power",
-        "tent_rental_company": "tent_rental_company",
-        "tent_and_rental_company": "tent_rental_company",
-        "decor_production": "decor_production",
-        "decor_and_production": "decor_production",
-    }
-    return aliases.get(text, text)
-
-
-def _availability_label(value: Any) -> str:
-    raw = _availability_text(value)
-    return raw or "Uncategorized"
-
-
-def _booth_category_for_availability(booth: Dict[str, Any]) -> str:
-    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
-    for source in (booth, meta):
-        for key in (
-            "category",
-            "booth_category",
-            "boothCategory",
-            "vendor_category",
-            "vendorCategory",
-            "category_name",
-            "categoryName",
-            "category_label",
-            "categoryLabel",
-            "vendor_type",
-            "vendorType",
-        ):
-            value = _availability_text(source.get(key))
-            if value:
-                return value
-    return "Other"
-
-
-def _booth_token_values_for_availability(booth: Dict[str, Any], fallback: str) -> set[str]:
-    meta = booth.get("meta") if isinstance(booth.get("meta"), dict) else {}
-    tokens: set[str] = set()
-    for source in (booth, meta):
-        for key in (
-            "id", "booth_id", "boothId", "key", "code",
-            "label", "booth_label", "boothLabel", "number", "booth_number",
-            "boothNumber", "name", "booth_name", "boothName",
-        ):
-            value = _availability_text(source.get(key))
-            if value:
-                tokens.add(value.lower())
-    if fallback:
-        tokens.add(str(fallback).strip().lower())
-    return {token for token in tokens if token}
-
-
-def _app_booth_tokens_for_availability(app: Dict[str, Any]) -> set[str]:
-    tokens: set[str] = set()
-    for key in (
-        "booth_id", "boothId", "requested_booth_id", "requestedBoothId",
-        "selected_booth_id", "selectedBoothId", "assigned_booth_id", "assignedBoothId",
-        "booth_label", "boothLabel", "booth_number", "boothNumber",
-        "selected_booth_label", "selectedBoothLabel", "selected_booth_number", "selectedBoothNumber",
-        "booth_name", "boothName",
-    ):
-        value = _availability_text(app.get(key))
-        if value:
-            tokens.add(value.lower())
-    for nested_key in ("selected_booth", "booth", "booth_snapshot"):
-        nested = app.get(nested_key)
-        if isinstance(nested, dict):
-            tokens.update(_booth_token_values_for_availability(nested, ""))
-    return {token for token in tokens if token}
-
-
-def _app_category_for_availability(app: Dict[str, Any]) -> str:
-    for key in (
-        "booth_category", "boothCategory", "requested_booth_category", "requestedBoothCategory",
-        "selected_booth_category", "selectedBoothCategory", "vendor_category", "vendorCategory",
-        "category",
-    ):
-        value = _availability_text(app.get(key))
-        if value:
-            return value
-    for nested_key in ("selected_booth", "booth", "booth_snapshot"):
-        nested = app.get(nested_key)
-        if isinstance(nested, dict):
-            value = _booth_category_for_availability(nested)
-            if value and value != "Other":
-                return value
-    return ""
-
-
-def _app_counts_as_filled_for_availability(app: Dict[str, Any]) -> bool:
-    payment_status = _coerce_payment_status(app.get("payment_status") or app.get("paymentStatus"))
-    status = _availability_text(app.get("status") or app.get("application_status") or app.get("applicationStatus")).lower()
-    if app.get("deleted_at") or app.get("released_at") or app.get("event_canceled"):
-        return False
-    if status in {"rejected", "declined", "deleted", "cancelled", "canceled", "expired", "released", "draft"}:
-        return False
-    if payment_status == "paid":
-        return True
-    if status in {"approved", "accepted", "confirmed", "reserved", "assigned", "submitted", "under_review", "pending"}:
-        return True
-    if payment_status in {"pending", "processing"}:
-        return True
-    reserved_until = app.get("booth_reserved_until") or app.get("reserved_until") or app.get("reservedUntil")
-    if reserved_until:
-        try:
-            return datetime.fromisoformat(str(reserved_until).replace("Z", "+00:00")) > datetime.now(timezone.utc)
-        except Exception:
-            return False
-    return False
-
-
-def _category_availability_for_event(event_data: Dict[str, Any], applications: dict, booths: list[Dict[str, Any]]) -> Dict[str, Any]:
-    selected_needs = _extract_event_needs(event_data)
-    buckets: Dict[str, Dict[str, Any]] = {}
-
-    def ensure(label: str) -> Dict[str, Any]:
-        display = _availability_label(label)
-        slug = _availability_slug(display) or display.lower()
-        row = buckets.setdefault(slug, {
-            "category": display,
-            "label": display,
-            "slug": slug,
-            "total_slots": 0,
-            "filled_slots": 0,
-            "remaining_slots": 0,
-            "status": "open",
-        })
-        if display and row.get("category") in {"", "Other", "Uncategorized"}:
-            row["category"] = display
-            row["label"] = display
-        return row
-
-    for need in selected_needs:
-        ensure(need)
-
-    booth_token_to_slug: Dict[str, str] = {}
-    for index, booth in enumerate(booths, start=1):
-        category = _booth_category_for_availability(booth)
-        row = ensure(category)
-        row["total_slots"] += 1
-        fallback = str(booth.get("id") or booth.get("label") or f"booth-{index}")
-        for token in _booth_token_values_for_availability(booth, fallback):
-            booth_token_to_slug[token] = row["slug"]
-
-    filled_booths: set[str] = set()
-    fallback_filled_by_slug: Dict[str, int] = {}
-    for app in applications.values():
-        if not isinstance(app, dict):
-            continue
-        try:
-            if int(app.get("event_id") or app.get("eventId") or 0) != int(event_data.get("id") or 0):
-                continue
-        except Exception:
-            continue
-        if not _app_counts_as_filled_for_availability(app):
-            continue
-
-        app_tokens = _app_booth_tokens_for_availability(app)
-        matched_slug = ""
-        for token in app_tokens:
-            if token in booth_token_to_slug:
-                matched_slug = booth_token_to_slug[token]
-                filled_booths.add(token)
-                break
-        if not matched_slug:
-            category = _app_category_for_availability(app)
-            if category:
-                matched_slug = ensure(category)["slug"]
-        if matched_slug:
-            fallback_filled_by_slug[matched_slug] = fallback_filled_by_slug.get(matched_slug, 0) + 1
-
-    # Use one filled count per application, capped to total slot inventory when inventory exists.
-    for slug, count in fallback_filled_by_slug.items():
-        row = buckets.setdefault(slug, {
-            "category": slug.replace("_", " ").title(),
-            "label": slug.replace("_", " ").title(),
-            "slug": slug,
-            "total_slots": 0,
-            "filled_slots": 0,
-            "remaining_slots": 0,
-            "status": "open",
-        })
-        total = int(row.get("total_slots") or 0)
-        row["filled_slots"] = min(count, total) if total > 0 else count
-
-    rows = []
-    for row in buckets.values():
-        total = int(row.get("total_slots") or 0)
-        filled = int(row.get("filled_slots") or 0)
-        remaining = max(total - filled, 0) if total > 0 else None
-        row["remaining_slots"] = remaining
-        row["status"] = "filled" if total > 0 and remaining == 0 else "open"
-        rows.append(row)
-
-    rows.sort(key=lambda item: (0 if item.get("status") == "open" else 1, str(item.get("category") or "").lower()))
-    return {
-        "items": rows,
-        "by_category": {str(item.get("category")): item for item in rows},
-        "by_slug": {str(item.get("slug")): item for item in rows},
-    }
-
 def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Session] = None) -> dict:
     event_id = int(event.get("id") or 0)
-    if _normalize_event_mode(event.get("event_mode") or event.get("eventMode"), event.get("listing_only") or event.get("listingOnly")) == LISTING_ONLY_MODE:
-        empty_availability = {"items": [], "by_category": {}, "by_slug": {}}
-        return {
-            "booths_from_price": None,
-            "starting_booth_price": None,
-            "booth_price": None,
-            "total_booths": 0,
-            "booths_total": 0,
-            "paid_booths": 0,
-            "held_booths": 0,
-            "spots_left": None,
-            "booths_remaining": None,
-            "category_availability": empty_availability,
-            "categoryAvailability": empty_availability,
-            "needed_category_availability": [],
-            "neededCategoryAvailability": [],
-        }
-
 
     diagram_payload: Dict[str, Any] = {}
     if db is not None and event_id:
@@ -1457,7 +613,6 @@ def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Sessi
     paid_booths = len(paid_booth_ids)
     held_booths = len(reserved_booth_ids - paid_booth_ids)
     spots_left = max(total_booths - paid_booths - held_booths, 0)
-    category_availability = _category_availability_for_event(event, applications, booths)
 
     return {
         "booths_from_price": booths_from_price,
@@ -1469,10 +624,6 @@ def _event_marketplace_stats(event: dict, applications: dict, db: Optional[Sessi
         "held_booths": held_booths,
         "spots_left": spots_left,
         "booths_remaining": spots_left,
-        "category_availability": category_availability,
-        "categoryAvailability": category_availability,
-        "needed_category_availability": category_availability.get("items", []),
-        "neededCategoryAvailability": category_availability.get("items", []),
     }
 
 
@@ -1542,125 +693,6 @@ def _unique_categories(values: list[Any]) -> list[str]:
             seen.add(slug)
             out.append(str(item).strip())
     return out
-
-_EVENT_NEEDS_KEYS = (
-    "desired_vendor_categories",
-    "desiredVendorCategories",
-    "vendor_categories_needed",
-    "looking_for_categories",
-    "vendor_categories",
-    "service_categories",
-    "serviceCategories",
-)
-
-
-def _extract_event_needs(*sources: Any) -> list[str]:
-    """Return canonical organizer-selected vendor/service needs from any payload shape."""
-    values: list[Any] = []
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for key in _EVENT_NEEDS_KEYS:
-            if key in source:
-                values.append(source.get(key))
-    return _unique_categories(values)
-
-
-def _payload_contains_event_needs(payload: Any) -> bool:
-    return isinstance(payload, dict) and any(key in payload for key in _EVENT_NEEDS_KEYS)
-
-
-def _apply_event_needs_aliases(target: Dict[str, Any], needs: list[str]) -> Dict[str, Any]:
-    """Write organizer-selected needs to every legacy/public alias used by the app."""
-    clean = _unique_categories([needs])
-    target["desired_vendor_categories"] = clean
-    target["desiredVendorCategories"] = clean
-    target["vendor_categories_needed"] = clean
-    target["looking_for_categories"] = clean
-    target["vendor_categories"] = clean
-    return target
-
-
-def _event_needs_store_payload(event_id: int) -> Dict[str, Any]:
-    """Load saved organizer-needed vendor/service categories from every runtime store alias.
-
-    These selections are not yet first-class columns on the SQL Event model, so
-    they must be preserved in the persistent runtime store and requirements
-    store. Reading both stores prevents /public/events/{id} from losing them
-    after older routes write one store but not the other.
-    """
-    eid = int(event_id or 0)
-    if not eid:
-        return {}
-
-    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
-    if not event_store:
-        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
-
-    req_store = _REQUIREMENTS.get(eid) if isinstance(_REQUIREMENTS.get(eid), dict) else {}
-    if not req_store:
-        req_store = _REQUIREMENTS.get(str(eid)) if isinstance(_REQUIREMENTS.get(str(eid)), dict) else {}
-
-    req_root = req_store.get("requirements") if isinstance(req_store.get("requirements"), dict) else req_store
-    req_root = req_root if isinstance(req_root, dict) else {}
-
-    payload: Dict[str, Any] = {}
-    for source in (event_store, req_store, req_root):
-        if not isinstance(source, dict):
-            continue
-        for key in _EVENT_NEEDS_KEYS:
-            if key in source:
-                payload[key] = source.get(key)
-
-    return payload
-
-
-def _persist_event_needs(event_id: int, needs: list[str]) -> list[str]:
-    """Persist organizer-selected needs in both runtime stores under all aliases."""
-    eid = int(event_id or 0)
-    clean = _unique_categories([needs])
-    if not eid:
-        return clean
-
-    event_store = _EVENTS.get(eid) if isinstance(_EVENTS.get(eid), dict) else {}
-    if not event_store:
-        event_store = _EVENTS.get(str(eid)) if isinstance(_EVENTS.get(str(eid)), dict) else {}
-    event_store = dict(event_store or {})
-    event_store["id"] = eid
-    _apply_event_needs_aliases(event_store, clean)
-    _EVENTS[eid] = event_store
-    _EVENTS[str(eid)] = dict(event_store)
-
-    req_store = _REQUIREMENTS.get(eid) if isinstance(_REQUIREMENTS.get(eid), dict) else {}
-    if not req_store:
-        req_store = _REQUIREMENTS.get(str(eid)) if isinstance(_REQUIREMENTS.get(str(eid)), dict) else {}
-    req_store = dict(req_store or {})
-    _apply_event_needs_aliases(req_store, clean)
-    if isinstance(req_store.get("requirements"), dict):
-        req_store["requirements"] = dict(req_store["requirements"])
-        _apply_event_needs_aliases(req_store["requirements"], clean)
-    _REQUIREMENTS[eid] = req_store
-    _REQUIREMENTS[str(eid)] = dict(req_store)
-
-    save_store()
-    return clean
-
-
-def _attach_event_needs(event_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach organizer-needed categories to an event API payload."""
-    try:
-        eid = int(event_payload.get("id") or 0)
-    except Exception:
-        eid = 0
-
-    store_payload = _event_needs_store_payload(eid)
-    needs = _extract_event_needs(event_payload, store_payload)
-
-    if needs or _payload_contains_event_needs(store_payload):
-        _apply_event_needs_aliases(event_payload, needs)
-
-    return event_payload
-
 
 
 def _event_alert_categories(event_data: Dict[str, Any]) -> list[str]:
@@ -1865,6 +897,69 @@ def organizer_list_events(
     return {"events": [_serialize_event_model(ev) for ev in _owned_events_for_user(db, user)]}
 
 
+@router.post("/organizer/events/ai-extract-flyer")
+async def organizer_ai_extract_flyer(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Organizer access required.")
+
+    filename = os.path.basename(str(file.filename or "event-flyer").strip()) or "event-flyer"
+    ext = Path(filename).suffix.lower()
+    content_type = str(file.content_type or "").strip().lower()
+
+    if ext not in _ALLOWED_FLYER_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a JPG, PNG, WEBP, or PDF flyer.",
+        )
+
+    if content_type and content_type not in _ALLOWED_FLYER_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a JPG, PNG, WEBP, or PDF flyer.",
+        )
+
+    try:
+        file_bytes = await file.read(MAX_FLYER_UPLOAD_BYTES + 1)
+    finally:
+        await file.close()
+
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded flyer is empty.")
+
+    if len(file_bytes) > MAX_FLYER_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Flyer must be 10MB or smaller.")
+
+    try:
+        event_draft = await extract_event_from_flyer(
+            file_bytes=file_bytes,
+            filename=filename,
+            content_type=content_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        logger.warning("Flyer AI extraction unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="VendCore AI could not read this flyer right now. Please try again or enter the event manually.",
+        ) from exc
+    except Exception:
+        logger.exception("Unexpected flyer AI extraction failure")
+        raise HTTPException(
+            status_code=502,
+            detail="VendCore AI could not read this flyer. Please try another image or enter the event manually.",
+        )
+
+    return {
+        "ok": True,
+        "event": event_draft,
+    }
+
+
 @router.post("/organizer/events")
 def organizer_create_event(
     payload: EventCreate,
@@ -1875,18 +970,11 @@ def organizer_create_event(
     if not organizer_email:
         raise HTTPException(status_code=401, detail="Authenticated user email missing")
 
-    owned_events = _owned_events_for_user(db, user)
-    published_event_count = sum(1 for ev in owned_events if bool(_serialize_event_model(ev).get("published")))
-    require_event_limit(user, published_event_count)
+    existing_event_count = len(_owned_events_for_user(db, user))
+    require_event_limit(user, existing_event_count)
 
     organizer_id = user.get("organizer_id") or user.get("id") or user.get("sub")
     organizer_id_str = None if organizer_id is None else str(organizer_id)
-
-    create_mode = _normalize_event_mode(
-        payload.event_mode or payload.eventMode,
-        payload.listing_only if payload.listing_only is not None else payload.listingOnly,
-    )
-    create_listing_only = create_mode == LISTING_ONLY_MODE
 
     event = Event(
         title=payload.title,
@@ -1904,7 +992,7 @@ def organizer_create_event(
         hero_image_url=payload.heroImageUrl,
         image_urls=list(payload.imageUrls or []),
         video_urls=list(payload.videoUrls or []),
-        published=create_listing_only,
+        published=False,
         archived=False,
         requirements_published=False,
         layout_published=False,
@@ -1919,40 +1007,7 @@ def organizer_create_event(
     db.refresh(event)
 
     serialized = _serialize_event_model(event)
-    mode = create_mode
-    _apply_event_mode_aliases(serialized, mode)
-    _persist_event_mode(int(event.id), mode)
-    _apply_public_listing_aliases(serialized, {
-        "host_name": payload.host_name or payload.hostName or payload.organizer_name or payload.organizerName,
-        "facebook_url": payload.facebook_url or payload.facebookUrl,
-        "instagram_url": payload.instagram_url or payload.instagramUrl,
-        "tiktok_url": payload.tiktok_url or payload.tiktokUrl,
-        "website_url": payload.website_url or payload.websiteUrl,
-    })
-    selected_service_categories = (
-        payload.service_categories
-        or payload.serviceCategories
-        or payload.desired_vendor_categories
-        or payload.desiredVendorCategories
-        or payload.vendor_categories_needed
-        or payload.looking_for_categories
-        or payload.vendor_categories
-        or []
-    )
-
-    _apply_event_kind_aliases(
-        serialized,
-        kind=payload.event_kind or payload.eventKind,
-        event_type=payload.event_type or payload.eventType or payload.event_category or payload.eventCategory,
-        service_categories=selected_service_categories,
-        booking_flow_label=payload.booking_flow_label,
-        user=user,
-        mode=create_mode,
-    )
-    if selected_service_categories:
-        _apply_event_needs_aliases(serialized, _unique_categories([selected_service_categories]))
-    _persist_public_listing_fields(int(event.id), serialized)
-    serialized = _sync_event_to_store(serialized, user)
+    _sync_event_to_store(serialized, user)
     return serialized
 
 
@@ -1974,87 +1029,16 @@ def organizer_patch_event(
 ):
     ev = _get_owned_event_or_404(db, event_id, user)
     was_published = bool(ev.published)
-    incoming = dict(payload or {})
-
-    # SQL Event currently has no dedicated JSON column for these "Organizer is
-    # looking for" selections, so _apply_event_patch_model intentionally ignores
-    # them. Keep writing normal Event fields to Postgres, then persist the needs
-    # in the runtime store under every alias used by organizer/public/vendor UI.
-    _apply_event_patch_model(ev, incoming)
+    _apply_event_patch_model(ev, dict(payload or {}))
     db.add(ev)
     db.commit()
     db.refresh(ev)
-
     serialized = _serialize_event_model(ev)
-
-    existing_store = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
-    if not existing_store:
-        existing_store = _EVENTS.get(str(int(event_id)), {}) if isinstance(_EVENTS.get(str(int(event_id))), dict) else {}
-
-    if _payload_contains_event_needs(incoming):
-        # If the organizer intentionally clears all chips, persist the empty
-        # list too. The prior code only saved truthy lists, which made the UI
-        # reload as 0 selected or fall back to stale data unpredictably.
-        selected_needs = _extract_event_needs(incoming)
-    else:
-        selected_needs = _extract_event_needs(existing_store, serialized)
-
-    selected_needs = _persist_event_needs(int(event_id), selected_needs)
-    _apply_event_needs_aliases(serialized, selected_needs)
-
-    _persist_public_listing_fields(int(event_id), incoming)
-    _apply_public_listing_aliases(serialized, incoming)
-    if any(key in incoming for key in (
-        "event_type",
-        "eventType",
-        "event_kind",
-        "eventKind",
-        "event_category",
-        "eventCategory",
-        "service_categories",
-        "serviceCategories",
-        "booking_flow_label",
-    )):
-        _apply_event_kind_aliases(
-            serialized,
-            kind=incoming.get("event_kind") or incoming.get("eventKind") or serialized.get("event_kind") or serialized.get("eventKind"),
-            event_type=incoming.get("event_type") or incoming.get("eventType") or incoming.get("event_category") or incoming.get("eventCategory") or serialized.get("event_type") or serialized.get("eventType"),
-            service_categories=incoming.get("service_categories") or incoming.get("serviceCategories") or serialized.get("service_categories") or serialized.get("serviceCategories"),
-            booking_flow_label=incoming.get("booking_flow_label") or serialized.get("booking_flow_label"),
-            user=user,
-            mode=incoming.get("event_mode") or incoming.get("eventMode") or serialized.get("event_mode") or serialized.get("eventMode"),
-        )
-
-    if any(key in incoming for key in ("event_mode", "eventMode", "listing_only", "listingOnly")):
-        mode = _persist_event_mode(
-            int(event_id),
-            incoming.get("event_mode") or incoming.get("eventMode"),
-            incoming.get("listing_only") if "listing_only" in incoming else incoming.get("listingOnly"),
-        )
-        if mode == LISTING_ONLY_MODE and not bool(ev.published):
-            ev.published = True
-            db.add(ev)
-            db.commit()
-            db.refresh(ev)
-            serialized = _serialize_event_model(ev)
-        _apply_event_mode_aliases(serialized, mode)
-    else:
-        store_mode_payload = _event_mode_store_payload(int(event_id))
-        _apply_event_mode_aliases(
-            serialized,
-            store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode"),
-            store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly"),
-        )
-
-    # Persist both int and string keys because older routes have used both.
-    synced = _sync_event_to_store(serialized, user)
-    _EVENTS[int(event_id)] = dict(synced)
-    _EVENTS[str(int(event_id))] = dict(synced)
-    save_store()
-
+    _sync_event_to_store(serialized, user)
     if bool(ev.published) and not was_published:
-        _create_vendor_event_alerts(db, synced)
-    return synced
+        _create_vendor_event_alerts(db, serialized)
+    return serialized
+
 
 @router.delete("/organizer/events/{event_id}")
 def organizer_delete_event(
@@ -2087,14 +1071,8 @@ def organizer_publish_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
-    store_mode_payload = _event_mode_store_payload(int(event_id))
-    _apply_event_mode_aliases(
-        serialized,
-        store_mode_payload.get("event_mode") or store_mode_payload.get("eventMode") or serialized.get("event_mode"),
-        store_mode_payload.get("listing_only") or store_mode_payload.get("listingOnly") or serialized.get("listing_only"),
-    )
-    serialized = _sync_event_to_store(serialized, user)
-    if not was_published and serialized.get("event_mode") != LISTING_ONLY_MODE:
+    _sync_event_to_store(serialized, user)
+    if not was_published:
         _create_vendor_event_alerts(db, serialized)
     return serialized
 
@@ -2491,137 +1469,6 @@ def admin_mark_payout_paid(payment_id: int):
     }
 
 
-
-def _normalize_saved_requirements_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize organizer requirements into the canonical store shape.
-
-    The frontend saves { requirements: { global, categories }, version }. Older
-    screens may send global/categoryRequirements at the root. Keep all-vendor
-    requirements in requirements.global so vendor pages never see an empty
-    event-wide bucket after save.
-    """
-    raw = payload if isinstance(payload, dict) else {}
-    root = raw.get("requirements") if isinstance(raw.get("requirements"), dict) else raw
-    if not isinstance(root, dict):
-        root = {}
-
-    global_bucket = _req_bucket(
-        root.get("global")
-        or root.get("globalRequirements")
-        or root.get("global_requirements")
-        or root.get("eventWide")
-        or root.get("event_wide")
-        or root.get("eventWideRequirements")
-        or root.get("event_wide_requirements")
-        or root.get("allVendors")
-        or root.get("all_vendors")
-        or root.get("allVendorRequirements")
-        or root.get("all_vendor_requirements")
-        or root.get("appliesToAllVendors")
-        or root.get("applies_to_all_vendors")
-        or {}
-    )
-
-    # Root-level compliance/documents also mean event-wide requirements.
-    _merge_req_bucket(global_bucket, root)
-
-    category_source = root.get("categories") or root.get("categoryRequirements") or root.get("category_requirements") or {}
-    categories: Dict[str, Dict[str, list[Dict[str, Any]]]] = {}
-    if isinstance(category_source, dict):
-        for name, bucket in category_source.items():
-            clean_name = str(name or "").strip()
-            if not clean_name:
-                continue
-            categories[clean_name] = _req_bucket(bucket)
-
-    version = raw.get("version") or root.get("version") or 1
-    try:
-        version = int(version or 1)
-    except Exception:
-        version = 1
-
-    global_bucket = _ensure_event_wide_baseline(global_bucket)
-
-    return {
-        "requirements": {
-            "global": global_bucket,
-            "categories": categories,
-        },
-        "version": version,
-        "updated_at": utc_now_iso(),
-    }
-
-
-def _save_requirements_for_event(event_id: int, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
-    ev = _get_event_row_or_404(db, int(event_id))
-    normalized = _normalize_saved_requirements_payload(payload)
-
-    # File/runtime store remains the requirements store for now, but this route
-    # is the single writer. Applications and public/vendor pages read the same
-    # normalized shape after this save.
-    # Store under both int and string keys because legacy routes have used both
-    # forms over time. This prevents public/vendor reads from seeing an empty
-    # requirement set immediately after an organizer save.
-    _REQUIREMENTS[int(event_id)] = normalized
-    _REQUIREMENTS[str(int(event_id))] = normalized
-
-    store_event = _EVENTS.get(int(event_id), {}) if isinstance(_EVENTS.get(int(event_id)), dict) else {}
-    store_event = {
-        **store_event,
-        "id": int(event_id),
-        "requirements": normalized,
-        "global": normalized.get("requirements", {}).get("global", {}),
-        "categories": normalized.get("requirements", {}).get("categories", {}),
-        "requirements_published": True,
-    }
-    _EVENTS[int(event_id)] = store_event
-    _EVENTS[str(int(event_id))] = store_event
-
-    ev.requirements_published = True
-    db.add(ev)
-    db.commit()
-    save_store()
-
-    return _requirements_payload_for_event(int(event_id), db=db)
-
-
-@router.put("/organizer/events/{event_id}/requirements")
-def put_organizer_event_requirements(
-    event_id: int,
-    payload: Dict[str, Any] = Body(default_factory=dict),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    return _save_requirements_for_event(int(event_id), payload, db)
-
-
-@router.post("/organizer/events/{event_id}/requirements")
-def post_organizer_event_requirements(
-    event_id: int,
-    payload: Dict[str, Any] = Body(default_factory=dict),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    return _save_requirements_for_event(int(event_id), payload, db)
-
-
-@router.put("/events/{event_id}/requirements")
-def put_public_event_requirements(
-    event_id: int,
-    payload: Dict[str, Any] = Body(default_factory=dict),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    return _save_requirements_for_event(int(event_id), payload, db)
-
-
-@router.get("/events/{event_id}/requirements")
-def get_public_event_requirements(event_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return _requirements_payload_for_event(int(event_id), db=db)
-
-
-@router.get("/organizer/events/{event_id}/requirements")
-def get_organizer_event_requirements(event_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    return _requirements_payload_for_event(int(event_id), db=db)
-
-
 @router.get("/public/events")
 def public_list_events(
     limit: int = Query(DEFAULT_PAGE_LIMIT, ge=1, le=MAX_PAGE_LIMIT),
@@ -2643,11 +1490,8 @@ def public_list_events(
 
     out = []
     for event in rows:
-        event_dict = _attach_event_needs(_serialize_event_model(event))
+        event_dict = _serialize_event_model(event)
         event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
-        if int(event_dict.get("booths_total") or event_dict.get("total_booths") or 0) <= 0:
-            event_dict["booths_remaining"] = None
-            event_dict["spots_left"] = None
         out.append(event_dict)
 
     return {
@@ -2972,18 +1816,7 @@ def public_get_event(event_id: int, db: Session = Depends(get_db)):
     event_dict = _serialize_event_model(ev)
     if not _event_is_active_marketplace_event(event_dict):
         raise HTTPException(status_code=404, detail="Event not found")
-
-    event_dict = _attach_event_needs(event_dict)
     event_dict.update(_event_marketplace_stats(event_dict, _APPLICATIONS, db))
-    if event_dict.get("event_mode") == LISTING_ONLY_MODE:
-        _apply_event_mode_aliases(event_dict, LISTING_ONLY_MODE)
-
-    # A new event with no map yet should not be treated as full. If there is no
-    # booth inventory, keep organizer-selected needs visible on the public page.
-    if int(event_dict.get("booths_total") or event_dict.get("total_booths") or 0) <= 0:
-        event_dict["booths_remaining"] = None
-        event_dict["spots_left"] = None
-
     return event_dict
 
 
