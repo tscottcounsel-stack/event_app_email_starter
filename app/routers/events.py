@@ -1041,14 +1041,26 @@ def organizer_patch_event(
 
     # Flyer URLs are store-backed metadata so we can add public flyer support
     # without requiring a database migration.
-    flyer_url = str(
-        (payload or {}).get("flyerImageUrl")
-        or (payload or {}).get("flyer_image_url")
-        or (payload or {}).get("eventFlyerUrl")
-        or (payload or {}).get("event_flyer_url")
-        or ""
-    ).strip()
-    if flyer_url:
+    flyer_keys = (
+        "flyerImageUrl",
+        "flyer_image_url",
+        "eventFlyerUrl",
+        "event_flyer_url",
+    )
+    flyer_supplied = any(key in (payload or {}) for key in flyer_keys)
+
+    if flyer_supplied:
+        flyer_url = str(
+            next(
+                (
+                    (payload or {}).get(key)
+                    for key in flyer_keys
+                    if key in (payload or {})
+                ),
+                "",
+            )
+            or ""
+        ).strip()
         serialized["flyerImageUrl"] = flyer_url
         serialized["flyer_image_url"] = flyer_url
 
