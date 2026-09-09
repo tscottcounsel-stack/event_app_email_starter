@@ -323,6 +323,10 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "cancellation_reason",
         "cancellation_message",
         "canceled_by",
+        "flyerImageUrl",
+        "flyer_image_url",
+        "eventFlyerUrl",
+        "event_flyer_url",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
@@ -1034,6 +1038,20 @@ def organizer_patch_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
+
+    # Flyer URLs are store-backed metadata so we can add public flyer support
+    # without requiring a database migration.
+    flyer_url = str(
+        (payload or {}).get("flyerImageUrl")
+        or (payload or {}).get("flyer_image_url")
+        or (payload or {}).get("eventFlyerUrl")
+        or (payload or {}).get("event_flyer_url")
+        or ""
+    ).strip()
+    if flyer_url:
+        serialized["flyerImageUrl"] = flyer_url
+        serialized["flyer_image_url"] = flyer_url
+
     _sync_event_to_store(serialized, user)
     if bool(ev.published) and not was_published:
         _create_vendor_event_alerts(db, serialized)
