@@ -29,6 +29,7 @@ class Event(Base):
     category = sa.Column(String, nullable=True, index=True)
 
     hero_image_url = sa.Column(String, nullable=True)
+    flyer_image_url = sa.Column(String, nullable=True)
     image_urls = sa.Column(sa.JSON, nullable=False, default=list)
     video_urls = sa.Column(sa.JSON, nullable=False, default=list)
 

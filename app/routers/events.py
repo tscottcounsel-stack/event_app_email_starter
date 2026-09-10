@@ -114,6 +114,7 @@ class EventCreate(BaseModel):
     category: Optional[str] = None
 
     heroImageUrl: Optional[str] = None
+    flyerImageUrl: Optional[str] = None
     imageUrls: Optional[list[str]] = None
     videoUrls: Optional[list[str]] = None
 
@@ -295,6 +296,11 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "google_maps_url": ev.google_maps_url,
         "category": ev.category,
         "heroImageUrl": ev.hero_image_url,
+        "hero_image_url": ev.hero_image_url,
+        "flyerImageUrl": ev.flyer_image_url,
+        "flyer_image_url": ev.flyer_image_url,
+        "eventFlyerUrl": ev.flyer_image_url,
+        "event_flyer_url": ev.flyer_image_url,
         "imageUrls": list(ev.image_urls or []),
         "videoUrls": list(ev.video_urls or []),
         "published": bool(ev.published),
@@ -324,10 +330,6 @@ def _serialize_event_model(ev: Event) -> Dict[str, Any]:
         "cancellation_reason",
         "cancellation_message",
         "canceled_by",
-        "flyerImageUrl",
-        "flyer_image_url",
-        "eventFlyerUrl",
-        "event_flyer_url",
     ):
         if key in store_payload:
             payload[key] = store_payload.get(key)
@@ -438,6 +440,11 @@ def _get_owned_event_or_404(db: Session, event_id: int, user: Dict[str, Any]) ->
 def _apply_event_patch_model(ev: Event, patch: Dict[str, Any]) -> Event:
     alias_map = {
         "heroImageUrl": "hero_image_url",
+        "hero_image_url": "hero_image_url",
+        "flyerImageUrl": "flyer_image_url",
+        "flyer_image_url": "flyer_image_url",
+        "eventFlyerUrl": "flyer_image_url",
+        "event_flyer_url": "flyer_image_url",
         "imageUrls": "image_urls",
         "videoUrls": "video_urls",
     }
@@ -1056,6 +1063,7 @@ def organizer_create_event(
         google_maps_url=payload.google_maps_url,
         category=payload.category,
         hero_image_url=payload.heroImageUrl,
+        flyer_image_url=payload.flyerImageUrl,
         image_urls=list(payload.imageUrls or []),
         video_urls=list(payload.videoUrls or []),
         published=False,
@@ -1100,31 +1108,6 @@ def organizer_patch_event(
     db.commit()
     db.refresh(ev)
     serialized = _serialize_event_model(ev)
-
-    # Flyer URLs are store-backed metadata so we can add public flyer support
-    # without requiring a database migration.
-    flyer_keys = (
-        "flyerImageUrl",
-        "flyer_image_url",
-        "eventFlyerUrl",
-        "event_flyer_url",
-    )
-    flyer_supplied = any(key in (payload or {}) for key in flyer_keys)
-
-    if flyer_supplied:
-        flyer_url = str(
-            next(
-                (
-                    (payload or {}).get(key)
-                    for key in flyer_keys
-                    if key in (payload or {})
-                ),
-                "",
-            )
-            or ""
-        ).strip()
-        serialized["flyerImageUrl"] = flyer_url
-        serialized["flyer_image_url"] = flyer_url
 
     _sync_event_to_store(serialized, user)
     if bool(ev.published) and not was_published:
