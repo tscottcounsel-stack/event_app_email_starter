@@ -17,6 +17,7 @@ from sqlalchemy import func
 
 from app.core.permissions import require_event_limit
 from app.services.flyer_ai import extract_event_from_flyer
+from app.services.application_ai import extract_requirements_from_application
 from app.db import get_db
 from app.models.event import Event
 from app.models.diagram import Diagram
@@ -899,6 +900,67 @@ def organizer_list_events(
     db: Session = Depends(get_db),
 ):
     return {"events": [_serialize_event_model(ev) for ev in _owned_events_for_user(db, user)]}
+
+
+
+@router.post("/organizer/events/ai-extract-application")
+async def organizer_ai_extract_application(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"organizer", "admin"}:
+        raise HTTPException(status_code=403, detail="Organizer access required.")
+
+    filename = os.path.basename(str(file.filename or "vendor-application").strip()) or "vendor-application"
+    ext = Path(filename).suffix.lower()
+    content_type = str(file.content_type or "").strip().lower()
+
+    if ext not in _ALLOWED_FLYER_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a JPG, PNG, WEBP, or PDF application.",
+        )
+
+    if content_type and content_type not in _ALLOWED_FLYER_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a JPG, PNG, WEBP, or PDF application.",
+        )
+
+    try:
+        file_bytes = await file.read(MAX_FLYER_UPLOAD_BYTES + 1)
+    finally:
+        await file.close()
+
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded application is empty.")
+
+    if len(file_bytes) > MAX_FLYER_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Application file must be 10MB or smaller.")
+
+    try:
+        application_draft = await extract_requirements_from_application(
+            file_bytes=file_bytes,
+            filename=filename,
+            content_type=content_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        logger.warning("Application AI extraction unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="VendCore AI could not read this application right now. Please try again or enter the requirements manually.",
+        ) from exc
+    except Exception:
+        logger.exception("Unexpected application AI extraction failure")
+        raise HTTPException(
+            status_code=502,
+            detail="VendCore AI could not read this application. Please try another file or enter the requirements manually.",
+        )
+
+    return {"ok": True, "application": application_draft}
 
 
 @router.post("/organizer/events/ai-extract-flyer")
