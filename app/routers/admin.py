@@ -60,6 +60,139 @@ def _safe_lower(value: Any) -> str:
     return _safe_str(value).lower()
 
 
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text_value = _safe_str(value)
+        if text_value:
+            return text_value
+    return ""
+
+
+def _to_iso_datetime(value: Any) -> str | None:
+    if value in (None, "", 0):
+        return None
+
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+            return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+
+    text_value = _safe_str(value)
+    return text_value or None
+
+
+def _enrich_admin_account(account: Dict[str, Any], profile: Profile | None) -> Dict[str, Any]:
+    """Return an admin-safe account row with profile and subscription identity merged in.
+
+    Auth remains the source of truth for login identity. Profile is used only to enrich
+    the admin view so older accounts that never stored ``full_name`` can still show a
+    contact/display name and business name when that information exists in Postgres.
+    """
+    enriched = dict(account or {})
+    profile_data: Dict[str, Any] = {}
+    if profile is not None and isinstance(getattr(profile, "data", None), dict):
+        profile_data = dict(profile.data or {})
+
+    auth_full_name = _safe_str(enriched.get("full_name"))
+    profile_display_name = _safe_str(getattr(profile, "display_name", None)) if profile is not None else ""
+    profile_business_name = _safe_str(getattr(profile, "business_name", None)) if profile is not None else ""
+
+    contact_name = _first_nonempty(
+        profile_data.get("full_name"),
+        profile_data.get("contact_name"),
+        profile_data.get("contactName"),
+        profile_data.get("owner_name"),
+        profile_data.get("ownerName"),
+        profile_data.get("primary_contact"),
+        profile_data.get("primaryContact"),
+    )
+
+    business_name = _first_nonempty(
+        profile_business_name,
+        profile_data.get("business_name"),
+        profile_data.get("businessName"),
+        profile_data.get("company_name"),
+        profile_data.get("companyName"),
+        profile_data.get("organization_name"),
+        profile_data.get("organizationName"),
+    )
+
+    # Prefer a real person/contact name. Profile display_name is the final profile
+    # identity fallback because older rows sometimes stored the contact there.
+    full_name = _first_nonempty(auth_full_name, contact_name, profile_display_name)
+    display_name = _first_nonempty(full_name, business_name, enriched.get("username"), enriched.get("email"))
+
+    profile_plan = _first_nonempty(
+        getattr(profile, "subscription_plan", None) if profile is not None else None,
+        profile_data.get("subscription_plan"),
+        profile_data.get("subscriptionPlan"),
+        profile_data.get("plan"),
+    )
+    profile_status = _first_nonempty(
+        getattr(profile, "subscription_status", None) if profile is not None else None,
+        profile_data.get("subscription_status"),
+        profile_data.get("subscriptionStatus"),
+    )
+
+    plan = _first_nonempty(
+        enriched.get("subscription_plan"),
+        enriched.get("subscriptionPlan"),
+        enriched.get("plan"),
+        profile_plan,
+        "starter",
+    ).lower()
+    subscription_status = _first_nonempty(
+        enriched.get("subscription_status"),
+        enriched.get("subscriptionStatus"),
+        profile_status,
+        "inactive",
+    ).lower()
+
+    current_period_end = _first_nonempty(
+        enriched.get("current_period_end"),
+        enriched.get("currentPeriodEnd"),
+        profile_data.get("current_period_end"),
+        profile_data.get("currentPeriodEnd"),
+    )
+    cancel_at_period_end = bool(
+        enriched.get("cancel_at_period_end")
+        or enriched.get("cancelAtPeriodEnd")
+        or profile_data.get("cancel_at_period_end")
+        or profile_data.get("cancelAtPeriodEnd")
+    )
+
+    is_paid_plan = plan not in {"", "starter", "free", "inactive"}
+    is_active_subscription = subscription_status in {"active", "trialing", "paid", "current"}
+
+    enriched.update(
+        {
+            "full_name": full_name or None,
+            "display_name": display_name or None,
+            "business_name": business_name or None,
+            "subscription_plan": plan,
+            "subscription_status": subscription_status,
+            "current_period_end": _to_iso_datetime(current_period_end),
+            "cancel_at_period_end": cancel_at_period_end,
+            "is_subscriber": bool(is_paid_plan and is_active_subscription),
+            "joined_at": _to_iso_datetime(enriched.get("created_at")),
+        }
+    )
+
+    # Stripe identifiers are useful for admin support, but never expose secrets.
+    for key in ("stripe_customer_id", "stripe_subscription_id"):
+        if not enriched.get(key) and profile_data.get(key):
+            enriched[key] = profile_data.get(key)
+
+    return enriched
+
+
 def _account_identity(account: Dict[str, Any]) -> Tuple[str, str, str]:
     return (
         _safe_lower(account.get("email")),
@@ -512,9 +645,34 @@ async def admin_dashboard(user: dict = Depends(require_admin)):
 
 
 @router.get("/accounts")
-async def admin_accounts(user: dict = Depends(require_admin)):
+async def admin_accounts(
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     accounts = list_all_users()
-    return {"accounts": accounts}
+
+    profile_map: Dict[Tuple[str, str], Profile] = {}
+    try:
+        # Newest row wins if an older deployment left duplicate profile rows.
+        profiles = db.query(Profile).order_by(Profile.updated_at.desc()).all()
+        for profile in profiles:
+            email = _safe_lower(getattr(profile, "email", None))
+            role = _safe_lower(getattr(profile, "role", None))
+            if email and role and (role, email) not in profile_map:
+                profile_map[(role, email)] = profile
+    except Exception as exc:
+        # Account management must still work even if profile enrichment fails.
+        db.rollback()
+        print(f"⚠️ Admin account profile enrichment skipped: {exc}")
+
+    enriched_accounts: List[Dict[str, Any]] = []
+    for account in accounts:
+        email = _safe_lower(account.get("email"))
+        role = _safe_lower(account.get("role"))
+        profile = profile_map.get((role, email))
+        enriched_accounts.append(_enrich_admin_account(account, profile))
+
+    return {"accounts": enriched_accounts}
 
 
 @router.post("/accounts")
