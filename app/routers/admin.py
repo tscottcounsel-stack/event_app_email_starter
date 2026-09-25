@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from app.routers.auth import (
     admin_create_user,
     admin_delete_user,
+    admin_update_user,
     get_current_user,
     list_all_users,
 )
@@ -29,6 +30,15 @@ class AdminAccountCreateRequest(BaseModel):
     role: str
     full_name: str | None = None
     username: str | None = None
+
+
+class AdminAccountUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    full_name: str | None = None
+    business_name: str | None = None
+    email: str | None = None
+    role: str | None = None
 
 
 def require_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -756,6 +766,107 @@ async def admin_accounts_create(
         username=payload.username,
     )
     return {"ok": True, "account": account}
+
+
+@router.patch("/accounts/{user_key}")
+async def admin_accounts_update(
+    user_key: str,
+    payload: AdminAccountUpdateRequest,
+    user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    account = _resolve_admin_delete_account(user_key)
+
+    target_id = int(account.get("id") or 0)
+    email = _safe_lower(account.get("email"))
+    role = _safe_lower(account.get("role"))
+
+    requested_email = _safe_lower(payload.email)
+    requested_role = _safe_lower(payload.role)
+
+    if requested_email and requested_email != email:
+        raise HTTPException(
+            status_code=400,
+            detail="Email cannot be changed from Edit Account because it is linked to other VendCore records.",
+        )
+    if requested_role and requested_role != role:
+        raise HTTPException(
+            status_code=400,
+            detail="Role cannot be changed from Edit Account because it is linked to other VendCore records.",
+        )
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Account does not have a valid user id.")
+
+    updated_account = admin_update_user(target_id, full_name=payload.full_name)
+
+    profile = None
+    if role in {"vendor", "organizer"} and email:
+        profile = (
+            db.query(Profile)
+            .filter(func.lower(Profile.email) == email, Profile.role == role)
+            .order_by(Profile.updated_at.desc())
+            .first()
+        )
+
+        if profile is None:
+            profile = Profile(
+                email=email,
+                role=role,
+                display_name=None,
+                business_name=None,
+                categories=[],
+                data={"email": email},
+                verified=False,
+                featured=False,
+                promoted=False,
+            )
+            db.add(profile)
+
+        data = dict(profile.data or {})
+
+        if payload.full_name is not None:
+            full_name = _safe_str(payload.full_name)
+            profile.display_name = full_name or None
+            data["contact_name"] = full_name
+            data["contactName"] = full_name
+            data["full_name"] = full_name
+
+        if payload.business_name is not None:
+            business_name = _safe_str(payload.business_name)
+            profile.business_name = business_name or None
+            data["business_name"] = business_name
+            data["businessName"] = business_name
+            if role == "organizer":
+                data["organizationName"] = business_name
+
+        data["email"] = email
+        profile.data = data
+
+        try:
+            db.commit()
+            db.refresh(profile)
+        except Exception:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Unable to update the linked profile.")
+
+        if role == "vendor":
+            vendors = getattr(store_module, "_VENDORS", None)
+            if isinstance(vendors, dict):
+                legacy = vendors.get(email)
+                if isinstance(legacy, dict):
+                    if payload.full_name is not None:
+                        full_name = _safe_str(payload.full_name)
+                        legacy["contact_name"] = full_name
+                        legacy["contactName"] = full_name
+                    if payload.business_name is not None:
+                        business_name = _safe_str(payload.business_name)
+                        legacy["business_name"] = business_name
+                        legacy["businessName"] = business_name
+                    legacy["updated_at"] = utc_now_iso()
+                    save_store()
+
+    enriched = _enrich_admin_account(updated_account, profile)
+    return {"ok": True, "account": enriched}
 
 
 def _resolve_admin_delete_account(user_key: str) -> Dict[str, Any]:

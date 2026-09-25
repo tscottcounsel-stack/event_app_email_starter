@@ -811,6 +811,26 @@ def admin_delete_user(user_id: int) -> Dict[str, Any]:
     return _serialize_user(user)
 
 
+def admin_update_user(
+    user_id: int,
+    *,
+    full_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update admin-managed account identity fields safely."""
+    uid = int(user_id)
+    user = _USERS.get(uid)
+    if not isinstance(user, dict):
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if full_name is not None:
+        cleaned_name = str(full_name or "").strip()
+        user["full_name"] = cleaned_name or None
+
+    user["updated_at"] = int(time.time())
+    _persist_users()
+    return _serialize_user(user)
+
+
 
 def _profile_subscription_snapshot(email: str, role: str) -> Dict[str, Any]:
     normalized_email = _norm(email)
