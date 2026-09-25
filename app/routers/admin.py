@@ -68,6 +68,56 @@ def _first_nonempty(*values: Any) -> str:
     return ""
 
 
+def _same_identity_text(left: Any, right: Any) -> bool:
+    left_text = _safe_lower(left)
+    right_text = _safe_lower(right)
+    return bool(left_text and right_text and left_text == right_text)
+
+
+def _legacy_vendor_contact_name(email: Any, business_name: Any = "") -> str:
+    normalized_email = _safe_lower(email)
+    if not normalized_email:
+        return ""
+
+    legacy_vendors = getattr(store_module, "_VENDORS", {})
+    candidates: List[Dict[str, Any]] = []
+
+    direct = legacy_vendors.get(normalized_email) if hasattr(legacy_vendors, "get") else None
+    if isinstance(direct, dict):
+        candidates.append(direct)
+
+    if hasattr(legacy_vendors, "items"):
+        for key, row in legacy_vendors.items():
+            if not isinstance(row, dict):
+                continue
+            row_email = _safe_lower(row.get("email") or key)
+            if row_email == normalized_email and row not in candidates:
+                candidates.append(row)
+
+    for row in candidates:
+        legacy_business = _first_nonempty(
+            row.get("business_name"),
+            row.get("businessName"),
+            row.get("company_name"),
+            row.get("companyName"),
+            business_name,
+        )
+        for value in (
+            row.get("contact_name"),
+            row.get("contactName"),
+            row.get("full_name"),
+            row.get("owner_name"),
+            row.get("ownerName"),
+            row.get("primary_contact"),
+            row.get("primaryContact"),
+        ):
+            name = _safe_str(value)
+            if name and not _same_identity_text(name, legacy_business):
+                return name
+
+    return ""
+
+
 def _to_iso_datetime(value: Any) -> str | None:
     if value in (None, "", 0):
         return None
@@ -124,9 +174,27 @@ def _enrich_admin_account(account: Dict[str, Any], profile: Profile | None) -> D
         profile_data.get("organizationName"),
     )
 
-    # Prefer a real person/contact name. Profile display_name is the final profile
-    # identity fallback because older rows sometimes stored the contact there.
-    full_name = _first_nonempty(auth_full_name, contact_name, profile_display_name)
+    legacy_contact_name = ""
+    if _safe_lower(enriched.get("role")) == "vendor":
+        legacy_contact_name = _legacy_vendor_contact_name(enriched.get("email"), business_name)
+
+    # Prefer a real person/contact name. Older vendor rows sometimes used
+    # Profile.display_name for the business name, so only treat it as a person
+    # when it differs from business_name.
+    safe_profile_display_name = profile_display_name
+    if _same_identity_text(safe_profile_display_name, business_name):
+        safe_profile_display_name = ""
+
+    safe_contact_name = contact_name
+    if _same_identity_text(safe_contact_name, business_name):
+        safe_contact_name = ""
+
+    full_name = _first_nonempty(
+        auth_full_name,
+        safe_contact_name,
+        legacy_contact_name,
+        safe_profile_display_name,
+    )
     display_name = _first_nonempty(full_name, business_name, enriched.get("username"), enriched.get("email"))
 
     profile_plan = _first_nonempty(

@@ -245,6 +245,98 @@ def _safe_list_of_str(value: Any) -> List[str]:
     return []
 
 
+def _same_identity_text(left: Any, right: Any) -> bool:
+    left_text = _safe_str(left).lower()
+    right_text = _safe_str(right).lower()
+    return bool(left_text and right_text and left_text == right_text)
+
+
+def _legacy_vendor_contact_name(email: Any) -> str:
+    """Best-effort recovery of an older vendor contact name from the legacy store."""
+    normalized_email = _safe_str(email).lower()
+    if not normalized_email:
+        return ""
+
+    candidates: List[Dict[str, Any]] = []
+    direct = _VENDORS.get(normalized_email) if hasattr(_VENDORS, "get") else None
+    if isinstance(direct, dict):
+        candidates.append(direct)
+
+    if hasattr(_VENDORS, "items"):
+        for key, row in _VENDORS.items():
+            if not isinstance(row, dict):
+                continue
+            row_email = _safe_str(row.get("email") or key).lower()
+            if row_email == normalized_email and row not in candidates:
+                candidates.append(row)
+
+    for row in candidates:
+        business_name = _safe_str(
+            row.get("business_name")
+            or row.get("businessName")
+            or row.get("company_name")
+            or row.get("companyName")
+        )
+        for value in (
+            row.get("contact_name"),
+            row.get("contactName"),
+            row.get("full_name"),
+            row.get("owner_name"),
+            row.get("ownerName"),
+            row.get("primary_contact"),
+            row.get("primaryContact"),
+        ):
+            contact = _safe_str(value)
+            if contact and not _same_identity_text(contact, business_name):
+                return contact
+
+    return ""
+
+
+def _recover_vendor_contact_name(
+    *,
+    vendor: Dict[str, Any] | None = None,
+    user: Dict[str, Any] | None = None,
+    explicit_contact_name: Any = "",
+    email: Any = "",
+) -> str:
+    """Resolve a real person/contact name without mistaking the business name for it."""
+    vendor = vendor or {}
+    user = user or {}
+    business_name = _safe_str(
+        vendor.get("business_name")
+        or vendor.get("businessName")
+        or vendor.get("company_name")
+        or vendor.get("companyName")
+    )
+
+    explicit = _safe_str(explicit_contact_name)
+    if explicit:
+        return explicit
+
+    for value in (
+        user.get("full_name"),
+        user.get("name"),
+        user.get("display_name"),
+        vendor.get("contact_name"),
+        vendor.get("contactName"),
+        vendor.get("full_name"),
+        vendor.get("owner_name"),
+        vendor.get("ownerName"),
+        vendor.get("primary_contact"),
+        vendor.get("primaryContact"),
+    ):
+        contact = _safe_str(value)
+        if contact and not _same_identity_text(contact, business_name):
+            return contact
+
+    legacy_contact = _legacy_vendor_contact_name(email or vendor.get("email"))
+    if legacy_contact and not _same_identity_text(legacy_contact, business_name):
+        return legacy_contact
+
+    return ""
+
+
 
 
 def _normalize_vendor_offerings(raw: Any) -> List[Dict[str, Any]]:
@@ -436,13 +528,26 @@ def _profile_row_to_vendor(row: Profile) -> Dict[str, Any]:
     data = dict(row.data or {})
     email = _safe_str(row.email).lower()
 
+    business_name = _safe_str(
+        data.get("business_name")
+        or data.get("businessName")
+        or row.business_name
+        or ""
+    )
+    stored_contact_name = _safe_str(data.get("contact_name") or data.get("contactName"))
+    row_display_name = _safe_str(row.display_name)
+
+    contact_name = stored_contact_name
+    if not contact_name and row_display_name and not _same_identity_text(row_display_name, business_name):
+        contact_name = row_display_name
+
     vendor = {
         **data,
         "email": email,
         "vendor_id": data.get("vendor_id") or email,
-        "business_name": data.get("business_name") or data.get("businessName") or row.business_name or "",
-        "businessName": data.get("businessName") or row.business_name or "",
-        "contact_name": data.get("contact_name") or data.get("contactName") or row.display_name or "",
+        "business_name": business_name,
+        "businessName": data.get("businessName") or business_name,
+        "contact_name": contact_name,
         "city": data.get("city") or row.city or "",
         "state": data.get("state") or row.state or "",
         "categories": data.get("categories") or row.categories or [],
@@ -491,7 +596,21 @@ def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, A
         or data.get("organizationName")
         or data.get("name")
     )
-    display_name = _safe_str(data.get("contact_name") or data.get("contactName") or name)
+
+    existing_data = dict(row.data or {})
+    existing_contact_name = _safe_str(
+        existing_data.get("contact_name")
+        or existing_data.get("contactName")
+    )
+    if not existing_contact_name:
+        current_display_name = _safe_str(row.display_name)
+        if current_display_name and not _same_identity_text(current_display_name, name or row.business_name):
+            existing_contact_name = current_display_name
+
+    incoming_contact_name = _safe_str(data.get("contact_name") or data.get("contactName"))
+    resolved_contact_name = incoming_contact_name or existing_contact_name
+    display_name = resolved_contact_name or _safe_str(row.display_name) or name
+
     categories = data.get("categories") or data.get("vendor_categories") or []
     if not isinstance(categories, list):
         categories = [str(categories)] if categories else []
@@ -523,8 +642,14 @@ def _upsert_profile_row(db: Session, *, email: str, role: str, data: Dict[str, A
         public_status = "renewal_pending" if verification_status in {"pending", "renewal_pending"} else "not_verified"
         public_label = "Renewal pending" if public_status == "renewal_pending" else "Not verified"
 
-    existing_data = dict(row.data or {})
     merged_data = {**existing_data, **dict(data or {}), "email": email, "vendor_id": data.get("vendor_id") or existing_data.get("vendor_id") or email}
+
+    if resolved_contact_name:
+        merged_data["contact_name"] = resolved_contact_name
+        merged_data["contactName"] = resolved_contact_name
+    elif existing_contact_name:
+        merged_data["contact_name"] = existing_contact_name
+        merged_data["contactName"] = existing_contact_name
 
     if any(key in data for key in ("video_urls", "videoUrls", "videos")):
         canonical_video_urls = _canonical_video_urls_from_data(dict(data or {}))
@@ -1544,9 +1669,15 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: 
     key = _user_vendor_key(user)
     vendor = _load_vendor_from_db(db, key) or {}
     if not vendor:
+        recovered_contact_name = _recover_vendor_contact_name(
+            vendor={},
+            user=user,
+            email=key,
+        )
         _upsert_profile_row(db, email=key, role="vendor", data={
             "vendor_id": key,
             "email": key,
+            "contact_name": recovered_contact_name,
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
             "verification_status": "unverified",
@@ -1557,6 +1688,22 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: 
             "subscription_status": "inactive",
         })
         vendor = _load_vendor_from_db(db, key) or {"vendor_id": key, "email": key}
+    else:
+        recovered_contact_name = _recover_vendor_contact_name(
+            vendor=vendor,
+            user=user,
+            email=key,
+        )
+        if recovered_contact_name and not _safe_str(vendor.get("contact_name")):
+            repaired = {
+                **vendor,
+                "contact_name": recovered_contact_name,
+                "contactName": recovered_contact_name,
+                "updated_at": _now_iso(),
+            }
+            _upsert_profile_row(db, email=key, role="vendor", data=repaired)
+            vendor = _load_vendor_from_db(db, key) or repaired
+
     return _vendor_payload_with_schedule(key, vendor)
 
 
@@ -1569,6 +1716,18 @@ def save_my_vendor_profile(
     key = _user_vendor_key(user)
     existing = _load_vendor_from_db(db, key) or {}
     mapped = _map_payload(payload.model_dump())
+
+    recovered_contact_name = _recover_vendor_contact_name(
+        vendor=existing,
+        user=user,
+        explicit_contact_name=mapped.get("contact_name"),
+        email=key,
+    )
+    if recovered_contact_name:
+        mapped["contact_name"] = recovered_contact_name
+        mapped["contactName"] = recovered_contact_name
+    else:
+        mapped.pop("contact_name", None)
 
     updated = {**existing, **mapped}
     canonical_video_urls = _normalize_video_urls(mapped.get("video_urls"), mapped.get("videoUrls"), mapped.get("videos"))
