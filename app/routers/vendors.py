@@ -996,6 +996,20 @@ def _vendor_payload_with_schedule(vendor_key: str, vendor: Dict[str, Any]) -> Di
     payload["upcomingEvents"] = upcoming_events
     return payload
 
+
+def _vendor_self_payload_with_schedule(vendor_key: str, vendor: Dict[str, Any]) -> Dict[str, Any]:
+    """Authenticated owner profile payload.
+
+    Public vendor responses intentionally strip contact_name. The vendor editing
+    screen needs that private field so the owner can view/update the real contact
+    person separately from the business name.
+    """
+    payload = _vendor_payload_with_schedule(vendor_key, vendor)
+    contact_name = _safe_str(vendor.get("contact_name") or vendor.get("contactName"))
+    payload["contact_name"] = contact_name
+    payload["contactName"] = contact_name
+    return payload
+
 def _is_paid_status(value: Any) -> bool:
     return _safe_lower(value) in {"paid", "succeeded", "complete", "completed"}
 
@@ -1704,7 +1718,7 @@ def get_my_vendor_profile(user: Dict[str, Any] = Depends(get_current_user), db: 
             _upsert_profile_row(db, email=key, role="vendor", data=repaired)
             vendor = _load_vendor_from_db(db, key) or repaired
 
-    return _vendor_payload_with_schedule(key, vendor)
+    return _vendor_self_payload_with_schedule(key, vendor)
 
 
 @router.post("/me")
@@ -1752,7 +1766,7 @@ def save_my_vendor_profile(
     updated = _load_vendor_from_db(db, key) or updated
     _sync_vendor_category_to_applications(key, updated)
 
-    return _vendor_payload_with_schedule(key, updated)
+    return _vendor_self_payload_with_schedule(key, updated)
 
 
 @router.get("/me/external-events")
